@@ -299,7 +299,42 @@
   animation: pulse-dot 1.6s ease-in-out infinite;
 }
 
+/* Mobile navigation drawer slide-in. Written out here because the project does
+   not carry the tailwindcss-animate plugin, so `animate-in` / `slide-in-from-*`
+   utilities do not resolve. */
+@keyframes drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+.drawer-in {
+  animation: drawer-in 0.2s ease-out;
+}
+
 /* Mono code block style */
 .mono {
   font-family: var(--font-mono);
+}
+
+/* Respect the OS "reduce motion" setting: WCAG 2.2.2 asks for a way to stop
+   looping animation, and the connection dot pulses indefinitely. Motion is
+   decorative throughout the dashboard, so it is safe to drop entirely rather
+   than substitute a reduced variant. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .pulse-dot {
+    animation: none;
+    opacity: 1;
+  }
 }

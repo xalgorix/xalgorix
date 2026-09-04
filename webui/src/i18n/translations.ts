@@ -62,6 +62,7 @@ const en: Dict = {
   "sidebar.github": "GitHub",
   "sidebar.githubTitle": "View Xalgorix on GitHub",
   "sidebar.securityScanner": "security scanner",
+  "sidebar.navigation": "Main navigation",
 
   // Topbar
   "topbar.searchLong": "Search scans, findings, actions…",
@@ -272,6 +273,7 @@ const zhCN: Dict = {
   "sidebar.github": "GitHub",
   "sidebar.githubTitle": "在 GitHub 上查看 Xalgorix",
   "sidebar.securityScanner": "安全扫描器",
+  "sidebar.navigation": "主导航",
 
   // Topbar
   "topbar.searchLong": "搜索扫描、漏洞、操作…",

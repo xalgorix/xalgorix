@@ -8,7 +8,15 @@ import { useStatus, useInstances, useStopAll } from "@/api/queries";
 import { useCommandPalette } from "@/components/command-palette";
 import { useI18n } from "@/i18n";
 
-export function Topbar({ onMenuToggle }: { onMenuToggle?: () => void }) {
+export function Topbar({
+  onMenuToggle,
+  menuOpen = false,
+  menuControls,
+}: {
+  onMenuToggle?: () => void;
+  menuOpen?: boolean;
+  menuControls?: string;
+}) {
   const { t } = useI18n();
   const { data: status } = useStatus();
   const { data: instances } = useInstances();
@@ -28,6 +36,8 @@ export function Topbar({ onMenuToggle }: { onMenuToggle?: () => void }) {
         onClick={onMenuToggle}
         className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground md:hidden"
         aria-label={t("topbar.toggleMenu")}
+        aria-expanded={menuOpen}
+        aria-controls={menuControls}
       >
         <Menu className="h-5 w-5" />
       </button>
