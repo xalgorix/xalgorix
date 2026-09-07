@@ -224,10 +224,8 @@ func realScan(instruction string) bench.ScanFunc {
 		if err != nil {
 			return nil, err
 		}
-		if err := os.Chmod(scanDir, 0o750); err != nil {
-			_ = os.RemoveAll(scanDir)
-			return nil, err
-		}
+		// os.MkdirTemp creates this directory with mode 0700. Keep that private
+		// default because benchmark evidence can include sensitive target data.
 		defer func() { _ = os.RemoveAll(scanDir) }()
 		sc := scanctx.New(scanID, scanDir)
 		scanctx.Activate(sc)

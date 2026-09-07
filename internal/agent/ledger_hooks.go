@@ -231,13 +231,10 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 	}
 }
 
-// testingHypotheses returns claimed hypotheses that an agent has not closed.
-// A completed delegation must never strand work in the shared ledger and let
-// the coordinator mistake collection of its prose result for lane completion.
-func testingHypotheses(l *scanctx.LedgerStore) []string {
-	return testingHypothesesForOwner(l, "")
-}
-
+// testingHypothesesForOwner returns claimed hypotheses that an agent has not
+// closed. A completed delegation must never strand work in the shared ledger
+// and let the coordinator mistake collection of its prose result for lane
+// completion.
 func testingHypothesesForOwner(l *scanctx.LedgerStore, owner string) []string {
 	if l == nil {
 		return nil
