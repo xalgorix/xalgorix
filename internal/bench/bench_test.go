@@ -352,6 +352,10 @@ func TestHarnessMaterializesSourceFiles(t *testing.T) {
 	if seen["bench-whitebox-cmdi"] == "" {
 		t.Fatal("whitebox-cmdi must receive a non-empty, materialized source dir")
 	}
+	localTempPrefix := filepath.Clean(TempRoot) + string(os.PathSeparator)
+	if got := filepath.Clean(seen["bench-whitebox-cmdi"]); !strings.HasPrefix(got, localTempPrefix) {
+		t.Fatalf("whitebox source must be materialized below project tmp/, got %q", got)
+	}
 	if seen["bench-reflected-xss"] != "" {
 		t.Fatalf("a black-box challenge must receive an empty source dir, got %q", seen["bench-reflected-xss"])
 	}

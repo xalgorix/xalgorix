@@ -456,6 +456,22 @@ func TestNoteStore_SetPersistPathEmpty(t *testing.T) {
 	ns.Set("k", "v")      // should not panic or write anywhere
 }
 
+func TestScanContextTargetsAreCopied(t *testing.T) {
+	sc := New("targets-test", "")
+	input := []string{" https://one.example ", "", "https://two.example"}
+	sc.SetTargets(input)
+	input[0] = "mutated"
+
+	got := sc.Targets()
+	if len(got) != 2 || got[0] != "https://one.example" || got[1] != "https://two.example" {
+		t.Fatalf("Targets() = %#v, want trimmed defensive copy", got)
+	}
+	got[0] = "mutated-again"
+	if again := sc.Targets(); again[0] != "https://one.example" {
+		t.Fatalf("Targets leaked caller mutation: %#v", again)
+	}
+}
+
 // ══════════════════════════════════════════════════════════
 // TerminalState
 // ══════════════════════════════════════════════════════════

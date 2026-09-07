@@ -14,7 +14,10 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
-const DefaultMaxConcurrentAgents = 3
+const (
+	DefaultMaxConcurrentAgents = 3
+	DefaultWaitTimeout         = 30 * time.Second
+)
 
 // AgentRunner runs one delegated agent. agentID is the graph ID exposed to the
 // coordinator; event forwarders use it to attach partial results to the right
@@ -50,9 +53,13 @@ type Graph struct {
 	mu      sync.Mutex
 	stopped bool
 	counter uint64
-	agents  map[string]*subAgentState
-	slots   chan struct{}
-	wg      sync.WaitGroup
+	// delegated is a lifetime budget, not a concurrency counter. Keeping it
+	// separate from slots prevents a coordinator from launching another wave
+	// after the first specialists finish and consuming the scan deadline.
+	delegated int
+	agents    map[string]*subAgentState
+	slots     chan struct{}
+	wg        sync.WaitGroup
 }
 
 // New creates a scan-scoped graph with the production concurrency limit.
@@ -60,7 +67,9 @@ func New(parent context.Context, runner AgentRunner) *Graph {
 	return NewWithLimit(parent, DefaultMaxConcurrentAgents, runner)
 }
 
-// NewWithLimit is exported for deterministic tests and advanced embedders.
+// NewWithLimit bounds both concurrent and total delegated agents. A single
+// bounded wave keeps specialists complementary and gives the coordinator time
+// to integrate their evidence before the root scan deadline.
 func NewWithLimit(parent context.Context, maxAgents int, runner AgentRunner) *Graph {
 	if parent == nil {
 		parent = context.Background()
@@ -86,7 +95,7 @@ func NewWithLimit(parent context.Context, maxAgents int, runner AgentRunner) *Gr
 func (g *Graph) Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
 		Name:        "create_agent",
-		Description: "Create and run a focused sub-agent synchronously. The call returns only after the delegated work completes.",
+		Description: fmt.Sprintf("Create and run a focused sub-agent synchronously. The call returns only after the delegated work completes. At most %d delegated agents may be created during the entire scan.", g.maxAgents),
 		Parameters: []tools.Parameter{
 			{Name: "name", Description: "Short specialist role name", Required: true},
 			{Name: "task", Description: "Bounded task, expected evidence, and stopping condition", Required: true},
@@ -97,7 +106,7 @@ func (g *Graph) Register(r *tools.Registry) {
 
 	r.Register(&tools.Tool{
 		Name:        "spawn_agent",
-		Description: fmt.Sprintf("Spawn a focused sub-agent asynchronously. Returns an agent_id immediately; use check_agent or wait_agent to collect its result. At most %d delegated agents run at once.", g.maxAgents),
+		Description: fmt.Sprintf("Spawn a focused sub-agent asynchronously. Returns an agent_id immediately; use check_agent or wait_agent to collect its result. At most %d delegated agents may be created during the entire scan; use one non-overlapping wave.", g.maxAgents),
 		Parameters: []tools.Parameter{
 			{Name: "name", Description: "Short specialist role name", Required: true},
 			{Name: "task", Description: "Bounded task, expected evidence, and stopping condition", Required: true},
@@ -120,7 +129,7 @@ func (g *Graph) Register(r *tools.Registry) {
 		Description: "Wait for a delegated agent to complete or fail, then collect its result.",
 		Parameters: []tools.Parameter{
 			{Name: "agent_id", Description: "ID returned by spawn_agent", Required: true},
-			{Name: "timeout", Description: "Seconds to wait (default 600, maximum 3600)", Required: false},
+			{Name: "timeout", Description: "Seconds to wait (default 30, maximum 3600)", Required: false},
 		},
 		Execute: g.waitAgent,
 	})
@@ -144,13 +153,13 @@ func (g *Graph) validateArgs(args map[string]string) (string, string, []string, 
 
 func (g *Graph) tryAcquire() bool {
 	g.mu.Lock()
-	stopped := g.stopped
-	g.mu.Unlock()
-	if stopped || g.ctx.Err() != nil {
+	defer g.mu.Unlock()
+	if g.stopped || g.ctx.Err() != nil || g.delegated >= g.maxAgents {
 		return false
 	}
 	select {
 	case g.slots <- struct{}{}:
+		g.delegated++
 		return true
 	default:
 		return false
@@ -162,6 +171,16 @@ func (g *Graph) release() { <-g.slots }
 func (g *Graph) capacityResult(action string) tools.Result {
 	if g.ctx.Err() != nil {
 		return tools.Result{Output: "Cannot " + action + ": the parent scan is stopping."}
+	}
+	g.mu.Lock()
+	delegated := g.delegated
+	stopped := g.stopped
+	g.mu.Unlock()
+	if stopped {
+		return tools.Result{Output: "Cannot " + action + ": the parent scan is stopping."}
+	}
+	if delegated >= g.maxAgents {
+		return tools.Result{Output: fmt.Sprintf("Cannot %s: delegation budget exhausted (%d/%d total agents already created). Integrate the existing specialist evidence and finish the remaining root work directly; do not start another wave.", action, delegated, g.maxAgents)}
 	}
 	return tools.Result{Output: fmt.Sprintf("Cannot %s: %d/%d delegated agents are already running. Collect or wait for one before delegating more.\nRunning agents:\n%s", action, g.RunningCount(), g.maxAgents, g.listRunningAgents())}
 }
@@ -381,7 +400,7 @@ func (g *Graph) waitAgent(args map[string]string) (tools.Result, error) {
 		return renderSnapshot(state), nil
 	}
 
-	timeout := 600 * time.Second
+	timeout := DefaultWaitTimeout
 	if raw := strings.TrimSpace(args["timeout"]); raw != "" {
 		seconds, err := strconv.Atoi(raw)
 		if err != nil || seconds < 0 {
@@ -419,6 +438,17 @@ func (g *Graph) waitAgent(args map[string]string) (tools.Result, error) {
 		}
 		return tools.Result{Output: fmt.Sprintf("Parent scan stopped while waiting for agent %q.", agentID)}, nil
 	}
+}
+
+// DelegationCount returns the number of agents created over this graph's
+// lifetime, including already-completed synchronous and asynchronous workers.
+func (g *Graph) DelegationCount() int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.delegated
 }
 
 // AddPartialResult attaches streaming evidence to the coordinator-visible ID.

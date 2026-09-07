@@ -60,21 +60,21 @@ var defaultSpecialistProfiles = []specialistProfile{
 		Focus:            "Authorization, access control, and business-logic abuse",
 		VulnClasses:      []string{"idor", "bola", "bfla", "privilege-escalation", "auth-bypass", "business-logic"},
 		EvidenceContract: "a baseline request as the legitimate role AND the same request as another/lower-privileged role, showing a concrete cross-role difference (cross-user/cross-tenant data or a state-changing action) — the authz_matrix tool produces this differential automatically across role A / role B / anonymous",
-		StoppingRule:     "stop once a cross-role difference is proven, or reject with the baseline when both roles behave identically across the object/action set",
+		StoppingRule:     "do not stop after the first finding; exhaust every assigned object/action and role boundary, report each distinct proven failure, reject each safe hypothesis with its baseline, and finish only when no assigned queued/testing hypothesis remains",
 	},
 	{
 		Role:             "injection-serverside",
 		Focus:            "Injection and server-side behavior",
-		VulnClasses:      []string{"sqli", "blind-sqli", "nosqli", "ssti", "cmdi", "ssrf", "xxe", "lfi", "deserialization"},
+		VulnClasses:      []string{"sqli", "blind-sqli", "nosqli", "ssti", "cmdi", "ssrf", "xxe", "lfi", "path_traversal", "deserialization"},
 		EvidenceContract: "a concrete exploitation outcome — extracted data, command/template output, or an out-of-band (interactsh/OAST) callback for blind classes — not merely a reflected payload or a timing hunch",
-		StoppingRule:     "stop after one class is proven on an endpoint with a reproducible PoC, or reject when control payloads confirm the input is safely handled",
+		StoppingRule:     "do not stop after the first finding; exhaust every assigned endpoint × class hypothesis, report each distinct proven issue, reject each safe hypothesis with its control, and finish only when no assigned queued/testing hypothesis remains",
 	},
 	{
 		Role:             "client-source",
 		Focus:            "Client/API surface, and source-to-sink data flow when source is available",
 		VulnClasses:      []string{"xss", "dom-xss", "csrf", "open-redirect", "cors", "secret-exposure", "api-auth"},
 		EvidenceContract: "for XSS/DOM: browser-confirmed script execution, not just reflection (confirm with browser_action command=verify_xss using a unique nonce); for source review: an attacker-input→sensitive-sink path plus a live request that exercises it",
-		StoppingRule:     "stop after browser-confirmed execution or a proven source-to-sink path; reject when output encoding / framework defenses demonstrably block the vector",
+		StoppingRule:     "do not stop after the first finding; exhaust every assigned client/API/source hypothesis, report each distinct proven issue, reject each defended path with evidence, and finish only when no assigned queued/testing hypothesis remains",
 	},
 }
 
@@ -103,8 +103,9 @@ Specialist roles (use these exact roles and hold each to its evidence contract):
 	b.WriteString(`
 Drive the work from the shared hypothesis ledger so specialists never overlap:
 - Call read_ledger(filter=schedulable) to see the open hypotheses.
-- Give each specialist a DISJOINT lane by vuln class, and have it call claim_next_hypothesis(vuln_class=<its class>) to atomically take the top hypothesis in its lane — this assigns ownership and moves it to testing in one step, so two specialists can never grab the same target. (Use update_hypothesis(assigned_to=...) only for manual overrides.)
-- Require each specialist to record findings as they go with add_hypothesis_evidence, and to set a final status: proven (with a linked finding via kind=finding_ref) or rejected (with the baseline that ruled it out).
+- Give each specialist a DISJOINT lane with an explicit class list and endpoint/hypothesis set. It must repeatedly call claim_next_hypothesis(vuln_class=<one assigned class>) for every class in its lane until each class has no schedulable candidate left. One claim or one finding is never lane completion. (Use update_hypothesis(assigned_to=...) only for manual overrides.)
+- Require each specialist to close EVERY claimed hypothesis: record evidence with add_hypothesis_evidence, set a final status of proven or rejected, report every distinct proven vulnerability immediately, link it with kind=finding_ref, then continue to the next claim. A proven vulnerability is a result, not a stopping signal.
+- Before a specialist calls finish, it must read the ledger once more and confirm it owns no hypothesis still in queued/testing state. Its stopping condition is exhausted assigned work, never "one bug found."
 - Keep coordinating while they run: incorporate every result with wait_agent/check_agent, independently verify candidates, and do not finish with an uncollected delegation or a proven-but-unreported hypothesis.
 Do not delegate three generic scans or duplicate your own work.`)
 
@@ -207,26 +208,63 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 	if l == nil {
 		return HookResult{}
 	}
-	unreported := provenUnreportedHypotheses(l)
-	if len(unreported) == 0 {
+	owner := ""
+	if state.DelegatedAgent {
+		owner = state.DelegatedAgentID
+	}
+	unreported := provenUnreportedHypothesesForOwner(l, owner)
+	inProgress := testingHypothesesForOwner(l, owner)
+	if len(unreported) == 0 && len(inProgress) == 0 {
 		return HookResult{}
+	}
+	var reasons []string
+	if len(unreported) > 0 {
+		reasons = append(reasons, "proven but unreported: "+strings.Join(unreported, ", "))
+	}
+	if len(inProgress) > 0 {
+		reasons = append(reasons, "claimed but not closed: "+strings.Join(inProgress, ", "))
 	}
 	return HookResult{
 		Block: true,
-		BlockReason: "⚠️ PROVEN BUT UNREPORTED: ledger hypotheses " + strings.Join(unreported, ", ") +
-			" are marked proven but have no linked finding. Either file each with report_vulnerability and then link it via add_hypothesis_evidence(kind=finding_ref, finding_id=XALG-...), or — if a hypothesis is not actually exploitable — downgrade it with update_hypothesis(status=rejected). Do not finish with proven work unreported.",
+		BlockReason: "⚠️ LEDGER WORK INCOMPLETE — " + strings.Join(reasons, "; ") +
+			". File and link every proven finding; close every testing hypothesis as proven or rejected with evidence. Then continue through the remaining assigned lane rather than stopping after the first bug.",
 	}
 }
 
-// provenUnreportedHypotheses returns the IDs of hypotheses marked proven that
-// carry no finding reference (no finding_ref evidence and no evidence FindingID).
-func provenUnreportedHypotheses(l *scanctx.LedgerStore) []string {
+// testingHypotheses returns claimed hypotheses that an agent has not closed.
+// A completed delegation must never strand work in the shared ledger and let
+// the coordinator mistake collection of its prose result for lane completion.
+func testingHypotheses(l *scanctx.LedgerStore) []string {
+	return testingHypothesesForOwner(l, "")
+}
+
+func testingHypothesesForOwner(l *scanctx.LedgerStore, owner string) []string {
 	if l == nil {
 		return nil
 	}
 	var out []string
 	for _, h := range l.All() {
-		if h.Status != scanctx.HypothesisProven {
+		if h.Status == scanctx.HypothesisTesting && hypothesisBelongsToOwner(h, owner) {
+			out = append(out, h.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// provenUnreportedHypotheses returns the IDs of hypotheses marked proven that
+// carry no finding reference (no finding_ref evidence and no evidence FindingID).
+func provenUnreportedHypotheses(l *scanctx.LedgerStore) []string {
+	return provenUnreportedHypothesesForOwner(l, "")
+}
+
+func provenUnreportedHypothesesForOwner(l *scanctx.LedgerStore, owner string) []string {
+	if l == nil {
+		return nil
+	}
+	var out []string
+	for _, h := range l.All() {
+		if h.Status != scanctx.HypothesisProven || !hypothesisBelongsToOwner(h, owner) {
 			continue
 		}
 		linked := false
@@ -240,5 +278,18 @@ func provenUnreportedHypotheses(l *scanctx.LedgerStore) []string {
 			out = append(out, h.ID)
 		}
 	}
+	sort.Strings(out)
 	return out
+}
+
+// hypothesisBelongsToOwner filters shared-ledger finish work for a delegated
+// specialist. AssignedTo is authoritative for claimed coordinator work; Origin
+// covers hypotheses the specialist discovered itself before assignment.
+// An empty owner means the root coordinator and intentionally matches all work.
+func hypothesisBelongsToOwner(h scanctx.Hypothesis, owner string) bool {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return true
+	}
+	return strings.TrimSpace(h.AssignedTo) == owner || strings.TrimSpace(h.Origin) == owner
 }

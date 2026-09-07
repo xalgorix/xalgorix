@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "name": "Grafana CVE-2021-43798 targeted regression",
+  "ground_truth_scope": "This is a targeted-CVE corpus, not a claim that either Grafana release contains exactly one vulnerability. Recall covers only the vendor-documented, default-reachable CVE-2021-43798. The patched release is the paired false-positive control.",
+  "targets": [
+    {
+      "id": "grafana-8.2.6-cve-2021-43798",
+      "mode": "vulnerable",
+      "product": "Grafana OSS",
+      "version": "8.2.6",
+      "source_repository": "https://github.com/grafana/grafana",
+      "source_ref": "v8.2.6",
+      "container": {
+        "image_ref": "grafana/grafana:8.2.6@sha256:1b1e4d15793790d628008086fca2e420eba8bdffdf0cafc9e35abe9e1579752c",
+        "default_url": "http://127.0.0.1:3300",
+        "health_path": "/api/health"
+      },
+      "advisories": [
+        "https://grafana.com/blog/grafana-8-3-1-8-2-7-8-1-8-and-8-0-7-released-with-high-severity-security-fix/"
+      ],
+      "expectations": [
+        {
+          "id": "CVE-2021-43798",
+          "class": "lfi",
+          "cwe": "CWE-22",
+          "severity": "high",
+          "endpoints": [
+            "/public/plugins/"
+          ],
+          "methods": [
+            "GET"
+          ],
+          "require_proof": true
+        }
+      ]
+    },
+    {
+      "id": "grafana-8.2.7-fixed-control",
+      "mode": "fixed-control",
+      "product": "Grafana OSS",
+      "version": "8.2.7",
+      "source_repository": "https://github.com/grafana/grafana",
+      "source_ref": "v8.2.7",
+      "container": {
+        "image_ref": "grafana/grafana:8.2.7@sha256:7b09d835de16a9cc2bb392ddfd10561e477f6580c3c39564394e691a675b6a56",
+        "default_url": "http://127.0.0.1:3301",
+        "health_path": "/api/health"
+      },
+      "advisories": [
+        "https://grafana.com/blog/grafana-8-3-1-8-2-7-8-1-8-and-8-0-7-released-with-high-severity-security-fix/"
+      ],
+      "control_for": [
+        "CVE-2021-43798"
+      ]
+    }
+  ]
+}

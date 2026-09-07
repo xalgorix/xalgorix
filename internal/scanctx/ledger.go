@@ -345,6 +345,47 @@ func (ls *LedgerStore) Assign(hypID, agentID string) bool {
 	return true
 }
 
+// ClaimNext atomically selects the highest-confidence queued hypothesis that
+// matches vulnClass, assigns it to agentID, and moves it to testing. Selection
+// and assignment happen under one lock so concurrent specialists cannot both
+// observe the same queued item and overwrite one another's ownership.
+// An empty vulnClass matches every class.
+func (ls *LedgerStore) ClaimNext(vulnClass, agentID string) (Hypothesis, bool) {
+	classFilter := strings.ToLower(strings.TrimSpace(vulnClass))
+	owner := truncate(strings.TrimSpace(agentID), maxHypothesisFieldLen)
+	now := time.Now().UTC()
+
+	ls.mu.Lock()
+	var picked *Hypothesis
+	for _, id := range ls.order {
+		h := ls.hyps[id]
+		if h == nil || h.Status != HypothesisQueued {
+			continue
+		}
+		if classFilter != "" && h.VulnClass != classFilter {
+			continue
+		}
+		// Strictly greater replaces the candidate; equal confidence keeps the
+		// earlier insertion, matching Schedulable's stable ordering.
+		if picked == nil || h.Confidence > picked.Confidence {
+			picked = h
+		}
+	}
+	if picked == nil {
+		ls.mu.Unlock()
+		return Hypothesis{}, false
+	}
+	picked.AssignedTo = owner
+	picked.Status = HypothesisTesting
+	picked.UpdatedAt = now
+	out := picked.clone()
+	data, path := ls.marshalLocked()
+	ls.mu.Unlock()
+
+	ls.writeFile(data, path)
+	return out, true
+}
+
 // RecordAttempt increments the exploit-attempt counter (economics/exhaustion).
 func (ls *LedgerStore) RecordAttempt(hypID string) bool {
 	ls.mu.Lock()

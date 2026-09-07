@@ -142,6 +142,56 @@ func TestConcurrencyLimitIsPerGraph(t *testing.T) {
 	}
 }
 
+func TestDelegationLimitIsLifetimeBudgetNotOnlyConcurrency(t *testing.T) {
+	graph := NewWithLimit(context.Background(), 2, func(_ context.Context, _ string, name string, _ []string, _ string) (string, error) {
+		return "done " + name, nil
+	})
+	t.Cleanup(graph.Stop)
+
+	for _, name := range []string{"first", "second"} {
+		spawned, err := graph.spawnAgent(map[string]string{"name": name, "task": "bounded lane"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := graph.waitAgent(map[string]string{
+			"agent_id": agentIDFromResult(t, spawned.Metadata),
+			"timeout":  "5",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	blocked, err := graph.spawnAgent(map[string]string{"name": "third", "task": "replacement wave"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked.Metadata != nil || !strings.Contains(blocked.Output, "delegation budget exhausted (2/2") {
+		t.Fatalf("unexpected lifetime-budget result: %#v", blocked)
+	}
+	if got := graph.DelegationCount(); got != 2 {
+		t.Fatalf("delegation count = %d, want 2", got)
+	}
+}
+
+func TestSynchronousDelegationAlsoConsumesLifetimeBudget(t *testing.T) {
+	graph := NewWithLimit(context.Background(), 1, func(context.Context, string, string, []string, string) (string, error) {
+		return "done", nil
+	})
+	t.Cleanup(graph.Stop)
+
+	created, err := graph.createAgent(map[string]string{"name": "sync", "task": "bounded lane"})
+	if err != nil || !strings.Contains(created.Output, "completed") {
+		t.Fatalf("create result=%#v err=%v", created, err)
+	}
+	blocked, err := graph.spawnAgent(map[string]string{"name": "async", "task": "must not run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(blocked.Output, "delegation budget exhausted (1/1") {
+		t.Fatalf("synchronous delegation did not consume budget: %#v", blocked)
+	}
+}
+
 func TestStopCancelsRunnersAndUnblocksWaiters(t *testing.T) {
 	started := make(chan struct{})
 	graph := New(context.Background(), func(ctx context.Context, _ string, _ string, _ []string, _ string) (string, error) {

@@ -1,0 +1,51 @@
+name: xalgorix-realbench-grafana
+
+services:
+  vulnerable:
+    image: grafana/grafana:8.2.6@sha256:1b1e4d15793790d628008086fca2e420eba8bdffdf0cafc9e35abe9e1579752c
+    environment: &grafana-environment
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_SECURITY_ADMIN_PASSWORD: benchmark-only-password
+    expose:
+      - "3000"
+    networks:
+      - isolated
+    restart: "no"
+
+  fixed-control:
+    image: grafana/grafana:8.2.7@sha256:7b09d835de16a9cc2bb392ddfd10561e477f6580c3c39564394e691a675b6a56
+    environment: *grafana-environment
+    expose:
+      - "3000"
+    networks:
+      - isolated
+    restart: "no"
+
+  ingress:
+    image: haproxy:2.8-alpine@sha256:8b55c9e7a09cb729288f4f998a10fc3a98cf3d70a7bba822e07ce167664d9e67
+    depends_on:
+      - vulnerable
+      - fixed-control
+    ports:
+      - "127.0.0.1:3300:3300"
+      - "127.0.0.1:3301:3301"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - isolated
+      - ingress
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+networks:
+  isolated:
+    internal: true
+  ingress:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"

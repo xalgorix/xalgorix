@@ -23,6 +23,19 @@ type ScanFunc func(ctx context.Context, target, sourceDir, scanID string, auth A
 // wandering or stuck scan can hang the whole run.
 const DefaultChallengeTimeout = 8 * time.Minute
 
+// TempRoot keeps benchmark-only state inside the project instead of the
+// operating system's global temporary directory.
+const TempRoot = "tmp"
+
+// NewTempDir creates an isolated benchmark workspace below the project-local
+// tmp/ directory. The caller owns the returned directory and must remove it.
+func NewTempDir(pattern string) (string, error) {
+	if err := os.MkdirAll(TempRoot, 0o750); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(TempRoot, pattern)
+}
+
 // Run executes each challenge in order with the default per-challenge timeout.
 func Run(ctx context.Context, challenges []Challenge, scan ScanFunc) Scorecard {
 	return RunWithTimeout(ctx, challenges, scan, DefaultChallengeTimeout)
@@ -96,7 +109,7 @@ func runOne(parent context.Context, c Challenge, scan ScanFunc, timeout time.Dur
 // needed, and returns its path. The caller owns the directory and should remove
 // it when done.
 func writeSourceFiles(files map[string]string) (string, error) {
-	dir, err := os.MkdirTemp("", "xalgorix-bench-src-")
+	dir, err := NewTempDir("xalgorix-bench-src-")
 	if err != nil {
 		return "", err
 	}

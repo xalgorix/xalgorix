@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 MAIN_GO="$REPO_ROOT/cmd/xalgorix/main.go"
 MAKEFILE="$REPO_ROOT/Makefile"
 README="$REPO_ROOT/README.md"
-BUILD_DIR="/tmp/xalgorix-release"
+BUILD_DIR="$REPO_ROOT/tmp/xalgorix-release"
 
 # ─── Colors ───
 RED='\033[0;31m'

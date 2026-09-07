@@ -362,7 +362,7 @@ func TestRunShellScopesHomeAndBlocksCdOutsideWorkspace(t *testing.T) {
 		scanctx.Deactivate(sc.ID)
 	}()
 
-	out, code := runShellInternal(sc.ID, `printf 'home=%s\npwd=%s\n' "$HOME" "$PWD"; cd /root; printf 'after=%s\n' "$PWD"`)
+	out, code := runShellInternal(sc.ID, `printf 'home=%s\npwd=%s\ntmpdir=%s\n' "$HOME" "$PWD" "$TMPDIR"; cd /root; printf 'after=%s\n' "$PWD"`)
 	if code != 0 {
 		t.Fatalf("runShellInternal exit=%d output=%q", code, out)
 	}
@@ -372,10 +372,13 @@ func TestRunShellScopesHomeAndBlocksCdOutsideWorkspace(t *testing.T) {
 	if !strings.Contains(out, "pwd="+sc.ScanDir) || !strings.Contains(out, "after="+sc.ScanDir) {
 		t.Fatalf("command escaped scan dir: %q", out)
 	}
+	if !strings.Contains(out, "tmpdir="+filepath.Join(sc.ScanDir, "tmp")) {
+		t.Fatalf("TMPDIR was not scoped to scan tmp/: %q", out)
+	}
 	if !strings.Contains(out, "[WORKSPACE GUARD] cd outside scan workspace blocked") {
 		t.Fatalf("workspace guard did not report blocked cd: %q", out)
 	}
-	if _, err := os.Stat(filepath.Join(sc.ScanDir, ".tmp")); err != nil {
+	if _, err := os.Stat(filepath.Join(sc.ScanDir, "tmp")); err != nil {
 		t.Fatalf("workspace temp dir missing: %v", err)
 	}
 }

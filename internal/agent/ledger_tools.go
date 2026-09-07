@@ -318,34 +318,13 @@ func (a *Agent) claimNextHypothesisTool(args map[string]string) (tools.Result, e
 	}
 	classFilter := strings.ToLower(strings.TrimSpace(args["vuln_class"]))
 
-	// Schedulable is already ranked (highest confidence first). We only
-	// auto-claim QUEUED hypotheses: "blocked" ones are waiting on a precondition
-	// and shouldn't be silently moved into testing. Assign() will flip the
-	// chosen one queued→testing atomically under the ledger lock.
-	var picked *scanctx.Hypothesis
-	for _, h := range l.Schedulable(0) {
-		if h.Status != scanctx.HypothesisQueued {
-			continue
-		}
-		if classFilter != "" && strings.ToLower(h.VulnClass) != classFilter {
-			continue
-		}
-		hh := h
-		picked = &hh
-		break
-	}
-	if picked == nil {
+	owner := a.ledgerOrigin()
+	got, claimed := l.ClaimNext(classFilter, owner)
+	if !claimed {
 		if classFilter != "" {
 			return tools.Result{Output: fmt.Sprintf("No queued %q hypotheses to claim. Use read_ledger(filter=schedulable) to see other classes, or record new ones from recon with record_hypothesis.", classFilter)}, nil
 		}
 		return tools.Result{Output: "No queued hypotheses to claim right now. Record new ones from recon with record_hypothesis, or the surface may be exhausted."}, nil
-	}
-
-	owner := a.ledgerOrigin()
-	l.Assign(picked.ID, owner)
-	got, ok := l.Get(picked.ID)
-	if !ok {
-		got = *picked
 	}
 
 	var b strings.Builder

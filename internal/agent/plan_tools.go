@@ -168,6 +168,28 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		}
 	}
 	t := plan.Get(id)
+	// Auto-plans use the dependency-aware id "idor" for the IDOR/BOLA lane,
+	// while models often extrapolate the otherwise-consistent "test-<class>"
+	// naming scheme and call it "test-idor". Resolve a missing test-* id to a
+	// unique task with the same canonical class instead of wasting a turn.
+	if t == nil && strings.HasPrefix(id, "test-") {
+		class := normalizeCoverageClass(strings.TrimPrefix(id, "test-"))
+		var match *Task
+		for _, candidate := range plan.Tasks {
+			if class == "" || normalizeCoverageClass(candidate.VulnClass) != class {
+				continue
+			}
+			if match != nil {
+				match = nil // ambiguous: preserve the normal unknown-id error
+				break
+			}
+			match = candidate
+		}
+		if match != nil {
+			t = match
+			id = match.ID
+		}
+	}
 	if t == nil {
 		return tools.Result{Error: fmt.Sprintf("unknown task id %q — current task ids: %s", id, planIDList(plan))}, nil
 	}
