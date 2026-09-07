@@ -948,6 +948,21 @@ func TestCheckClaimConsistency(t *testing.T) {
 			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
 			"high", "POST returned 200 with empty body", true,
 		},
+		// CVSS A:H is not justified by an arbitrary read, even when the read
+		// exposes sensitive credentials.
+		{
+			"availability high on file read",
+			"Path traversal", "CWE-22", "data_extracted",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H",
+			"critical", "retrieved /etc/passwd and a database containing password hashes", true,
+		},
+		// Proven code execution inherently permits an availability impact.
+		{
+			"availability high with rce",
+			"Remote code execution", "CWE-78", "exploited",
+			"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+			"critical", "command execution returned uid=33(www-data)", false,
+		},
 		// CVSS C:H without data obtained → reject.
 		{
 			"confidentiality high no data",
@@ -1225,6 +1240,24 @@ func TestPipeline_RealFindingsSurvive(t *testing.T) {
 	}
 }
 
+func TestClaimConsistency_HypotheticalTakeoverDoesNotProveIntegrity(t *testing.T) {
+	description := "An unauthenticated path traversal reads grafana.ini and grafana.db. The leaked signing key can forge an admin session and take over the instance."
+	proof := "HTTP 200 returned /etc/passwd, secret_key from grafana.ini, and a SQLite users row from grafana.db"
+
+	got := checkClaimConsistency(
+		"CVE-2021-43798 arbitrary file read",
+		"CWE-22",
+		"data_extracted",
+		"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+		"critical",
+		description,
+		proof,
+	)
+	if !strings.Contains(got, "High Integrity") {
+		t.Fatalf("hypothetical takeover in the description must not prove I:H; got %q", got)
+	}
+}
+
 func TestCheckFalsePositive_RealVulns(t *testing.T) {
 	// Real vulnerabilities should NOT be rejected
 	realVulns := []struct {
@@ -1276,6 +1309,31 @@ func TestReportVulnChecksDuplicateBeforeAppending(t *testing.T) {
 	}
 	if got := len(GetVulnerabilitiesForContext(contextID)); got != 1 {
 		t.Fatalf("stored vulnerabilities = %d, want 1", got)
+	}
+}
+
+func TestReportVulnSalvagesSingleTargetFromScanContext(t *testing.T) {
+	contextID := "test-report-target-fallback"
+	CleanupContext(contextID)
+	sc := scanctx.New(contextID, t.TempDir())
+	sc.SetTargets([]string{"https://grafana.example.com"})
+	scanctx.Activate(sc)
+	defer func() {
+		scanctx.Deactivate(contextID)
+		CleanupContext(contextID)
+	}()
+
+	args := validReportArgs()
+	delete(args, "target")
+	args["endpoint"] = "/login?id=1"
+	if result, err := reportVulnWithContextID(contextID, args); err != nil {
+		t.Fatalf("report error = %v", err)
+	} else if _, ok := result.Metadata["vuln_id"]; !ok {
+		t.Fatalf("report was not stored: %#v", result)
+	}
+	vulns := GetVulnerabilitiesForContext(contextID)
+	if len(vulns) != 1 || vulns[0].Target != "https://grafana.example.com" {
+		t.Fatalf("stored target = %#v, want scan-context target", vulns)
 	}
 }
 
@@ -1977,7 +2035,7 @@ func TestFindDuplicateVulnerability_IDVariantsDedup(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/orders/1042",
 	}}
 	// Same class + same target, different object id in the path.
-	dup, _, isDup := findDuplicateVulnerability(existing, "IDOR on order 2087", "idor", "",
+	dup, _, isDup := findDuplicateVulnerability(existing, "IDOR on order 2087", "idor", "", "",
 		"https://app.example.com", "/api/orders/2087")
 	if !isDup {
 		t.Fatal("expected /api/orders/2087 to dedup against /api/orders/1042 (same IDOR endpoint)")
@@ -1993,7 +2051,7 @@ func TestFindDuplicateVulnerability_VersionNotMerged(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/v1/users/1",
 	}}
 	// v1 vs v2 are distinct endpoints, not object-id variants → not a duplicate.
-	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR", "idor", "",
+	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR", "idor", "", "",
 		"https://app.example.com", "/api/v2/users/1"); isDup {
 		t.Fatal("expected /api/v1 and /api/v2 to remain distinct endpoints")
 	}
@@ -2005,7 +2063,7 @@ func TestFindDuplicateVulnerability_DifferentClassNotMerged(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/orders/1",
 	}}
 	// Same templated endpoint but a different vuln class + different title.
-	if _, _, isDup := findDuplicateVulnerability(existing, "SQL injection in orders", "sql injection", "",
+	if _, _, isDup := findDuplicateVulnerability(existing, "SQL injection in orders", "sql injection", "", "",
 		"https://app.example.com", "/api/orders/2"); isDup {
 		t.Fatal("templating must not merge different vuln classes on the same endpoint")
 	}
@@ -2017,9 +2075,36 @@ func TestFindDuplicateVulnerability_DifferentTargetNotMerged(t *testing.T) {
 		Target: "https://app.example.com", Endpoint: "/api/orders/1042",
 	}}
 	// Same templated endpoint + class but a DIFFERENT host → not a duplicate.
-	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR on order", "idor", "",
+	if _, _, isDup := findDuplicateVulnerability(existing, "IDOR on order", "idor", "", "",
 		"https://other.example.com", "/api/orders/2087"); isDup {
 		t.Fatal("findings on different hosts must not be merged")
+	}
+}
+
+func TestFindDuplicateVulnerability_SameTargetCVEDedupsAcrossProofEndpoints(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "Unauthenticated arbitrary file read", Description: "Grafana plugin path traversal",
+		CVE: "CVE-2021-43798", CWE: "CWE-22", Target: "https://grafana.example.com",
+		Endpoint: "/public/plugins/alertlist/../../../../etc/passwd",
+	}}
+	dup, _, isDup := findDuplicateVulnerability(existing,
+		"CVE-2021-43798: Grafana credential database disclosure", "The same traversal reads grafana.db",
+		"cve-2021-43798", "CWE-200", "https://grafana.example.com",
+		"/public/plugins/alertlist/../../../../var/lib/grafana/grafana.db")
+	if !isDup || dup.ID != "XALG-1" {
+		t.Fatalf("same CVE on one target should dedup across proof paths, got duplicate=%v id=%q", isDup, dup.ID)
+	}
+}
+
+func TestFindDuplicateVulnerability_SameCVEDifferentTargetNotMerged(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "Grafana path traversal", CVE: "CVE-2021-43798",
+		Target: "https://grafana-a.example.com", Endpoint: "/public/plugins/a/../../etc/passwd",
+	}}
+	if _, _, isDup := findDuplicateVulnerability(existing,
+		"Grafana path traversal", "CVE-2021-43798", "CVE-2021-43798", "CWE-22",
+		"https://grafana-b.example.com", "/public/plugins/a/../../etc/passwd"); isDup {
+		t.Fatal("the same CVE on a different target must remain a separate finding")
 	}
 }
 
@@ -2054,7 +2139,7 @@ func TestFindDuplicateVulnerability_CWEFallbackDedup(t *testing.T) {
 		CWE: "CWE-79", Target: "https://app.example.com", Endpoint: "/api/contacts",
 	}}
 	dup, _, isDup := findDuplicateVulnerability(existing, "Arbitrary contact addition", "adds a contact record",
-		"CWE-79", "https://app.example.com", "/api/contacts")
+		"", "CWE-79", "https://app.example.com", "/api/contacts")
 	if !isDup {
 		t.Fatal("expected CWE-79 findings on the same endpoint to dedup via the CWE class fallback")
 	}
@@ -2071,7 +2156,7 @@ func TestFindDuplicateVulnerability_UnmappedCWENotMerged(t *testing.T) {
 		CWE: "CWE-770", Target: "https://app.example.com", Endpoint: "/api/x",
 	}}
 	if _, _, isDup := findDuplicateVulnerability(existing, "Odd behavior B", "something else happens",
-		"CWE-770", "https://app.example.com", "/api/x"); isDup {
+		"", "CWE-770", "https://app.example.com", "/api/x"); isDup {
 		t.Fatal("unmapped CWE + no keyword must not merge distinct findings")
 	}
 }

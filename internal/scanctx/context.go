@@ -87,6 +87,9 @@ type ScanContext struct {
 	// attack hypotheses, evidence, and status, and it persists to
 	// <ScanDir>/ledger.json so it survives restart/resume.
 	Ledger *LedgerStore
+	// Coverage is the live scan-shared endpoint × class matrix. It lets the
+	// coordinator reconcile work executed by parallel delegated specialists.
+	Coverage *CoverageStore
 
 	// ctx/cancel for the scan's lifecycle
 	Ctx    context.Context
@@ -94,6 +97,8 @@ type ScanContext struct {
 
 	policyMu          sync.RWMutex
 	requestRatePolicy RequestRatePolicy
+	targetsMu         sync.RWMutex
+	targets           []string
 }
 
 // New creates a fresh ScanContext for an isolated scan session.
@@ -107,6 +112,7 @@ func New(id, scanDir string) *ScanContext {
 		Terminal: NewTerminalState(),
 		Browser:  NewBrowserState(),
 		Ledger:   NewLedgerStore(),
+		Coverage: NewCoverageStore(),
 		Ctx:      ctx,
 		Cancel:   cancel,
 	}
@@ -191,6 +197,34 @@ func (sc *ScanContext) RequestRatePolicy() RequestRatePolicy {
 	sc.policyMu.RLock()
 	defer sc.policyMu.RUnlock()
 	return sc.requestRatePolicy
+}
+
+// SetTargets stores the root coordinator's declared targets for tools that
+// need to salvage an omitted target field. Delegated agents share this context
+// and must not replace the root target set with their narrower assignment.
+func (sc *ScanContext) SetTargets(targets []string) {
+	if sc == nil {
+		return
+	}
+	clean := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target = strings.TrimSpace(target); target != "" {
+			clean = append(clean, target)
+		}
+	}
+	sc.targetsMu.Lock()
+	sc.targets = clean
+	sc.targetsMu.Unlock()
+}
+
+// Targets returns a defensive copy of the root coordinator's target set.
+func (sc *ScanContext) Targets() []string {
+	if sc == nil {
+		return nil
+	}
+	sc.targetsMu.RLock()
+	defer sc.targetsMu.RUnlock()
+	return append([]string(nil), sc.targets...)
 }
 
 // ──────────────────────────────────────────────────────────

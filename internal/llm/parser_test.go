@@ -83,6 +83,33 @@ func TestParseAllFormats(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsRepairsNamedParameterClosingTags(t *testing.T) {
+	in := `<function=report_vulnerability>
+<parameter=title>Error-Based SQL Injection in X-Auth-Token Header</title>
+<parameter=target>https://pentest-ground.com:9000</target>
+<parameter=severity>high</severity>
+<parameter=description>Database errors prove injectable input.</description>
+</function>`
+
+	calls := ParseToolCalls(in)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	args := calls[0].Args
+	if got := args["title"]; got != "Error-Based SQL Injection in X-Auth-Token Header" {
+		t.Fatalf("title absorbed adjacent XML fields: %q", got)
+	}
+	if got := args["target"]; got != "https://pentest-ground.com:9000" {
+		t.Fatalf("target = %q", got)
+	}
+	if got := args["severity"]; got != "high" {
+		t.Fatalf("severity = %q", got)
+	}
+	if got := args["description"]; got != "Database errors prove injectable input." {
+		t.Fatalf("description = %q", got)
+	}
+}
+
 // TestFixIncomplete_SingleUnclosed exercises the original (pre-fix) case:
 // one open <function=...> tag with no </function>. The repaired string
 // must parse cleanly.

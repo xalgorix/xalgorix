@@ -74,6 +74,12 @@ var (
 	malformedNestedParamRe = regexp.MustCompile(`(?s)<parameter<parameter>\s*([A-Za-z_][A-Za-z0-9_-]*)\s*</parameter>`)
 	malformedBareParamRe   = regexp.MustCompile(`(?s)<parameter<([A-Za-z_][A-Za-z0-9_-]*)\s*</parameter>`)
 	malformedBodyParamRe   = regexp.MustCompile(`(?s)(<parameter=[A-Za-z_][A-Za-z0-9_-]*>)\s*<parameter>`)
+	// Some providers close a parameter with its field name instead of the XML
+	// wrapper name, for example <parameter=title>...</title>. Without repair,
+	// paramEqRegex keeps consuming through the next </parameter>, merging fields
+	// such as target/severity into the title. The names are compared in code
+	// because Go's regexp engine intentionally does not support backreferences.
+	malformedNamedParamCloseRe = regexp.MustCompile(`(?s)<parameter=([A-Za-z_][A-Za-z0-9_-]*)>(.*?)</([A-Za-z_][A-Za-z0-9_-]*)>`)
 
 	// CleanContent regexes — compiled once
 	toolPattern    = regexp.MustCompile(`(?s)<function=[^>]+>.*?</function>`)
@@ -226,6 +232,13 @@ func normalizeFormat(content string) string {
 		}
 		val := strings.TrimSpace(m[2])
 		return "<" + m[1] + "=" + val + ">"
+	})
+	content = malformedNamedParamCloseRe.ReplaceAllStringFunc(content, func(s string) string {
+		m := malformedNamedParamCloseRe.FindStringSubmatch(s)
+		if len(m) != 4 || !strings.EqualFold(m[1], m[3]) {
+			return s
+		}
+		return "<parameter=" + m[1] + ">" + m[2] + "</parameter>"
 	})
 
 	return content

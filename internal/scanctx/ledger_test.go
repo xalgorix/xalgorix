@@ -133,6 +133,50 @@ func TestLedgerAssignMovesToTesting(t *testing.T) {
 	}
 }
 
+func TestLedgerClaimNextIsAtomicAcrossSpecialists(t *testing.T) {
+	ls := NewLedgerStore()
+	const hypothesisCount = 24
+	for i := 0; i < hypothesisCount; i++ {
+		ls.Upsert(Hypothesis{
+			VulnClass:  "sqli",
+			Endpoint:   fmt.Sprintf("/endpoint/%d", i),
+			Confidence: float64(i) / hypothesisCount,
+		})
+	}
+
+	const contenderCount = 48
+	start := make(chan struct{})
+	claimed := make(chan Hypothesis, contenderCount)
+	var wg sync.WaitGroup
+	for i := 0; i < contenderCount; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			<-start
+			if h, ok := ls.ClaimNext("sqli", fmt.Sprintf("specialist-%d", n)); ok {
+				claimed <- h
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(claimed)
+
+	seen := make(map[string]bool)
+	for h := range claimed {
+		if seen[h.ID] {
+			t.Fatalf("hypothesis %s was claimed by more than one specialist", h.ID)
+		}
+		seen[h.ID] = true
+		if h.Status != HypothesisTesting || h.AssignedTo == "" {
+			t.Fatalf("claim %s was not persisted as owned testing work: %+v", h.ID, h)
+		}
+	}
+	if len(seen) != hypothesisCount {
+		t.Fatalf("expected exactly %d unique claims, got %d", hypothesisCount, len(seen))
+	}
+}
+
 func TestLedgerSchedulableOrdering(t *testing.T) {
 	ls := NewLedgerStore()
 	ls.Upsert(Hypothesis{VulnClass: "a", Endpoint: "/1", Confidence: 0.3})

@@ -20,11 +20,12 @@
 //     only or the surface is genuinely exhausted.
 //
 // Design constraints:
-//   - No new goroutines / no external state — the Plan lives in ScanState so it
-//     is shared across sub-agents via the same ScanContext the memory layer uses.
-//   - Coverage grounding reuses the EXISTING counters (EndpointsTested,
-//     VulnClassesTested, InjectionEndpoints, AccessControlEndpoints,
-//     DirBustingHosts) rather than parallel bookkeeping that could drift.
+//   - No new goroutines / no external state — each agent's Plan lives in its
+//     own ScanState. The shared ScanContext remains the cross-agent evidence
+//     and memory channel.
+//   - Coverage grounding uses EndpointClassCoverage as its authoritative
+//     endpoint × class matrix, while retaining the aggregate counters for
+//     depth metrics and compatibility with scans created by older versions.
 //   - Task generation is bounded: a target with 500 endpoints does not emit
 //     500×N tasks; endpoints are grouped by vuln class into a tractable set.
 package agent
@@ -210,6 +211,26 @@ type CoverageGap struct {
 	Reason    string
 }
 
+// requiredCoverageClasses is the single contract shared by gap detection and
+// auto-plan generation. Keeping these lists separate previously made the
+// planner demand CRLF/SSTI work for task IDs it had never created, wasting
+// model turns and allowing the plan and finish gate to disagree.
+func requiredCoverageClasses() []string {
+	return []string{
+		"sqli",
+		"xss",
+		"idor",
+		"ssrf",
+		"ssti",
+		"cmdi",
+		"path_traversal",
+		"crlf",
+		"xxe",
+		"csrf",
+		"parameter_mining",
+	}
+}
+
 // CoverageGaps returns the structured gap list. discoveredEndpoints is the set
 // of endpoints the recon surfaced (from notes / attack-surface seeding);
 // state provides what's already been tested. A gap exists for each (class,
@@ -219,7 +240,7 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 	if state == nil {
 		return nil
 	}
-	classes := []string{"sqli", "xss", "idor", "ssrf", "ssti", "cmdi", "path_traversal", "crlf"}
+	classes := requiredCoverageClasses()
 	var gaps []CoverageGap
 	// Per-endpoint × per-class gap detection. When no endpoints were discovered
 	// (pure black-box, no seeded surface), fall back to whole-target gaps for
@@ -248,36 +269,91 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 	return gaps
 }
 
-// endpointTestedForClass reports whether an endpoint has coverage evidence for
-// a vuln class, consulting the existing ScanState maps. This keeps the planner
-// consistent with the hook-layer coverage tracking (no parallel bookkeeping).
+// endpointTestedForClass reports whether this exact endpoint has coverage
+// evidence for a vulnerability class. Global class coverage and a generic
+// request to the endpoint are deliberately insufficient: either shortcut can
+// make the planner silently skip untested class/endpoint pairs.
 func endpointTestedForClass(state *ScanState, endpoint, class string) bool {
-	// Global class coverage short-circuits the per-endpoint check for the
-	// whole-target fallback path; per-endpoint maps are authoritative when set.
+	if canonical := normalizeCoverageClass(class); canonical != "" {
+		class = canonical
+	}
+	aliases := endpointCoverageLookupAliases(endpoint)
+	hasEndpointMatrixEvidence := false
+	shared := sharedCoverageForState(state)
+	for _, alias := range aliases {
+		if classes, ok := state.EndpointClassCoverage[alias]; ok {
+			hasEndpointMatrixEvidence = true
+			if classes[class] {
+				return true
+			}
+		}
+		if shared != nil {
+			if shared.Has(alias, class) {
+				return true
+			}
+			if shared.HasEndpoint(alias) {
+				hasEndpointMatrixEvidence = true
+			}
+		}
+	}
+	if hasEndpointMatrixEvidence {
+		return false
+	}
+
+	// Compatibility fallback for state produced before the pair matrix was
+	// introduced. These maps are coarse, so consult them only when the endpoint
+	// has no matrix evidence at all.
 	switch class {
 	case "sqli":
-		if _, ok := state.InjectionEndpoints[endpoint]; ok {
+		if endpointSetContains(state.InjectionEndpoints, aliases) {
 			return true
 		}
 	case "idor":
-		if _, ok := state.AccessControlEndpoints[endpoint]; ok {
+		if endpointSetContains(state.AccessControlEndpoints, aliases) {
 			return true
 		}
 	}
-	if state.VulnClassesTested[class] {
-		// Class tested somewhere — treat as covered for the gap report so we
-		// don't spam the model with N endpoints × the class once it's been
-		// exercised at least once. The finish gate's depth math still enforces
-		// per-endpoint depth separately.
-		return true
+	return false
+}
+
+func endpointSetContains(set map[string]bool, aliases []string) bool {
+	for _, alias := range aliases {
+		if set[alias] {
+			return true
+		}
 	}
-	// If the endpoint itself was touched at all, count it as "tested" for the
-	// gap nudge — the per-class map is the precise signal, but a touched
-	// endpoint shouldn't be re-flagged wholesale.
-	if _, ok := state.EndpointsTested[endpoint]; ok {
-		return true
+	for endpoint := range set {
+		for _, storedAlias := range endpointCoverageAliases(endpoint) {
+			for _, wanted := range aliases {
+				if storedAlias == wanted {
+					return true
+				}
+			}
+		}
 	}
 	return false
+}
+
+// taskCoverageComplete grounds plan reconciliation in exact coverage. An
+// explicit LLM task targets its endpoint; grouped/auto tasks require coverage
+// across every endpoint discovered by recon. Whole-target black-box tasks use
+// the aggregate class flag until an endpoint inventory exists.
+func taskCoverageComplete(state *ScanState, task *Task) bool {
+	if state == nil || task == nil || task.VulnClass == "" {
+		return false
+	}
+	if task.Origin != "auto" && strings.TrimSpace(task.Endpoint) != "" {
+		return endpointTestedForClass(state, task.Endpoint, task.VulnClass)
+	}
+	if len(state.DiscoveredEndpoints) == 0 {
+		return state.VulnClassesTested[task.VulnClass]
+	}
+	for _, endpoint := range state.DiscoveredEndpoints {
+		if !endpointTestedForClass(state, endpoint, task.VulnClass) {
+			return false
+		}
+	}
+	return true
 }
 
 // FormatGaps turns a CoverageGap slice into the compact model-facing summary.
@@ -353,8 +429,8 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 		})
 	}
 
-	// Tech-specific class inclusion: java/python → ssti; php/node → prototype
-	// pollution / sqli; otherwise include the core classes.
+	// Start with the full baseline coverage contract, then add specialized
+	// technology lanes such as Node.js prototype pollution or PHP LFI.
 	classes := defaultVulnClasses(detectedTechs)
 
 	// Build per-class tasks. When endpoints are known, each class task lists
@@ -432,17 +508,23 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 	return p
 }
 
-// defaultVulnClasses returns the core vuln-class set, expanded by detected tech.
+// defaultVulnClasses returns every class required by the coverage contract
+// except IDOR, which has its own post-auth task below. Technology detection may
+// add specialized lanes, but it must never remove a baseline lane: fingerprints
+// can be incomplete or wrong, and that was a direct source of intermittent
+// misses.
 func defaultVulnClasses(detectedTechs map[string]bool) []string {
-	classes := []string{"sqli", "xss", "ssrf", "cmdi", "path_traversal"}
+	classes := make([]string, 0, len(requiredCoverageClasses())+2)
+	for _, class := range requiredCoverageClasses() {
+		if class != "idor" {
+			classes = append(classes, class)
+		}
+	}
 	if detectedTechs == nil {
 		return classes
 	}
-	if detectedTechs["java"] || detectedTechs["python"] || detectedTechs["ruby"] || detectedTechs["php"] {
-		classes = append(classes, "ssti")
-	}
 	if detectedTechs["nodejs"] {
-		classes = append(classes, "ssti", "prototype-pollution")
+		classes = append(classes, "prototype-pollution")
 	}
 	if detectedTechs["php"] {
 		classes = append(classes, "lfi")
@@ -457,8 +539,14 @@ func classPhase(class string) int {
 		return 6 // injection testing
 	case "ssrf":
 		return 7
+	case "xxe":
+		return 7
 	case "idor", "prototype-pollution":
 		return 8
+	case "csrf":
+		return 5
+	case "parameter_mining":
+		return 4
 	case "path_traversal", "lfi":
 		return 6
 	case "dirbusting":

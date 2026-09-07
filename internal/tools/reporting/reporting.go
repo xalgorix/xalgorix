@@ -20,6 +20,7 @@ import (
 // delays from timing-SQLi proof, so we can tell a single-shot test (one
 // magnitude) from a real differential test (two or more distinct magnitudes).
 var sleepMagnitudeRe = regexp.MustCompile(`(?:sleep|pg_sleep|delay)\s*[('"\[:\s]\s*0*(\d+)`)
+var cveIDRe = regexp.MustCompile(`(?i)\bCVE-[0-9]{4}-[0-9]{4,7}\b`)
 
 // Valid verification methods — the agent must specify one when reporting.
 var validVerificationMethods = map[string]bool{
@@ -346,6 +347,14 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 	title := strings.TrimSpace(args["title"])
 	target := strings.TrimSpace(args["target"])
 	endpoint := strings.TrimSpace(args["endpoint"])
+	if target == "" {
+		if sc := scanctx.Get(contextID); sc != nil {
+			if targets := sc.Targets(); len(targets) == 1 {
+				target = targets[0]
+				args["target"] = target
+			}
+		}
+	}
 
 	// ── Salvage a missing description ──
 	// `description` is no longer a hard-required registry field: models (esp.
@@ -376,7 +385,7 @@ func reportVulnWithContextIDAndVerifier(contextID string, verifier FindingVerifi
 	// This is repeated under the write lock just before append to close races.
 	store := getStoreByID(contextID)
 	store.mu.RLock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cwe_id"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
 		store.mu.RUnlock()
 		return duplicateResult(existing, msg), nil
 	}
@@ -541,7 +550,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// ── Gate 4: Smart Deduplication — same vuln type on same endpoint = duplicate ──
 	store = getStoreByID(contextID)
 	store.mu.RLock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cwe_id"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
 		store.mu.RUnlock()
 		return duplicateResult(existing, msg), nil
 	}
@@ -673,7 +682,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 
 	store = getStoreByID(contextID) // re-resolve in case of race
 	store.mu.Lock()
-	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cwe_id"], target, endpoint); ok {
+	if existing, msg, ok := findDuplicateVulnerability(store.vulns, title, args["description"], args["cve"], args["cwe_id"], target, endpoint); ok {
 		store.mu.Unlock()
 		return duplicateResult(existing, msg), nil
 	}
@@ -811,7 +820,7 @@ func duplicateResult(existing Vulnerability, msg string) tools.Result {
 	}
 }
 
-func findDuplicateVulnerability(existing []Vulnerability, title, description, cwe, target, endpoint string) (Vulnerability, string, bool) {
+func findDuplicateVulnerability(existing []Vulnerability, title, description, cve, cwe, target, endpoint string) (Vulnerability, string, bool) {
 	normalizedTitle := normalizeFindingText(title)
 	normalizedTarget := normalizeEndpoint(target)
 	// Endpoints use the templated key so object-ID variants of the same path
@@ -819,6 +828,7 @@ func findDuplicateVulnerability(existing []Vulnerability, title, description, cw
 	// hosts, not object paths, so they keep the plain normalization.
 	normalizedEndpoint := dedupEndpointKey(endpoint)
 	vulnType := extractVulnTypeWithCWE(title, description, cwe)
+	reportedCVEs := findingCVEs(title, description, cve)
 
 	for _, vuln := range existing {
 		existingTitle := normalizeFindingText(vuln.Title)
@@ -826,6 +836,9 @@ func findDuplicateVulnerability(existing []Vulnerability, title, description, cw
 		existingEndpoint := dedupEndpointKey(vuln.Endpoint)
 		existingType := extractVulnTypeWithCWE(vuln.Title, vuln.Description, vuln.CWE)
 		sameTarget := normalizedTarget == existingTarget
+		if sameTarget && sharesCVE(reportedCVEs, findingCVEs(vuln.Title, vuln.Description, vuln.CVE)) {
+			return vuln, fmt.Sprintf("⚠️ DUPLICATE: The same CVE is already reported on target '%s' as %s ('%s'). Skipping the alternate proof endpoint '%s'.", target, vuln.ID, vuln.Title, endpoint), true
+		}
 
 		// Exact finding match after trimming/case normalization.
 		if sameTarget && normalizedTitle != "" && normalizedTitle == existingTitle && normalizedEndpoint == existingEndpoint {
@@ -840,6 +853,23 @@ func findDuplicateVulnerability(existing []Vulnerability, title, description, cw
 	}
 
 	return Vulnerability{}, "", false
+}
+
+func findingCVEs(parts ...string) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, match := range cveIDRe.FindAllString(strings.Join(parts, " "), -1) {
+		ids[strings.ToUpper(match)] = struct{}{}
+	}
+	return ids
+}
+
+func sharesCVE(left, right map[string]struct{}) bool {
+	for id := range left {
+		if _, ok := right[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func isSSRFClaim(title, description, cwe string) bool {
@@ -951,6 +981,7 @@ func checkClaimConsistency(title, cwe, method, cvssVector, severity, description
 		return ""
 	}
 
+	proofL := strings.ToLower(proof)
 	lp := strings.ToLower(proof + " " + description)
 	cweL := strings.ToLower(strings.TrimSpace(cwe))
 	vec := strings.ToUpper(cvssVector)
@@ -987,14 +1018,33 @@ func checkClaimConsistency(title, cwe, method, cvssVector, severity, description
 
 	// 2) CVSS High Integrity (I:H) requires evidence of a state change.
 	if strings.Contains(vec, "I:H") {
-		if !anyContains(lp, "deleted", "modified", "created", "updated", "overwrote", "overwritten",
+		// Inspect the exploitation proof only. A description commonly explains
+		// hypothetical follow-on impact (for example, "the leaked signing key can
+		// enable takeover"); that is not evidence that integrity impact was
+		// actually demonstrated and must not inflate a read-only primitive.
+		if !anyContains(proofL, "deleted", "modified", "created", "updated", "overwrote", "overwritten",
 			"changed", "wrote", "inserted", "tampered", "state change", "rce", "command execution",
-			"shell", "uid=", "escalat", "takeover", "hijack", "reset", "added", "removed", "poisoned") {
+			"shell", "uid=", "reset", "added", "removed", "poisoned") {
 			return "❌ REJECTED (claim consistency): the CVSS vector claims High Integrity impact (I:H) but the proof shows no actual state change. Lower the vector to I:L/I:N or provide integrity-impact evidence."
 		}
 	}
 
-	// 3) CVSS High Confidentiality (C:H) requires sensitive data actually obtained.
+	// 3) CVSS High Availability (A:H) requires evidence that the primitive can
+	//    affect service availability. Arbitrary reads and credential disclosure
+	//    do not become critical merely because an agent selects A:H. Proven code
+	//    execution is sufficient because it inherently permits stopping or
+	//    destroying the affected service; otherwise require a demonstrated crash,
+	//    outage, or resource-exhaustion result.
+	if strings.Contains(vec, "A:H") {
+		if !anyContains(proofL, "rce", "command execution", "remote code execution", "shell", "uid=", "whoami",
+			"denial of service", "service unavailable", "service outage", "server crashed", "process crashed",
+			"resource exhaustion", "memory exhaustion", "cpu exhaustion", "redos", "timed out for",
+			"became unavailable", "stopped responding") {
+			return "❌ REJECTED (claim consistency): the CVSS vector claims High Availability impact (A:H) but the proof shows no code execution, crash, outage, or resource exhaustion. Lower the vector to A:L/A:N or provide availability-impact evidence."
+		}
+	}
+
+	// 4) CVSS High Confidentiality (C:H) requires sensitive data actually obtained.
 	//    Command execution / RCE inherently grants confidentiality, so its markers
 	//    satisfy this check too (an RCE proof shows `uid=`, not "extracted data").
 	//    A proven SQL-injection point ALSO satisfies C:H: a native SQLi signal
@@ -1017,7 +1067,7 @@ func checkClaimConsistency(title, cwe, method, cvssVector, severity, description
 		}
 	}
 
-	// 4) EVIDENCE PROVENANCE for SQL injection: the proof must show SQLi worked at
+	// 5) EVIDENCE PROVENANCE for SQL injection: the proof must show SQLi worked at
 	//    the injection point (data via UNION/error/blind-timing, sqlmap, a SQL
 	//    error). If the proof shows ONLY command-execution/RCE evidence and NO
 	//    SQLi-native evidence, the "SQLi" was likely proven through a different
@@ -1072,15 +1122,41 @@ func checkClaimConsistency(title, cwe, method, cvssVector, severity, description
 func checkFabricatedFinding(title, endpoint, description, proof, severity string) string {
 	blob := strings.ToLower(title + " " + endpoint + " " + description + " " + proof)
 
-	// Class 1: explicit fabrication markers — reject at any severity.
-	for _, m := range []string{
-		"simulated", "placeholder", "hypothetical endpoint",
-		"workaround to satisfy", "to satisfy the assessment", "assessment engine",
-		"task completion requirement", "this report is a workaround",
-	} {
-		if strings.Contains(blob, m) {
-			return fmt.Sprintf("❌ REJECTED: '%s' is a SIMULATED/PLACEHOLDER/WORKAROUND report (matched %q), not a real vulnerability. Never fabricate a finding to complete a task. If you could not exploit a reachable endpoint, record what you tested with add_note and move on — do NOT call report_vulnerability.", title, m)
+	// Class 1: explicit fabrication markers — reject at any severity. Keep
+	// these markers contextual. A bare word such as "placeholder" is commonly
+	// used in legitimate validation prose ("the extracted secret is not a
+	// placeholder") and used to suppress a proven Grafana credential leak.
+	// Strong phrases and obviously synthetic endpoint/title shapes still catch
+	// intentional stand-ins without turning normal English into a veto.
+	titleLower := strings.ToLower(strings.TrimSpace(title))
+	endpointLower := strings.ToLower(endpoint)
+	bodyLower := strings.ToLower(description + " " + proof)
+	fabricationMarker := ""
+	switch {
+	case strings.HasPrefix(titleLower, "simulated "):
+		fabricationMarker = "simulated title"
+	case strings.HasPrefix(titleLower, "hypothetical "):
+		fabricationMarker = "hypothetical title"
+	case strings.Contains(titleLower, "simulated finding") || strings.Contains(titleLower, "simulated vulnerability"):
+		fabricationMarker = "simulated finding"
+	case strings.Contains(endpointLower, "/placeholder/") || strings.HasSuffix(endpointLower, "/placeholder"):
+		fabricationMarker = "placeholder endpoint"
+	default:
+		for _, m := range []string{
+			"hypothetical endpoint", "invented endpoint", "simulated endpoint",
+			"simulated finding", "simulated vulnerability", "placeholder endpoint",
+			"this report is a placeholder", "this finding is a placeholder",
+			"workaround to satisfy", "to satisfy the assessment", "assessment engine",
+			"task completion requirement", "this report is a workaround",
+		} {
+			if strings.Contains(bodyLower, m) {
+				fabricationMarker = m
+				break
+			}
 		}
+	}
+	if fabricationMarker != "" {
+		return fmt.Sprintf("❌ REJECTED: '%s' is a SIMULATED/PLACEHOLDER/WORKAROUND report (matched %q), not a real vulnerability. Never fabricate a finding to complete a task. If you could not exploit a reachable endpoint, record what you tested with add_note and move on — do NOT call report_vulnerability.", title, fabricationMarker)
 	}
 
 	// Class 2: target-unreachable dressed up as an actionable vulnerability.
@@ -2291,7 +2367,7 @@ func PromoteToParent(childContextID, parentContextID, vulnID string) {
 		}
 	}
 	// Skip semantic duplicates too, mirroring MergeVulnsToContext's behavior.
-	if _, _, dup := findDuplicateVulnerability(dst.vulns, found.Title, found.Description, found.CWE, found.Target, found.Endpoint); dup {
+	if _, _, dup := findDuplicateVulnerability(dst.vulns, found.Title, found.Description, found.CVE, found.CWE, found.Target, found.Endpoint); dup {
 		return
 	}
 	dst.vulns = append(dst.vulns, *found)
@@ -2339,7 +2415,7 @@ func MergeVulnsToContext(srcContextID, dstContextID string) int {
 
 	added := 0
 	for _, v := range srcVulns {
-		if _, _, duplicate := findDuplicateVulnerability(dstStore.vulns, v.Title, v.Description, v.CWE, v.Target, v.Endpoint); duplicate {
+		if _, _, duplicate := findDuplicateVulnerability(dstStore.vulns, v.Title, v.Description, v.CVE, v.CWE, v.Target, v.Endpoint); duplicate {
 			continue
 		}
 		if seenIDs[v.ID] {

@@ -13,12 +13,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
 // ── Hook Events ──────────────────────────────────────────────────────────────
 
 const (
 	OnToolCall        = "OnToolCall"        // Before every tool execution
+	OnToolExecute     = "OnToolExecute"     // After all guards pass, immediately before execution
 	OnToolResult      = "OnToolResult"      // After every tool execution
 	OnFinishAttempt   = "OnFinishAttempt"   // When agent calls finish
 	OnStuckCheck      = "OnStuckCheck"      // After stuck-loop counter updates (every tool call)
@@ -46,6 +49,7 @@ type ScanState struct {
 	Iteration                int
 	ScanContextID            string // owning scan-context ID, so hooks can reach shared stores (notes) without an import cycle
 	TerminalCalls            int
+	MeaningfulTestCalls      int
 	SkillsLoaded             int
 	UniqueToolsUsed          map[string]bool
 	ReconDone                bool
@@ -63,6 +67,9 @@ type ScanState struct {
 	ReportRetryLimitReached      bool
 	DiscoveryMode                bool
 	ReconOnlyMode                bool
+	DelegatedAgent               bool
+	DelegatedAgentID             string
+	BenchmarkIsolated            bool
 	AllowedPhases                []int
 	PassiveReconGuardActive      bool
 	PassiveReconPassiveLookups   int
@@ -76,7 +83,13 @@ type ScanState struct {
 	AccessControlEndpoints map[string]bool // unique endpoints with auth/IDOR tests
 	DirBustingHosts        map[string]bool // unique hosts/paths fuzzed
 	EndpointsTested        map[string]bool // all unique URL paths tested with any tool
-	EndpointInventorySaved bool            // add_note called (recon checklist step 5)
+	// EndpointClassCoverage is the authoritative endpoint × vulnerability-class
+	// matrix. The aggregate maps above remain useful for coarse depth metrics,
+	// but they cannot answer whether (for example) SQLi was exercised on both
+	// /login and /search. Keeping the pair prevents one request from collapsing
+	// every remaining planner gap for that class.
+	EndpointClassCoverage  map[string]map[string]bool
+	EndpointInventorySaved bool // add_note called (recon checklist step 5)
 
 	// Granular vuln class coverage — tracks which attack types have been attempted.
 	// Used to nudge the agent to test missing classes before finishing.
@@ -185,6 +198,8 @@ type ScanState struct {
 	SkillSuggestionFired bool            // prevents hookAutoSkillSuggester from firing more than once
 	DelegationAttempted  bool            // coordinator called spawn_agent/create_agent
 	DelegationNudgeFired bool            // multi-agent role decomposition nudge sent once
+	DelegationNudgeAt    int             // iteration of the initial decomposition nudge
+	DelegationReminders  int             // bounded reminders after ignored/malformed spawn calls
 	LedgerSeeded         bool            // hypothesis ledger seeded from the plan once
 }
 
@@ -197,6 +212,7 @@ func NewScanState() *ScanState {
 		AccessControlEndpoints: make(map[string]bool),
 		DirBustingHosts:        make(map[string]bool),
 		EndpointsTested:        make(map[string]bool),
+		EndpointClassCoverage:  make(map[string]map[string]bool),
 		VulnClassesTested:      make(map[string]bool),
 	}
 }
@@ -364,12 +380,14 @@ func floatPtr(f float64) *float64 { return &f }
 
 // RegisterDefaultHooks registers all built-in behavioral hooks.
 func RegisterDefaultHooks(reg *HookRegistry) {
-	// Order matters: tracking → detection → policy → reset
+	// Order matters: policy/loop guards run before OnToolExecute records work;
+	// result detection and reset hooks run only after an executed attempt.
 	reg.Register(OnToolCall, hookReportRetryGuard)
+	reg.Register(OnToolCall, hookBenchmarkIsolationGuard)
 	reg.Register(OnToolCall, hookSlowReconGuard)
-	reg.Register(OnToolCall, hookWorkTracker)
 	reg.Register(OnToolCall, hookStuckTracker)
 	reg.Register(OnToolCall, hookCurlPreference)
+	reg.Register(OnToolExecute, hookWorkTracker)
 	reg.Register(OnStuckCheck, hookStuckNudge)
 	reg.Register(OnToolResult, hookWAFDetector)
 	reg.Register(OnToolResult, hookRedirectDetector)
@@ -392,6 +410,55 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 }
 
 const maxReportRepairAttempts = 3
+
+var benchmarkHostToolPattern = regexp.MustCompile(`(?i)(^|[;&|()[:space:]"',\[\]])(?:sudo[[:space:]]+)?(?:[^[:space:];|]*/)?(?:docker|podman|nerdctl|kubectl|crictl|ctr|nsenter)(?:[[:space:];|&),"'\[\]]|$)`)
+var benchmarkHostTempConsumerPattern = regexp.MustCompile(`(?i)(^|[;&|\n])[[:space:]]*(?:sudo[[:space:]]+)?(?:cat|head|tail|grep|sed|awk|wc|diff|file|sqlite3|jq|xxd|strings|ls|rm|cp|mv|mkdir|touch|chmod|chown|tar|unzip)[^;&|\n]*[[:space:]"']/tmp/`)
+var benchmarkHostTempOutputPattern = regexp.MustCompile(`(?i)(^|[[:space:]])(?:-o|-O|--output(?:=)?|>{1,2})[=[:space:]]*["']?/tmp/`)
+var benchmarkHostTempCurlFilePattern = regexp.MustCompile(`(?i)(^|[;&|\n])[[:space:]]*(?:sudo[[:space:]]+)?(?:[^[:space:];|]+/)?curl[^;&|\n]*(?:-b|-c|--cookie|--cookie-jar|--config)[=[:space:]]+["']?/tmp/`)
+var benchmarkBroadHostTraversalPattern = regexp.MustCompile(`(?im)(^|[;&|])[[:space:]]*(?:sudo[[:space:]]+)?(?:[^[:space:];|]+/)?(?:find|du)[[:space:]]+["']?/["']?(?:[[:space:]]|$)`)
+
+// hookBenchmarkIsolationGuard keeps real-world benchmark evidence honest.
+// A fixture may be hosted locally for repeatability, but the scanning agent
+// must interact with it exactly as it would with a remote target. Inspecting
+// Docker/containerd or entering the fixture container turns a black-box test
+// into host-assisted white-box access and invalidates the score.
+func hookBenchmarkIsolationGuard(state *ScanState, args map[string]string) HookResult {
+	if state == nil || !state.BenchmarkIsolated {
+		return HookResult{}
+	}
+	toolName := args["tool_name"]
+	if toolName != "terminal_execute" && toolName != "python_action" {
+		return HookResult{}
+	}
+	command := args["command"]
+	if command == "" {
+		command = args["code"]
+	}
+	if toolName == "terminal_execute" && benchmarkBroadHostTraversalPattern.MatchString(command) {
+		return HookResult{
+			ForceSkip: true,
+			Nudge:     "⛔ BENCHMARK WORKSPACE: do not crawl the scanner host root with find / or du /. Search only a known bounded path (for example /usr/share/wordlists) and keep generated scanner-side artifacts under relative tmp/ in the isolated scan workspace.",
+		}
+	}
+	lower := strings.ToLower(command)
+	if !benchmarkHostToolPattern.MatchString(command) &&
+		!strings.Contains(lower, "docker.sock") &&
+		!strings.Contains(lower, "containerd.sock") {
+		if !benchmarkHostTempConsumerPattern.MatchString(command) &&
+			!benchmarkHostTempOutputPattern.MatchString(command) &&
+			!benchmarkHostTempCurlFilePattern.MatchString(command) {
+			return HookResult{}
+		}
+		return HookResult{
+			ForceSkip: true,
+			Nudge:     "⛔ BENCHMARK WORKSPACE: local scanner scratch must stay under relative tmp/ in the isolated scan workspace, never host /tmp. Re-run the same command with /tmp/<name> changed to tmp/<name>. Remote target paths such as /tmp/flag may still be sent inside an HTTP request or exploit payload.",
+		}
+	}
+	return HookResult{
+		ForceSkip: true,
+		Nudge:     "⛔ BENCHMARK ISOLATION: host/container introspection is unavailable. Do not use docker, podman, kubectl, nsenter, runtime sockets, or local fixture internals. Establish every finding only through the configured target interface (or an explicitly attached white-box source tree), exactly as on a remote assessment.",
+	}
+}
 
 // hookReportRetryGuard prevents a model from repeatedly invoking a report
 // that has already failed the schema validator three times. The old behavior
@@ -446,7 +513,7 @@ func hookSlowReconGuard(state *ScanState, args map[string]string) HookResult {
 	}
 	return HookResult{
 		ForceSkip: true,
-		Nudge: "⛔ Blocked a rate-throttled FULL-port nmap scan (`-p-` with `--scan-delay`/low `--max-rate`): at the throttled rate that scans all 65535 ports for HOURS and would burn your scan budget on recon before any testing. Re-run it BOUNDED — `nmap -sV -sC --top-ports 200 --open TARGET` (the rate flags are fine to keep) — and add specific extra ports with `-p 8080,8443,...` only when you have a concrete reason. Then move on to actually testing the app.",
+		Nudge:     "⛔ Blocked a rate-throttled FULL-port nmap scan (`-p-` with `--scan-delay`/low `--max-rate`): at the throttled rate that scans all 65535 ports for HOURS and would burn your scan budget on recon before any testing. Re-run it BOUNDED — `nmap -sV -sC --top-ports 200 --open TARGET` (the rate flags are fine to keep) — and add specific extra ports with `-p 8080,8443,...` only when you have a concrete reason. Then move on to actually testing the app.",
 	}
 }
 
@@ -480,16 +547,24 @@ func hookReportRetryGuard(state *ScanState, args map[string]string) HookResult {
 func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 	toolName := args["tool_name"]
 	state.UniqueToolsUsed[toolName] = true
-	if toolName == "spawn_agent" || toolName == "create_agent" {
+	if isMeaningfulSecurityTestCall(toolName, args) {
+		state.MeaningfulTestCalls++
+	}
+	// A malformed delegation call must not satisfy the coordinator contract.
+	// Both graph tools require name+task; marking an empty/split call as an
+	// attempt suppresses every later reminder even though no child was created.
+	if (toolName == "spawn_agent" || toolName == "create_agent") &&
+		strings.TrimSpace(args["name"]) != "" && strings.TrimSpace(args["task"]) != "" {
 		state.DelegationAttempted = true
 	}
 
 	if toolName == "terminal_execute" {
 		state.TerminalCalls++
-		cmd := strings.ToLower(args["command"])
+		rawCmd := args["command"]
+		cmd := strings.ToLower(rawCmd)
 
 		// Extract endpoint from curl/httpx commands for coverage tracking
-		endpoint := extractEndpointFromCmd(cmd)
+		endpoint := extractEndpointFromCmd(rawCmd)
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
 		}
@@ -531,45 +606,11 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 			state.InjectionTested = true
 		}
 
-		// ── Granular vuln class tracking ──
-		// Detect individual vuln classes beyond the broad "injection" bucket.
-		// These feed the coverage nudge in hookFinishGatekeeper.
-		if strings.Contains(cmd, "sqlmap") || strings.Contains(cmd, "' or ") ||
-			strings.Contains(cmd, "' and ") || strings.Contains(cmd, "union select") ||
-			strings.Contains(cmd, "sleep(") {
-			state.VulnClassesTested["sqli"] = true
-		}
-		if strings.Contains(cmd, "<script") || strings.Contains(cmd, "alert(") ||
-			strings.Contains(cmd, "onerror") || strings.Contains(cmd, "<img") ||
-			strings.Contains(cmd, "dalfox") {
-			state.VulnClassesTested["xss"] = true
-		}
-		if strings.Contains(cmd, "{{7*7}}") || strings.Contains(cmd, "${7*7}") ||
-			strings.Contains(cmd, "<%=7*7%>") || strings.Contains(cmd, "#{7*7}") ||
-			strings.Contains(cmd, "ssti") {
-			state.VulnClassesTested["ssti"] = true
-		}
-		if strings.Contains(cmd, "%0d%0a") || strings.Contains(cmd, "\\r\\n") ||
-			strings.Contains(cmd, "crlf") {
-			state.VulnClassesTested["crlf"] = true
-		}
-		if strings.Contains(cmd, "; id") || strings.Contains(cmd, "| id") ||
-			strings.Contains(cmd, "$(id)") || strings.Contains(cmd, "`id`") ||
-			strings.Contains(cmd, "; cat ") || strings.Contains(cmd, "| cat ") {
-			state.VulnClassesTested["cmdi"] = true
-		}
-		if strings.Contains(cmd, "../") || strings.Contains(cmd, "etc/passwd") ||
-			strings.Contains(cmd, "..%2f") {
-			state.VulnClassesTested["path_traversal"] = true
-		}
-		if strings.Contains(cmd, "169.254") || strings.Contains(cmd, "metadata") ||
-			strings.Contains(cmd, "ssrf") || strings.Contains(cmd, "127.0.0.1") {
-			state.VulnClassesTested["ssrf"] = true
-		}
-		if strings.Contains(cmd, "xml") || strings.Contains(cmd, "doctype") ||
-			strings.Contains(cmd, "entity") || strings.Contains(cmd, "xxe") {
-			state.VulnClassesTested["xxe"] = true
-		}
+		// Record the exact endpoint × class pairs represented by this request.
+		// Aggregate class booleans alone are insufficient: SQLi on /login must
+		// not make /search appear SQLi-tested.
+		recordDetectedClassCoverage(state, endpoint, cmd)
+
 		if strings.Contains(cmd, "interactsh") || strings.Contains(cmd, "oob_callback") ||
 			strings.Contains(cmd, "interact.sh") || strings.Contains(cmd, "oast") ||
 			strings.Contains(cmd, "oob_url") || strings.Contains(cmd, "burpcollaborator") {
@@ -577,28 +618,21 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		}
 		if strings.Contains(cmd, "ffuf") || strings.Contains(cmd, "gobuster") ||
 			strings.Contains(cmd, "dirsearch") || strings.Contains(cmd, "feroxbuster") {
-			state.VulnClassesTested["dirbusting"] = true
+			markEndpointClassCoverage(state, endpoint, "dirbusting")
 		}
 		if strings.Contains(cmd, "arjun") || strings.Contains(cmd, "x8 ") ||
 			strings.Contains(cmd, "paramspider") || strings.Contains(cmd, "parameth") {
-			state.VulnClassesTested["parameter_mining"] = true
+			markEndpointClassCoverage(state, endpoint, "parameter_mining")
 		}
 
 		// Detect access control testing — track unique endpoints
-		isAccessControl := strings.Contains(cmd, "/user/1") || strings.Contains(cmd, "/user/2") ||
-			strings.Contains(cmd, "id=1") || strings.Contains(cmd, "id=2") ||
-			strings.Contains(cmd, "role=admin") || strings.Contains(cmd, "isadmin") ||
-			strings.Contains(cmd, "x-forwarded-for") || strings.Contains(cmd, "x-original-url") ||
-			strings.Contains(cmd, "x-http-method-override") || strings.Contains(cmd, "x-rewrite-url") ||
-			strings.Contains(cmd, "-x options") || strings.Contains(cmd, "-x put") ||
-			strings.Contains(cmd, "-x patch") || strings.Contains(cmd, "-x delete") ||
-			(strings.Contains(cmd, "admin") && strings.Contains(cmd, "curl")) ||
-			strings.Contains(cmd, "authorization")
+		isAccessControl := containsAccessControlIndicator(cmd)
 		if isAccessControl {
 			if endpoint != "" {
 				state.AccessControlEndpoints[endpoint] = true
 			}
 			state.AccessControlTested = true
+			markEndpointClassCoverage(state, endpoint, "idor")
 		}
 
 		// Detect scanner usage
@@ -610,39 +644,39 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		}
 	}
 
-	// ── python_action vuln class tracking ──
-	// The agent sometimes uses python requests.get() instead of curl.
-	// Track vuln payloads in python code so coverage tracking still works.
+	// ── python_action coverage tracking ──
+	// The agent sometimes uses Python requests instead of curl. Track both the
+	// endpoint and the class pair so this path has the same semantics.
 	if toolName == "python_action" {
-		code := strings.ToLower(args["code"])
-		if code == "" {
-			code = strings.ToLower(args["script"])
+		rawCode := args["code"]
+		if rawCode == "" {
+			rawCode = args["script"]
 		}
-		if strings.Contains(code, "sqlmap") || strings.Contains(code, "' or ") ||
-			strings.Contains(code, "union select") || strings.Contains(code, "sleep(") {
-			state.VulnClassesTested["sqli"] = true
+		code := strings.ToLower(rawCode)
+		endpoint := extractEndpointFromCmd(rawCode)
+		if endpoint != "" {
+			state.EndpointsTested[endpoint] = true
 		}
-		if strings.Contains(code, "<script") || strings.Contains(code, "alert(") ||
-			strings.Contains(code, "onerror") {
-			state.VulnClassesTested["xss"] = true
+		recordDetectedClassCoverage(state, endpoint, code)
+	}
+
+	// Native HTTP tools and deterministic verifiers do not pass through the
+	// terminal branch. Count their concrete URL and payloads as well, otherwise
+	// the planner would repeatedly ask for work the agent already performed.
+	if toolName == "http_request" || toolName == "send_request" ||
+		toolName == "authz_matrix" || strings.HasPrefix(toolName, "verify_") ||
+		toolName == "browser_action" {
+		endpoint := endpointFromToolArgs(args)
+		if endpoint != "" {
+			state.EndpointsTested[endpoint] = true
 		}
-		if strings.Contains(code, "{{7*7}}") || strings.Contains(code, "${7*7}") ||
-			strings.Contains(code, "ssti") {
-			state.VulnClassesTested["ssti"] = true
+		requestText := joinedToolArgs(args)
+		recordDetectedClassCoverage(state, endpoint, requestText)
+		if (toolName == "http_request" || toolName == "send_request") &&
+			containsAccessControlIndicator(requestText) {
+			markEndpointClassCoverage(state, endpoint, "idor")
 		}
-		if strings.Contains(code, "%0d%0a") || strings.Contains(code, "crlf") {
-			state.VulnClassesTested["crlf"] = true
-		}
-		if strings.Contains(code, "; id") || strings.Contains(code, "| id") ||
-			strings.Contains(code, "$(id)") {
-			state.VulnClassesTested["cmdi"] = true
-		}
-		if strings.Contains(code, "../") || strings.Contains(code, "etc/passwd") {
-			state.VulnClassesTested["path_traversal"] = true
-		}
-		if strings.Contains(code, "169.254") || strings.Contains(code, "ssrf") {
-			state.VulnClassesTested["ssrf"] = true
-		}
+		recordVerifierCoverage(state, endpoint, toolName, args)
 	}
 
 	if toolName == "read_skill" {
@@ -681,6 +715,312 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 	}
 
 	return HookResult{}
+}
+
+func isMeaningfulSecurityTestCall(toolName string, args map[string]string) bool {
+	switch toolName {
+	case "terminal_execute":
+		return strings.TrimSpace(args["command"]) != "" && !isTrivialCommand(args["command"])
+	case "browser_action":
+		switch strings.ToLower(strings.TrimSpace(args["command"])) {
+		case "", "launch", "snapshot", "wait", "get_url", "screenshot", "close":
+			return false
+		default:
+			return true
+		}
+	case "python_action", "http_request", "send_request",
+		"authz_matrix", "probe_hypothesis", "code_search", "scan_source_sinks",
+		"scan_source_routes", "report_vulnerability", "oob_callback":
+		return true
+	default:
+		return strings.HasPrefix(toolName, "verify_")
+	}
+}
+
+// recordDetectedClassCoverage classifies concrete payloads in a command or
+// request and records each class against the endpoint that received it.
+func recordDetectedClassCoverage(state *ScanState, endpoint, text string) {
+	for _, class := range detectedVulnClasses(text) {
+		markEndpointClassCoverage(state, endpoint, class)
+	}
+}
+
+// detectedVulnClasses returns only classes for which the text contains an
+// actual testing indicator. In particular, a local target URL by itself is not
+// an SSRF probe and a normal XML request is not an XXE probe.
+func detectedVulnClasses(text string) []string {
+	text = strings.ToLower(text)
+	var classes []string
+	if strings.Contains(text, "sqlmap") || strings.Contains(text, "' or ") ||
+		strings.Contains(text, "' and ") || strings.Contains(text, "union select") ||
+		strings.Contains(text, "sleep(") {
+		classes = append(classes, "sqli")
+	}
+	if strings.Contains(text, "<script") || strings.Contains(text, "alert(") ||
+		strings.Contains(text, "onerror") || strings.Contains(text, "<img") ||
+		strings.Contains(text, "dalfox") {
+		classes = append(classes, "xss")
+	}
+	if strings.Contains(text, "{{7*7}}") || strings.Contains(text, "${7*7}") ||
+		strings.Contains(text, "<%=7*7%>") || strings.Contains(text, "#{7*7}") ||
+		strings.Contains(text, "ssti") {
+		classes = append(classes, "ssti")
+	}
+	if strings.Contains(text, "%0d%0a") || strings.Contains(text, "\\r\\n") ||
+		strings.Contains(text, "crlf") {
+		classes = append(classes, "crlf")
+	}
+	if strings.Contains(text, "; id") || strings.Contains(text, "| id") ||
+		strings.Contains(text, "$(id)") || strings.Contains(text, "`id`") ||
+		strings.Contains(text, "; cat ") || strings.Contains(text, "| cat ") {
+		classes = append(classes, "cmdi")
+	}
+	if strings.Contains(text, "../") || strings.Contains(text, "etc/passwd") ||
+		strings.Contains(text, "..%2f") {
+		classes = append(classes, "path_traversal")
+	}
+	if containsSSRFIndicator(text) {
+		classes = append(classes, "ssrf")
+	}
+	if strings.Contains(text, "<!doctype") || strings.Contains(text, "<!entity") ||
+		strings.Contains(text, "xxe") {
+		classes = append(classes, "xxe")
+	}
+	if strings.Contains(text, "__proto__") || strings.Contains(text, "constructor.prototype") ||
+		strings.Contains(text, "prototype pollution") {
+		classes = append(classes, "prototype-pollution")
+	}
+	return classes
+}
+
+func containsSSRFIndicator(text string) bool {
+	if strings.Contains(text, "169.254.169.254") || strings.Contains(text, "ssrf") ||
+		strings.Contains(text, "gopher://") {
+		return true
+	}
+	// Loopback is an SSRF indicator only when it is supplied as an input value.
+	// The old raw "127.0.0.1" check classified every request to a local test
+	// target as SSRF coverage, making local benchmark results meaningless.
+	for _, marker := range []string{
+		"=http://127.0.0.1", "=https://127.0.0.1",
+		"=http://localhost", "=https://localhost",
+		"%3dhttp%3a%2f%2f127.0.0.1", "%3dhttp%3a%2f%2flocalhost",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAccessControlIndicator(text string) bool {
+	text = strings.ToLower(text)
+	return strings.Contains(text, "/user/1") || strings.Contains(text, "/user/2") ||
+		strings.Contains(text, "id=1") || strings.Contains(text, "id=2") ||
+		strings.Contains(text, "role=admin") || strings.Contains(text, "isadmin") ||
+		strings.Contains(text, "x-forwarded-for") || strings.Contains(text, "x-original-url") ||
+		strings.Contains(text, "x-http-method-override") || strings.Contains(text, "x-rewrite-url") ||
+		strings.Contains(text, "-x options") || strings.Contains(text, "-x put") ||
+		strings.Contains(text, "-x patch") || strings.Contains(text, "-x delete") ||
+		strings.Contains(text, "/admin")
+}
+
+// markEndpointClassCoverage updates both the exact matrix and the existing
+// coarse counters used by legacy depth/finish logic.
+func markEndpointClassCoverage(state *ScanState, endpoint, class string) {
+	if state == nil || class == "" {
+		return
+	}
+	if canonical := normalizeCoverageClass(class); canonical != "" {
+		class = canonical
+	}
+	if state.VulnClassesTested == nil {
+		state.VulnClassesTested = make(map[string]bool)
+	}
+	state.VulnClassesTested[class] = true
+
+	if endpoint == "" {
+		return
+	}
+	if state.EndpointClassCoverage == nil {
+		state.EndpointClassCoverage = make(map[string]map[string]bool)
+	}
+	shared := sharedCoverageForState(state)
+	for _, alias := range endpointCoverageAliases(endpoint) {
+		if state.EndpointClassCoverage[alias] == nil {
+			state.EndpointClassCoverage[alias] = make(map[string]bool)
+		}
+		state.EndpointClassCoverage[alias][class] = true
+		if shared != nil {
+			shared.Mark(alias, class)
+		}
+	}
+
+	switch class {
+	case "sqli", "xss", "ssti", "crlf", "cmdi", "path_traversal", "ssrf", "xxe", "prototype-pollution":
+		if state.InjectionEndpoints == nil {
+			state.InjectionEndpoints = make(map[string]bool)
+		}
+		state.InjectionEndpoints[endpoint] = true
+		state.InjectionTested = true
+	case "idor":
+		if state.AccessControlEndpoints == nil {
+			state.AccessControlEndpoints = make(map[string]bool)
+		}
+		state.AccessControlEndpoints[endpoint] = true
+		state.AccessControlTested = true
+	}
+}
+
+func sharedCoverageForState(state *ScanState) *scanctx.CoverageStore {
+	if state == nil || state.ScanContextID == "" {
+		return nil
+	}
+	if sc := scanctx.Get(state.ScanContextID); sc != nil {
+		return sc.Coverage
+	}
+	return nil
+}
+
+// endpointCoverageAliases makes absolute and inventory-relative forms meet in
+// the matrix. A request to example.com/api/users records both the scoped form
+// and /api/users, while retaining case-sensitive paths and ignoring queries.
+func endpointCoverageAliases(endpoint string) []string {
+	value := strings.Trim(strings.TrimSpace(endpoint), "\"'`,;)(}{[]<>")
+	if value == "" {
+		return nil
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+		path := normalizeCoveragePath(parsed.Path)
+		return []string{strings.ToLower(parsed.Host) + path, path}
+	}
+
+	if cut := strings.IndexAny(value, "?#"); cut >= 0 {
+		value = value[:cut]
+	}
+	if strings.HasPrefix(value, "/") {
+		return []string{normalizeCoveragePath(value)}
+	}
+	if slash := strings.Index(value, "/"); slash >= 0 {
+		host := strings.ToLower(value[:slash])
+		path := normalizeCoveragePath(value[slash:])
+		return []string{host + path, path}
+	}
+	return []string{strings.ToLower(value) + "/", "/"}
+}
+
+// endpointCoverageLookupAliases keeps host-qualified inventory entries scoped
+// to that host. Relative inventory paths necessarily use the path alias because
+// recon did not provide a host to distinguish them.
+func endpointCoverageLookupAliases(endpoint string) []string {
+	aliases := endpointCoverageAliases(endpoint)
+	if len(aliases) < 2 {
+		return aliases
+	}
+	value := strings.TrimSpace(endpoint)
+	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+		return aliases[:1]
+	}
+	if !strings.HasPrefix(value, "/") && strings.Contains(value, "/") {
+		return aliases[:1]
+	}
+	return aliases
+}
+
+func normalizeCoveragePath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if len(path) > 1 {
+		path = strings.TrimSuffix(path, "/")
+	}
+	return path
+}
+
+func endpointFromToolArgs(args map[string]string) string {
+	for _, key := range []string{"url", "target", "endpoint"} {
+		value := strings.TrimSpace(args[key])
+		if value == "" {
+			continue
+		}
+		if endpoint := extractEndpointFromCmd(value); endpoint != "" {
+			return endpoint
+		}
+		if strings.HasPrefix(value, "/") {
+			return value
+		}
+	}
+	return ""
+}
+
+func joinedToolArgs(args map[string]string) string {
+	var values []string
+	for key, value := range args {
+		if key != "tool_name" && key != "tool" {
+			values = append(values, value)
+		}
+	}
+	return strings.Join(values, " ")
+}
+
+func recordVerifierCoverage(state *ScanState, endpoint, toolName string, args map[string]string) {
+	class := ""
+	switch toolName {
+	case "verify_sqli":
+		class = "sqli"
+	case "verify_ssti":
+		class = "ssti"
+	case "verify_xss":
+		class = "xss"
+	case "verify_xxe":
+		class = "xxe"
+	case "verify_csrf":
+		class = "csrf"
+	case "authz_matrix":
+		class = "idor"
+	case "browser_action":
+		if strings.EqualFold(args["command"], "verify_xss") {
+			class = "xss"
+		}
+	case "verify_oob":
+		class = normalizeCoverageClass(args["vuln_class"])
+		if class == "" {
+			class = normalizeCoverageClass(args["class"])
+		}
+	}
+	markEndpointClassCoverage(state, endpoint, class)
+}
+
+func normalizeCoverageClass(class string) string {
+	switch strings.ToLower(strings.TrimSpace(class)) {
+	case "sqli", "sql_injection", "sql-injection":
+		return "sqli"
+	case "xss", "cross_site_scripting", "cross-site-scripting":
+		return "xss"
+	case "ssti", "server_side_template_injection", "server-side-template-injection":
+		return "ssti"
+	case "xxe":
+		return "xxe"
+	case "ssrf":
+		return "ssrf"
+	case "cmdi", "command_injection", "command-injection", "rce":
+		return "cmdi"
+	case "path_traversal", "path-traversal", "lfi":
+		return "path_traversal"
+	case "crlf":
+		return "crlf"
+	case "idor", "bola", "bfla":
+		return "idor"
+	case "csrf":
+		return "csrf"
+	case "prototype-pollution", "prototype_pollution":
+		return "prototype-pollution"
+	default:
+		return ""
+	}
 }
 
 // extractEndpointFromCmd extracts a URL path from any command containing an HTTP URL.
@@ -788,7 +1128,7 @@ Reserve send_request ONLY for authenticated requests that need Caido proxy loggi
 				Nudge: fmt.Sprintf(`⛔ STOP using send_request (%d calls) — you are missing data due to 10KB truncation.
 Switch to curl immediately:
   curl -sk -X %s <URL> -H "Content-Type: application/json" -d '{"key":"value"}'
-  curl -sk <URL> -o /tmp/response.html && wc -c /tmp/response.html
+  mkdir -p tmp && curl -sk <URL> -o tmp/response.html && wc -c tmp/response.html
 
 send_request is ONLY for:
 ✅ Requests with session cookies after browser login (authenticated testing)
@@ -1326,6 +1666,10 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 	if state.FinishAttempts > maxRejections {
 		return HookResult{}
 	}
+	// A verifier may have completed the final endpoint/class pair in the same
+	// iteration as finish. Reconcile here as well as at iteration start so the
+	// gate evaluates current evidence rather than a one-turn-old plan snapshot.
+	reconcilePlan(state)
 
 	// Discovery mode (Phase 1 enumeration): allow finish after minimum work
 	if state.DiscoveryMode {
@@ -1356,6 +1700,21 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 				"In-band HTTP responses alone cannot prove the non-existence of blind XXE or blind SSRF (e.g. egress DNS/HTTP requests).\n" +
 				"Generate an OAST domain (using interactsh / oob_callback) and send external DTD/SSRF payload requests before finishing.",
 		}
+	}
+
+	// Delegated specialists receive a bounded lane from the coordinator. They
+	// should return once that lane's plan/evidence contract is complete; forcing
+	// every specialist through the coordinator's five-shell-command, full-recon,
+	// inventory, and 50-iteration gates creates runaway workers that the root can
+	// never collect. Still require a real security action and honor their plan.
+	if state.DelegatedAgent {
+		if state.MeaningfulTestCalls < 1 {
+			return HookResult{
+				Block:       true,
+				BlockReason: "Delegated specialist has not performed a security test yet. Exercise or verify at least one assigned hypothesis, record the evidence, then finish.",
+			}
+		}
+		return planFinishGate(state, maxRejections)
 	}
 
 	iter := state.Iteration
@@ -1422,21 +1781,27 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 		categoriesCovered++
 	}
 
+	adaptiveCoverageMet := false
 	if state.ReconDone && state.EndpointInventorySaved && dirBustingCount >= 1 && categoriesCovered >= 2 {
 		// Small surface (< 5 endpoints): allow finish at 25+ iterations with deep testing
 		if totalEndpoints < 5 && iter >= 25 && depth >= 2.0 {
-			// Verified small target with thorough testing — allow finish
-			return HookResult{}
+			adaptiveCoverageMet = true
 		}
 
 		// Medium surface (5-15 endpoints): allow finish at 40+ iterations with good testing
 		if totalEndpoints >= 5 && totalEndpoints <= 15 && iter >= 40 && depth >= 1.5 {
-			return HookResult{}
+			adaptiveCoverageMet = true
 		}
+	}
+	// Preserve the fast path when there is no structural plan. When a plan does
+	// exist, adaptive depth skips the iteration floor but must not bypass its
+	// remaining endpoint/class tasks.
+	if adaptiveCoverageMet && (state.Plan == nil || state.Plan.IsEmpty()) {
+		return HookResult{}
 	}
 
 	// ── Proportional coverage gates (for targets below 50 iterations) ──
-	if iter < 50 {
+	if iter < 50 && !adaptiveCoverageMet {
 		missing := []string{}
 
 		// Injection: require at least 3 unique endpoints tested (or all if < 3 exist)
@@ -1473,7 +1838,7 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 
 	// ── Iteration floor ──
 	// Matches the system prompt: "Minimum iterations for a thorough assessment"
-	if iter < minIter {
+	if iter < minIter && !adaptiveCoverageMet {
 		if state.FinishAttempts <= maxRejections {
 			scannerNote := ""
 			if !state.ScannerUsed {
@@ -1513,6 +1878,7 @@ Execute your next tool call NOW.`, iter, minIter, coverageNote, scannerNote, ski
 		"ssrf":             "SSRF: try http://169.254.169.254, http://127.0.0.1 in URL params",
 		"crlf":             "CRLF: try %0d%0aInjected-Header:true in URL params and headers",
 		"xxe":              "XXE: try <!DOCTYPE test [<!ENTITY xxe SYSTEM \"http://...\">]> in XML endpoints",
+		"csrf":             "CSRF: use verify_csrf on cookie-authenticated state-changing actions",
 		"parameter_mining": "Parameter Mining: try arjun -u, x8, or ffuf parameter key discovery on endpoint URLs",
 	}
 
@@ -1528,9 +1894,9 @@ Execute your next tool call NOW.`, iter, minIter, coverageNote, scannerNote, ski
 		sort.Strings(missingClasses) // deterministic order
 		return HookResult{
 			Block: true,
-			BlockReason: fmt.Sprintf("⚠️ Coverage gap: you haven't tested %d/9 mandatory vulnerability classes:\n\n%s\n\n"+
+			BlockReason: fmt.Sprintf("⚠️ Coverage gap: you haven't tested %d/%d mandatory vulnerability classes:\n\n%s\n\n"+
 				"Run at least ONE test for each missing class on the most promising endpoints, then call finish again.",
-				len(missingClasses), strings.Join(missingClasses, "\n")),
+				len(missingClasses), len(mandatoryClasses), strings.Join(missingClasses, "\n")),
 		}
 	}
 
@@ -1551,56 +1917,62 @@ Execute your next tool call NOW.`, iter, minIter, coverageNote, scannerNote, ski
 	// ── Plan-based finish gate ──
 	// If a structural plan exists, block finish if there are pending/active tasks,
 	// OR if tasks were skipped using invalid early-abort excuses (e.g. "RCE already found").
-	if state.Plan != nil && !state.Plan.IsEmpty() {
-		var remaining []string
-		var invalidSkips []string
-
-		for _, t := range state.Plan.Tasks {
-			if t.ID == "verify" || t.ID == "report" {
-				continue // the finish step itself
-			}
-			if t.Status == TaskPending || t.Status == TaskActive {
-				remaining = append(remaining, fmt.Sprintf("  • [%s] phase %d — %s", t.ID, t.Phase, t.Title))
-				continue
-			}
-			if t.Status == TaskSkipped && state.FinishAttempts <= maxRejections {
-				note := strings.ToLower(t.Notes)
-				if strings.Contains(note, "rce") || strings.Contains(note, "sqli") ||
-					strings.Contains(note, "already achieved") || strings.Contains(note, "already found") ||
-					strings.Contains(note, "already bypass") {
-					invalidSkips = append(invalidSkips, fmt.Sprintf("  • [%s] skipped with excuse: %q", t.ID, t.Notes))
-				}
-			}
-		}
-
-		if len(invalidSkips) > 0 {
-			list := strings.Join(invalidSkips, "\n")
-			return HookResult{
-				Block: true,
-				BlockReason: fmt.Sprintf("⚠️ INVALID PLAN TASK SKIPS DETECTED:\n%s\n\n"+
-					"Finding RCE or SQLi on one endpoint does NOT justify skipping vulnerability testing on other endpoints or classes.\n"+
-					"A comprehensive penetration test requires auditing all attack surface tasks. Re-open and execute these tasks before finishing.",
-					list),
-			}
-		}
-
-		if len(remaining) > 0 {
-			// Cap the list so a huge plan doesn't flood the block reason.
-			list := strings.Join(remaining, "\n")
-			if len(remaining) > 8 {
-				list = strings.Join(remaining[:8], "\n") + fmt.Sprintf("\n  … +%d more", len(remaining)-8)
-			}
-			return HookResult{
-				Block: true,
-				BlockReason: fmt.Sprintf("Your scan plan still has %d unfinished task(s):\n%s\n\n"+
-					"Complete or skip each before finishing. Call update_plan with status 'skipped' for "+
-					"tasks that don't apply to this target (e.g. no auth surface → skip 'auth-session').",
-					len(remaining), list),
-			}
-		}
+	if result := planFinishGate(state, maxRejections); result.Block {
+		return result
 	}
 
 	// After 50 iterations with coverage met: allow finish
+	return HookResult{}
+}
+
+// planFinishGate applies the structural-plan portion of the finish contract.
+// It is shared by delegated specialists, which intentionally skip the root
+// scan's broad reconnaissance and iteration floors.
+func planFinishGate(state *ScanState, maxRejections int) HookResult {
+	if state == nil || state.Plan == nil || state.Plan.IsEmpty() {
+		return HookResult{}
+	}
+	var remaining []string
+	var invalidSkips []string
+	for _, task := range state.Plan.Tasks {
+		if task.ID == "verify" || task.ID == "report" {
+			continue
+		}
+		if task.Status == TaskPending || task.Status == TaskActive {
+			remaining = append(remaining, fmt.Sprintf("  • [%s] phase %d — %s", task.ID, task.Phase, task.Title))
+			continue
+		}
+		if task.Status == TaskSkipped && state.FinishAttempts <= maxRejections {
+			note := strings.ToLower(task.Notes)
+			if strings.Contains(note, "rce") || strings.Contains(note, "sqli") ||
+				strings.Contains(note, "already achieved") || strings.Contains(note, "already found") ||
+				strings.Contains(note, "already bypass") {
+				invalidSkips = append(invalidSkips, fmt.Sprintf("  • [%s] skipped with excuse: %q", task.ID, task.Notes))
+			}
+		}
+	}
+	if len(invalidSkips) > 0 {
+		return HookResult{
+			Block: true,
+			BlockReason: fmt.Sprintf("⚠️ INVALID PLAN TASK SKIPS DETECTED:\n%s\n\n"+
+				"Finding RCE or SQLi on one endpoint does NOT justify skipping vulnerability testing on other endpoints or classes.\n"+
+				"A comprehensive penetration test requires auditing all attack surface tasks. Re-open and execute these tasks before finishing.",
+				strings.Join(invalidSkips, "\n")),
+		}
+	}
+	if len(remaining) > 0 {
+		list := strings.Join(remaining, "\n")
+		if len(remaining) > 8 {
+			list = strings.Join(remaining[:8], "\n") + fmt.Sprintf("\n  … +%d more", len(remaining)-8)
+		}
+		return HookResult{
+			Block: true,
+			BlockReason: fmt.Sprintf("Your scan plan still has %d unfinished task(s):\n%s\n\n"+
+				"Complete or skip each before finishing. Call update_plan with status 'skipped' for "+
+				"tasks that don't apply to this target (e.g. no auth surface → skip 'auth-session').",
+				len(remaining), list),
+		}
+	}
 	return HookResult{}
 }
 
@@ -1906,13 +2278,25 @@ func isRefusal(response string) bool {
 // deliberately a one-time nudge rather than unconditional auto-spawning: small
 // targets and tightly budgeted scans should retain control over provider cost.
 func hookDelegationCoordinator(state *ScanState, args map[string]string) HookResult {
-	if state == nil || state.DiscoveryMode || state.ReconOnlyMode ||
-		state.DelegationAttempted || state.DelegationNudgeFired ||
-		!state.ReconDone || state.Iteration < 5 {
+	if state == nil || state.DiscoveryMode || state.ReconOnlyMode || state.DelegatedAgent ||
+		state.DelegationAttempted || !state.ReconDone || state.Iteration < 5 || state.Plan == nil ||
+		!state.PlanBuilt || !state.LedgerSeeded {
 		return HookResult{}
+	}
+	if state.DelegationNudgeFired {
+		// Give the coordinator one full turn to inspect the shared ledger. If it
+		// ignores the nudge or emits an invalid spawn call, repeat a compact,
+		// schema-explicit reminder twice. This is bounded, so an incapable model
+		// cannot be trapped in a delegation-only loop.
+		if state.Iteration < state.DelegationNudgeAt+2 || state.DelegationReminders >= 2 {
+			return HookResult{}
+		}
+		state.DelegationReminders++
+		return HookResult{Nudge: "⛔ DELEGATION STILL PENDING: no valid specialist was launched. Call spawn_agent NOW with BOTH required parameters: name and task. Launch one bounded, non-overlapping wave (2–3 specialists total); do not continue serial whole-target testing first."}
 	}
 
 	state.DelegationNudgeFired = true
+	state.DelegationNudgeAt = state.Iteration
 	// The nudge is built from the deterministic specialist profiles and the
 	// shared ledger's schedulable hypotheses (see ledger_hooks.go), so the
 	// coordinator assigns disjoint, contract-bound work instead of three generic
@@ -1994,6 +2378,23 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	if state.EndpointInventorySaved {
 		state.DiscoveredEndpoints = extractEndpointsFromNotes(state)
 	}
+	// Do not wait for the model to attempt finish and be told to save an
+	// Endpoint Inventory before planning. hookWorkTracker already records live
+	// endpoints from curl/httpx/etc.; those observations are enough to seed an
+	// initial, bounded plan and launch the single specialist wave early. A later
+	// explicit inventory remains authoritative and replaces this provisional
+	// surface above.
+	if !state.EndpointInventorySaved && state.ReconDone && len(state.DiscoveredEndpoints) == 0 {
+		state.DiscoveredEndpoints = observedEndpointsForPlanning(state.EndpointsTested, 12)
+	}
+	// Delegated specialists are already assigned one bounded lane by the root.
+	// AutoPlan is a whole-target plan; creating it here silently expands every
+	// child back into a complete 22-phase scan and makes its finish gate wait on
+	// unrelated classes. A specialist may still build an explicit lane-local
+	// plan with build_plan, which is reconciled below as usual.
+	if state.DelegatedAgent && state.Plan == nil {
+		return HookResult{}
+	}
 
 	// Auto-build a plan once recon is done and we have either a seeded surface
 	// or a discovered inventory. The LLM may have already called build_plan, in
@@ -2004,9 +2405,8 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 		state.PlanBuilt = true
 	}
 
-	// Reconcile plan status against live coverage: any task whose vuln class
-	// now has coverage evidence (VulnClassesTested) is marked completed so the
-	// plan reflects reality, not the model's self-report.
+	// Reconcile plan status against exact endpoint × class coverage so a test on
+	// one route cannot complete the grouped task for every discovered route.
 	reconcilePlan(state)
 
 	// Inject the plan brief + coverage gaps as a per-iteration nudge. Keep it
@@ -2020,6 +2420,29 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 		}
 	}
 	return HookResult{}
+}
+
+// observedEndpointsForPlanning turns the request tracker into a deterministic,
+// bounded provisional attack surface. The tracker contains only endpoints that
+// were actually exercised, so this never invents routes or trusts fixture
+// metadata. Sorting prevents map iteration order from changing the plan/prompt
+// between otherwise identical runs.
+func observedEndpointsForPlanning(observed map[string]bool, limit int) []string {
+	if limit <= 0 || len(observed) == 0 {
+		return nil
+	}
+	endpoints := make([]string, 0, minInt(limit, len(observed)))
+	for endpoint, seen := range observed {
+		endpoint = strings.TrimSpace(endpoint)
+		if seen && endpoint != "" {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	sort.Strings(endpoints)
+	if len(endpoints) > limit {
+		endpoints = endpoints[:limit]
+	}
+	return endpoints
 }
 
 // reconcilePlan marks a plan's tasks completed when their vuln class shows
@@ -2053,7 +2476,7 @@ func reconcilePlan(state *ScanState) {
 			// Tail tasks complete via finish; leave pending until the model
 			// calls finish, which the gate consults.
 		default:
-			if t.VulnClass != "" && state.VulnClassesTested[t.VulnClass] {
+			if taskCoverageComplete(state, t) {
 				t.Status = TaskCompleted
 			}
 		}

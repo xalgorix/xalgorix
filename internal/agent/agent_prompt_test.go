@@ -31,6 +31,8 @@ func TestSystemPromptIncludesCollectableMultiAgentWorkflow(t *testing.T) {
 
 	for _, expected := range []string{
 		"## Multi-Agent Coordinator",
+		"ONE wave",
+		"3 delegated agents total for the entire scan",
 		"NON-OVERLAPPING specialists",
 		"Authorization & business logic",
 		"call wait_agent/check_agent for EVERY delegation",
@@ -43,6 +45,154 @@ func TestSystemPromptIncludesCollectableMultiAgentWorkflow(t *testing.T) {
 	}
 	if strings.Contains(prompt, "%!") {
 		t.Fatalf("prompt contains fmt diagnostic, likely a placeholder/argument mismatch")
+	}
+}
+
+func TestBuildDelegatedTaskInstructionEnforcesProfessionalLaneExhaustion(t *testing.T) {
+	got := buildDelegatedTaskInstruction(
+		"Test the assigned injection hypotheses.",
+		"sub-injection",
+		false,
+	)
+	for _, want := range []string{
+		"Test the assigned injection hypotheses.",
+		"owner sub-injection",
+		"Do not spawn or delegate additional agents",
+		"Do not stop after the first finding",
+		"claim_next_hypothesis",
+		"report every distinct proven vulnerability",
+		"read_ledger again",
+		"full assigned lane is exhausted",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("delegated contract missing %q\n---\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildDelegatedTaskInstructionPreservesExplicitCTFMission(t *testing.T) {
+	const task = "Solve this CTF and retrieve FLAG{...}."
+	if got := buildDelegatedTaskInstruction(task, "sub-ctf", true); got != task {
+		t.Fatalf("explicit CTF task should remain unchanged, got:\n%s", got)
+	}
+	if !isExplicitCTFMission(task) {
+		t.Fatal("expected explicit flag objective to classify as CTF")
+	}
+	if isExplicitCTFMission("Perform a professional assessment; this is not a CTF.") {
+		t.Fatal("a professional not-a-CTF instruction must not enable single-flag stopping")
+	}
+}
+
+func TestDelegatedSystemPromptRemovesRootWorkflowContradictions(t *testing.T) {
+	agent := &Agent{
+		cfg:              &config.Config{RateLimitRPS: 2},
+		registry:         tools.NewRegistry(),
+		delegatedAgentID: "sub-injection",
+	}
+	prompt := agent.buildSystemPrompt(
+		[]string{"https://example.test"},
+		buildDelegatedTaskInstruction("Test assigned SQL injection hypotheses.", "sub-injection", false),
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+	for _, forbidden := range []string{
+		"Minimum 50 iterations",
+		"act as a coordinator and use spawn_agent",
+		"### PHASE 22: Final Report",
+		"fully exploiting ONE real weakness wins the bounty",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("delegated prompt retained contradictory root instruction %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"## Delegated Specialist — bounded lane",
+		"Do not call spawn_agent",
+		"no fixed iteration minimum",
+		"The stopping condition is lane exhaustion",
+		"Test assigned SQL injection hypotheses.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("delegated prompt missing %q", want)
+		}
+	}
+}
+
+func TestProfessionalPromptRequiresDepthAndCompleteCoverage(t *testing.T) {
+	agent := &Agent{
+		cfg:      &config.Config{RateLimitRPS: 2},
+		registry: tools.NewRegistry(),
+	}
+	prompt := agent.buildSystemPrompt(
+		[]string{"https://example.test"},
+		"Perform a full professional assessment; this is not a CTF.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+	for _, want := range []string{
+		"uncovered attack surface is a miss",
+		"endpoint × vulnerability-class ledger",
+		"continue after every finding",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("professional prompt missing %q", want)
+		}
+	}
+	if strings.Contains(prompt, "fully exploiting ONE real weakness wins the bounty") {
+		t.Fatal("professional prompt retained the single-finding objective")
+	}
+}
+
+func TestProfessionalPromptKeepsLocalScratchInsideWorkspaceTmp(t *testing.T) {
+	agent := &Agent{
+		cfg:      &config.Config{RateLimitRPS: 2},
+		registry: tools.NewRegistry(),
+	}
+	prompt := agent.buildSystemPrompt(
+		[]string{"https://example.test"},
+		"Perform a full professional assessment; this is not a CTF.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+	for _, want := range []string{
+		"put local scratch files under relative",
+		"mkdir -p tmp",
+		"NEVER store scanner artifacts",
+		"tmp/main_page.html",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("professional prompt missing workspace-local scratch rule %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"-o /tmp/main_page.html",
+		"-o /tmp/bundle.js",
+		"-o /tmp/baseline.txt",
+		"-o /tmp/special.txt",
+		"> /tmp/js_chunks.txt",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("professional prompt still writes local scratch outside the workspace: %q", forbidden)
+		}
+	}
+}
+
+func TestBenchmarkPromptForbidsHostAssistedEvidence(t *testing.T) {
+	agent := &Agent{
+		cfg:               &config.Config{RateLimitRPS: 2},
+		registry:          tools.NewRegistry(),
+		benchmarkIsolated: true,
+	}
+	prompt := agent.buildSystemPrompt(
+		[]string{"http://127.0.0.1:3300"},
+		"Perform a full professional assessment; this is not a CTF.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+	for _, want := range []string{
+		"BENCHMARK ISOLATION — NETWORK EVIDENCE ONLY",
+		"Never inspect or enter the host/container runtime",
+		"Host-assisted evidence invalidates the score",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("benchmark prompt missing isolation rule %q", want)
+		}
 	}
 }
 

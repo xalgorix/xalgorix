@@ -78,6 +78,24 @@ func TestCheckFabricatedFinding(t *testing.T) {
 			severity:   "medium",
 			wantReject: false,
 		},
+		{
+			name:       "proven secret explicitly described as not a placeholder is kept",
+			title:      "Admin credential disclosure via path traversal",
+			endpoint:   "https://grafana.example.com/public/plugins/alertlist/../../../../var/lib/grafana/grafana.db",
+			desc:       "The extracted password hash is a populated production value, not a placeholder or example secret.",
+			proof:      "SQLite returned admin|admin@example.com|28d8937ca73535e3bed703033712d402b99eaa122b86579e9, proving extraction of the stored administrator password hash.",
+			severity:   "high",
+			wantReject: false,
+		},
+		{
+			name:       "explicit placeholder report in body is rejected",
+			title:      "Blind SQL injection",
+			endpoint:   "https://example.com/search",
+			desc:       "This report is a placeholder because the endpoint could not be tested.",
+			proof:      "No callback was observed.",
+			severity:   "high",
+			wantReject: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

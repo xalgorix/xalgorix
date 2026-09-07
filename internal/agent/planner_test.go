@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
 // AutoPlan must produce a dependency-ordered graph: recon first, vuln-class
@@ -25,7 +28,7 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 		t.Errorf("recon should have no dependencies, got %q", dep)
 	}
 
-	// java → ssti should be included
+	// SSTI is a baseline lane even when fingerprinting is incomplete.
 	if p.Get("test-ssti") == nil {
 		t.Error("java tech should produce an ssti task")
 	}
@@ -79,6 +82,15 @@ func TestAutoPlanBlackBox(t *testing.T) {
 	if p.Get("test-sqli") == nil {
 		t.Error("black-box plan should still include core vuln-class tasks")
 	}
+	for _, class := range requiredCoverageClasses() {
+		taskID := "test-" + class
+		if class == "idor" {
+			taskID = "idor"
+		}
+		if p.Get(taskID) == nil {
+			t.Errorf("coverage requires %q but auto-plan has no matching task %q", class, taskID)
+		}
+	}
 }
 
 // NextTasks returns pending tasks whose dependencies are satisfied, ordered by
@@ -124,19 +136,27 @@ func TestNextTasksNoDeadlock(t *testing.T) {
 	}
 }
 
-// CoverageGaps flags discovered endpoints not tested per class; once a class is
-// tested anywhere, that class's per-endpoint gaps collapse (the finish gate's
-// depth math enforces per-endpoint depth separately).
+// CoverageGaps keeps endpoint × class evidence separate. Testing SQLi once (or
+// merely touching an endpoint) must not collapse SQLi gaps across the surface.
 func TestCoverageGaps(t *testing.T) {
 	state := NewScanState()
-	state.VulnClassesTested["sqli"] = true // sqli exercised somewhere
+	state.VulnClassesTested["sqli"] = true // aggregate evidence is not enough
+	state.EndpointsTested["example.com/api/leads"] = true
+	markEndpointClassCoverage(state, "https://example.com/api/users?id=1", "sqli")
 	endpoints := []string{"/api/users", "/api/leads"}
 
 	gaps := CoverageGaps(state, endpoints)
+	var sqliGaps int
 	for _, g := range gaps {
 		if g.VulnClass == "sqli" {
-			t.Errorf("sqli has coverage evidence — should not appear in gaps, got %+v", g)
+			sqliGaps++
+			if g.Endpoint != "/api/leads" {
+				t.Errorf("unexpected SQLi gap after exact /api/users coverage: %+v", g)
+			}
 		}
+	}
+	if sqliGaps != 1 {
+		t.Errorf("sqli gaps = %d, want 1; global class or generic endpoint evidence must not collapse it", sqliGaps)
 	}
 	// xss has no coverage → each discovered endpoint is a gap.
 	var xssGaps int
@@ -169,11 +189,64 @@ func TestCoverageGapsBlackBox(t *testing.T) {
 	}
 }
 
+func TestHookPlannerDoesNotExpandDelegatedAgentIntoFullScan(t *testing.T) {
+	state := NewScanState()
+	state.DelegatedAgent = true
+	state.ReconDone = true
+	state.DiscoveredEndpoints = []string{"/assigned"}
+	state.DetectedTechs["java"] = true
+
+	if got := hookPlanner(state, nil); got.Nudge != "" {
+		t.Fatalf("delegated specialist without a lane-local plan should not receive a root plan nudge: %s", got.Nudge)
+	}
+	if state.Plan != nil || state.PlanBuilt {
+		t.Fatal("delegated specialist was incorrectly expanded into a whole-target AutoPlan")
+	}
+}
+
+func TestEndpointCoverageKeepsQualifiedHostsSeparate(t *testing.T) {
+	state := NewScanState()
+	markEndpointClassCoverage(state, "https://api-a.example.test/search", "xss")
+	if !endpointTestedForClass(state, "https://api-a.example.test/search", "xss") {
+		t.Error("the tested host-qualified endpoint should be covered")
+	}
+	if endpointTestedForClass(state, "https://api-b.example.test/search", "xss") {
+		t.Error("the same path on a different discovered host must remain a gap")
+	}
+}
+
+func TestEndpointCoverageIsSharedAcrossDelegatedAgents(t *testing.T) {
+	contextID := "shared-coverage-" + t.Name()
+	ctx := scanctx.New(contextID, t.TempDir())
+	scanctx.Activate(ctx)
+	t.Cleanup(func() {
+		scanctx.Deactivate(contextID)
+		ctx.Close()
+	})
+
+	coordinator := NewScanState()
+	coordinator.ScanContextID = contextID
+	specialist := NewScanState()
+	specialist.ScanContextID = contextID
+
+	markEndpointClassCoverage(specialist, "https://target.example/api/users?id=1", "sqli")
+	if !endpointTestedForClass(coordinator, "https://target.example/api/users", "sqli") {
+		t.Fatal("coordinator did not observe exact coverage executed by its specialist")
+	}
+	if endpointTestedForClass(coordinator, "https://target.example/api/admin", "sqli") {
+		t.Fatal("specialist coverage leaked to an untested endpoint")
+	}
+	if endpointTestedForClass(coordinator, "https://target.example/api/users", "xss") {
+		t.Fatal("specialist coverage leaked to an untested class")
+	}
+}
+
 // reconcilePlan marks tasks completed from live coverage evidence, so the plan
 // reflects reality without the model calling update_plan.
 func TestReconcilePlan(t *testing.T) {
 	state := NewScanState()
-	state.Plan = AutoPlan([]string{"/api/x"}, nil)
+	state.DiscoveredEndpoints = []string{"/api/x", "/api/y"}
+	state.Plan = AutoPlan(state.DiscoveredEndpoints, nil)
 	state.ReconDone = true
 	state.VulnClassesTested["sqli"] = true
 	state.DirBustingDone = true
@@ -182,8 +255,18 @@ func TestReconcilePlan(t *testing.T) {
 	if state.Plan.Get("recon").Status != TaskCompleted {
 		t.Error("recon should be completed after ReconDone")
 	}
+	if state.Plan.Get("test-sqli").Status == TaskCompleted {
+		t.Error("aggregate SQLi evidence must not complete a grouped endpoint task")
+	}
+	markEndpointClassCoverage(state, "/api/x", "sqli")
+	reconcilePlan(state)
+	if state.Plan.Get("test-sqli").Status == TaskCompleted {
+		t.Error("coverage on only one of two endpoints must not complete test-sqli")
+	}
+	markEndpointClassCoverage(state, "/api/y", "sqli")
+	reconcilePlan(state)
 	if state.Plan.Get("test-sqli").Status != TaskCompleted {
-		t.Error("test-sqli should be completed after sqli coverage evidence")
+		t.Error("test-sqli should complete after exact coverage on every discovered endpoint")
 	}
 	// verify/report stay pending (they complete via finish, not coverage).
 	if state.Plan.Get("verify").Status == TaskCompleted {
@@ -261,6 +344,16 @@ func TestUpdatePlanTool(t *testing.T) {
 		t.Error("recon should be completed")
 	}
 
+	// Models commonly infer test-idor from all the other test-* tasks. The
+	// alias must resolve to the dependency-aware idor task rather than reject.
+	res, _ = a.updatePlanTool(map[string]string{"task_id": "test-idor", "status": "active"})
+	if res.Error != "" {
+		t.Fatalf("test-idor alias should resolve to idor: %s", res.Error)
+	}
+	if a.state.Plan.Get("idor").Status != TaskActive {
+		t.Error("test-idor alias did not update the idor task")
+	}
+
 	// Unknown id.
 	res, _ = a.updatePlanTool(map[string]string{"task_id": "nope", "status": "completed"})
 	if res.Error == "" {
@@ -299,6 +392,39 @@ https://ok.ru/profile/123`
 		if strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".png") || strings.Contains(p, "w3.org") {
 			t.Errorf("static asset / svg namespace should be filtered, got %q", p)
 		}
+	}
+}
+
+func TestHookPlannerSeedsFromObservedRequestsBeforeInventory(t *testing.T) {
+	state := NewScanState()
+	state.ReconDone = true
+	state.EndpointsTested["example.test/api/health"] = true
+	state.EndpointsTested["example.test/login"] = true
+
+	result := hookPlanner(state, nil)
+	if state.Plan == nil || !state.PlanBuilt {
+		t.Fatal("observed live requests should seed the plan before an explicit inventory note")
+	}
+	want := []string{"example.test/api/health", "example.test/login"}
+	if !slices.Equal(state.DiscoveredEndpoints, want) {
+		t.Fatalf("provisional endpoints = %v, want %v", state.DiscoveredEndpoints, want)
+	}
+	if result.Nudge == "" || !strings.Contains(result.Nudge, "Active Plan") {
+		t.Fatalf("new provisional plan should be surfaced to the coordinator: %q", result.Nudge)
+	}
+}
+
+func TestObservedEndpointsForPlanningIsSortedAndBounded(t *testing.T) {
+	observed := map[string]bool{
+		"example.test/z":  true,
+		"example.test/a":  true,
+		"example.test/m":  true,
+		"example.test/no": false,
+	}
+	got := observedEndpointsForPlanning(observed, 2)
+	want := []string{"example.test/a", "example.test/m"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("observed endpoints = %v, want %v", got, want)
 	}
 }
 

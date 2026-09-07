@@ -186,6 +186,19 @@ func classifyFinding(f reporting.Vulnerability) string {
 	return ""
 }
 
+// ClassifyFinding returns the canonical vulnerability class for a scanner
+// finding. External benchmark suites use the same classifier as the built-in
+// challenges so class scoring cannot drift between the two harnesses.
+func ClassifyFinding(f reporting.Vulnerability) string {
+	return classifyFinding(f)
+}
+
+// CanonicalClass normalizes a vulnerability class label to the benchmark's
+// canonical vocabulary.
+func CanonicalClass(class string) string {
+	return canonicalClass(class)
+}
+
 type classMatch struct {
 	class    string
 	keywords []string

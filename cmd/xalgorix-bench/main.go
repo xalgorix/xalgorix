@@ -11,16 +11,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/agent"
 	"github.com/xalgord/xalgorix/v4/internal/bench"
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/realbench"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
@@ -30,11 +32,26 @@ func main() {
 	only := flag.String("only", "", "comma-separated challenge names to run (default: all built-in)")
 	task := flag.String("task", "Perform a full security assessment of this target and prove any vulnerability you find with a concrete PoC.", "instruction passed to the agent")
 	timeout := flag.Duration("timeout", bench.DefaultChallengeTimeout, "per-challenge wall-clock timeout (e.g. 5m); 0 disables")
+	manifestPath := flag.String("manifest", "", "real-world benchmark manifest (switches from built-in challenges to one pinned product target)")
+	targetID := flag.String("target-id", "", "target id from -manifest")
+	targetURL := flag.String("target-url", "", "running target URL (default: manifest container.default_url)")
+	sourceDir := flag.String("source-dir", "", "optional checked-out source tree for a white-box real-world scan")
+	resultJSON := flag.String("result-json", "", "write real-world score and full findings as private JSON (mode 0600)")
+	runs := flag.Int("runs", 1, "independent sequential runs for a real-world target (1-10; default 1)")
 	flag.Parse()
 
 	cfg := config.Get()
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, "xalgorix-bench: config invalid — set XALGORIX_LLM and XALGORIX_API_KEY (or XALGORIX_LLM_PROFILE):", err)
+		os.Exit(2)
+	}
+
+	if *manifestPath != "" {
+		runRealWorld(*manifestPath, *targetID, *targetURL, *sourceDir, *resultJSON, *task, *timeout, *runs)
+		return
+	}
+	if *targetID != "" || *targetURL != "" || *sourceDir != "" || *resultJSON != "" || *runs != 1 {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: -target-id, -target-url, -source-dir, -result-json, and -runs require -manifest")
 		os.Exit(2)
 	}
 
@@ -50,6 +67,132 @@ func main() {
 	fmt.Fprintf(os.Stderr, "xalgorix-bench: running %d challenge(s) with model %s (per-challenge timeout %s)\n", len(challenges), cfg.ResolveModel(), *timeout)
 	card := bench.RunWithTimeout(context.Background(), challenges, realScan(*task), *timeout)
 	fmt.Print(card.String())
+}
+
+type realWorldRunEvidence struct {
+	Run         int                       `json:"run"`
+	GeneratedAt time.Time                 `json:"generated_at"`
+	ElapsedMS   int64                     `json:"elapsed_ms"`
+	TimedOut    bool                      `json:"timed_out,omitempty"`
+	Error       string                    `json:"error,omitempty"`
+	Score       realbench.Result          `json:"score"`
+	Findings    []reporting.Vulnerability `json:"findings"`
+}
+
+func runRealWorld(manifestPath, targetID, targetURL, sourceDir, resultPath, instruction string, timeout time.Duration, runs int) {
+	if targetID == "" {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: -target-id is required with -manifest")
+		os.Exit(2)
+	}
+	suite, err := realbench.LoadFile(manifestPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench:", err)
+		os.Exit(2)
+	}
+	target, ok := suite.Target(targetID)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "xalgorix-bench: target %q is not present in %s\n", targetID, manifestPath)
+		os.Exit(2)
+	}
+	if targetURL == "" {
+		targetURL = target.Container.DefaultURL
+	}
+	if err := realbench.ValidateLoopbackURL(targetURL); err != nil {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: target URL:", err)
+		os.Exit(2)
+	}
+	if runs < 1 || runs > 10 {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: -runs must be between 1 and 10")
+		os.Exit(2)
+	}
+
+	fmt.Fprintf(os.Stderr, "xalgorix-bench: real-world target %s (%s %s) at %s — %d independent run(s)\n",
+		target.ID, target.Product, target.Version, targetURL, runs)
+	scores := make([]realbench.Result, 0, runs)
+	evidence := make([]realWorldRunEvidence, 0, runs)
+	hadRunFailure := false
+	for run := 1; run <= runs; run++ {
+		ctx := context.Background()
+		cancel := func() {}
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+		}
+		scanID := "realbench-" + target.ID
+		if runs > 1 {
+			scanID = fmt.Sprintf("%s-run-%02d", scanID, run)
+		}
+		fmt.Fprintf(os.Stderr, "xalgorix-bench: run %d/%d (%s)\n", run, runs, scanID)
+		started := time.Now().UTC()
+		findings, scanErr := realScan(instruction)(ctx, targetURL, sourceDir, scanID, bench.Auth{})
+		timedOut := ctx.Err() == context.DeadlineExceeded
+		cancel()
+
+		result := realbench.Score(suite, target, findings)
+		scores = append(scores, result)
+		fmt.Printf("Run %d/%d\n%s", run, runs, result.String())
+		runEvidence := realWorldRunEvidence{
+			Run:         run,
+			GeneratedAt: time.Now().UTC(),
+			ElapsedMS:   time.Since(started).Milliseconds(),
+			TimedOut:    timedOut,
+			Score:       result,
+			Findings:    findings,
+		}
+		if scanErr != nil {
+			runEvidence.Error = scanErr.Error()
+			fmt.Fprintf(os.Stderr, "xalgorix-bench: run %d scan error: %v\n", run, scanErr)
+			hadRunFailure = true
+		}
+		if timedOut {
+			fmt.Fprintf(os.Stderr, "xalgorix-bench: run %d reached its %s deadline\n", run, timeout)
+			hadRunFailure = true
+		}
+		evidence = append(evidence, runEvidence)
+	}
+
+	stability, err := realbench.Aggregate(scores)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: aggregate real-world results:", err)
+		os.Exit(1)
+	}
+	fmt.Print(stability.String())
+	if !stability.Stable {
+		fmt.Fprintln(os.Stderr, "xalgorix-bench: acceptance failed — every documented vulnerability must match in every run and fixed controls must have zero regressions")
+		hadRunFailure = true
+	}
+
+	if resultPath != "" {
+		payload := struct {
+			SchemaVersion int                       `json:"schema_version"`
+			GeneratedAt   time.Time                 `json:"generated_at"`
+			TargetURL     string                    `json:"target_url"`
+			Stability     realbench.StabilityResult `json:"stability"`
+			Runs          []realWorldRunEvidence    `json:"runs"`
+		}{
+			SchemaVersion: 2,
+			GeneratedAt:   time.Now().UTC(),
+			TargetURL:     targetURL,
+			Stability:     stability,
+			Runs:          evidence,
+		}
+		data, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "xalgorix-bench: encode result JSON:", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(resultPath, append(data, '\n'), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "xalgorix-bench: write result JSON:", err)
+			os.Exit(1)
+		}
+		if err := os.Chmod(resultPath, 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "xalgorix-bench: secure result JSON permissions:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "xalgorix-bench: wrote private benchmark evidence to %s\n", resultPath)
+	}
+	if hadRunFailure {
+		os.Exit(1)
+	}
 }
 
 func filterChallenges(all []bench.Challenge, csv string) []bench.Challenge {
@@ -75,10 +218,15 @@ func realScan(instruction string) bench.ScanFunc {
 	return func(ctx context.Context, target, sourceDir, scanID string, auth bench.Auth) ([]reporting.Vulnerability, error) {
 		cfg := config.Get()
 
-		scanDir := filepath.Join(os.TempDir(), "xalgorix-bench", scanID)
-		if err := os.MkdirAll(scanDir, 0o750); err != nil {
+		// Every attempt needs a clean filesystem. Keep isolated workspaces under
+		// the project's tmp/ directory so benchmark state never leaks between runs.
+		scanDir, err := bench.NewTempDir("xalgorix-bench-")
+		if err != nil {
 			return nil, err
 		}
+		// os.MkdirTemp creates this directory with mode 0700. Keep that private
+		// default because benchmark evidence can include sensitive target data.
+		defer func() { _ = os.RemoveAll(scanDir) }()
 		sc := scanctx.New(scanID, scanDir)
 		scanctx.Activate(sc)
 		defer func() {
@@ -120,7 +268,7 @@ func realScan(instruction string) bench.ScanFunc {
 
 		// AllowLocalTargets lets the scan reach the loopback challenge server.
 		guard := scopeguard.Config{BindAddr: "127.0.0.1", Port: 0, AllowLocalTargets: true}
-		ag := agent.NewAgent(cfg, "XalgorixBench", events, guard, sc)
+		ag := agent.NewAgent(cfg, "XalgorixBench", events, guard, sc, agent.WithBenchmarkIsolation())
 		ag.SetPhaseRestrictions(nil)
 		ag.SetActivityPolicy("active", "active", []string{target})
 		// Authenticated challenge: wire the seeded identities so the scan carries

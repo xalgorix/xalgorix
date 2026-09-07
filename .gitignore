@@ -13,6 +13,7 @@ build/
 *.json
 !go.sum
 !package.json
+!benchmarks/real-world/**/manifest.json
 !webui/tsconfig.json
 !webui/tsconfig.app.json
 !webui/tsconfig.node.json

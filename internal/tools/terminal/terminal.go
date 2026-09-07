@@ -1170,7 +1170,7 @@ func commandWaitContext(contextID string) context.Context {
 //
 // $CWD is intentionally NOT consulted: the previous os.Getwd() fallback was
 // the source of the workspace-leak bug where running xalgorix from a source
-// tree caused .tmp/, .cache/, .config/, .local/share/ to be created in that
+// tree caused tmp/, .cache/, .config/, .local/share/ to be created in that
 // tree by prepareCommandWorkspace. Falling back to WorkspaceRoot keeps the
 // resolution rooted inside the Allow_List even if every higher-priority
 // source is empty.
@@ -1201,7 +1201,7 @@ func effectiveWorkDirForContext(contextID string, cfg *config.Config) string {
 }
 
 // prepareCommandWorkspace creates the per-command workspace skeleton
-// (`.tmp/`, `.cache/`, `.config/`, `.local/share/`) under workDir.
+// (`tmp/`, `.cache/`, `.config/`, `.local/share/`) under workDir.
 //
 // Callers MUST pass a workDir resolved through effectiveWorkDirForContext so
 // the directories land under sc.ScanDir (when a Scan_Context is active) or
@@ -1213,7 +1213,7 @@ func prepareCommandWorkspace(workDir string) error {
 		return err
 	}
 	for _, dir := range []string{
-		filepath.Join(workDir, ".tmp"),
+		filepath.Join(workDir, "tmp"),
 		filepath.Join(workDir, ".cache"),
 		filepath.Join(workDir, ".config"),
 		filepath.Join(workDir, ".local", "share"),
@@ -1271,7 +1271,7 @@ func commandEnv(homeDir, goPath, workDir string, rateRuntime requestRateRuntime)
 		"PATH="+dynamicPath+":"+os.Getenv("PATH"),
 		"GOPATH="+goPath,
 		"HOME="+workDir,
-		"TMPDIR="+filepath.Join(workDir, ".tmp"),
+		"TMPDIR="+filepath.Join(workDir, "tmp"),
 		"XDG_CACHE_HOME="+filepath.Join(workDir, ".cache"),
 		"XDG_CONFIG_HOME="+filepath.Join(workDir, ".config"),
 		"XDG_DATA_HOME="+filepath.Join(workDir, ".local", "share"),
@@ -1301,7 +1301,7 @@ func shellPrelude(homeDir, workDir string, memLimitBytes int64) string {
 		fmt.Fprintf(&b, "ulimit -Hv %d 2>/dev/null || true\n", limitKB)
 	}
 	fmt.Fprintf(&b, "export HOME=%s\n", shellQuote(workDir))
-	fmt.Fprintf(&b, "export TMPDIR=%s\n", shellQuote(filepath.Join(workDir, ".tmp")))
+	fmt.Fprintf(&b, "export TMPDIR=%s\n", shellQuote(filepath.Join(workDir, "tmp")))
 	fmt.Fprintf(&b, "export XDG_CACHE_HOME=%s\n", shellQuote(filepath.Join(workDir, ".cache")))
 	fmt.Fprintf(&b, "export XDG_CONFIG_HOME=%s\n", shellQuote(filepath.Join(workDir, ".config")))
 	fmt.Fprintf(&b, "export XDG_DATA_HOME=%s\n", shellQuote(filepath.Join(workDir, ".local", "share")))

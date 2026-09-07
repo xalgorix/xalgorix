@@ -159,6 +159,8 @@ func TestBuildDelegationNudgeIsLedgerDriven(t *testing.T) {
 	for _, want := range []string{
 		"authz-logic", "injection-serverside", "client-source", // specialist roles
 		"read_ledger", "assigned_to", // ledger-driven assignment
+		"One claim or one finding is never lane completion",
+		"report every distinct proven vulnerability",
 		"detected stack: php", "/api/users", // recon context + schedulable hypothesis
 	} {
 		if !strings.Contains(nudge, want) {
@@ -176,12 +178,76 @@ func TestSpecialistProfilesCoverWeakClasses(t *testing.T) {
 		for _, c := range p.VulnClasses {
 			covered[c] = true
 		}
+		if !strings.Contains(p.StoppingRule, "do not stop after the first finding") ||
+			!strings.Contains(p.StoppingRule, "no assigned queued/testing hypothesis remains") {
+			t.Fatalf("specialist profile %q permits premature lane completion: %s", p.Role, p.StoppingRule)
+		}
 	}
 	// The classes autonomous scanners are weakest at must be owned by a profile.
-	for _, want := range []string{"blind-sqli", "xss", "idor", "ssrf"} {
+	for _, want := range []string{"blind-sqli", "xss", "idor", "ssrf", "path_traversal"} {
 		if !covered[want] {
 			t.Fatalf("expected specialist profiles to cover %q", want)
 		}
+	}
+}
+
+func TestHookLedgerFinishGateBlocksClaimedWork(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.FinishAttempts = 1
+	h := ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Endpoint: "/search"})
+	ctx.Ledger.Assign(h.ID, "sub-injection")
+
+	r := hookLedgerFinishGate(state, nil)
+	if !r.Block || !strings.Contains(r.BlockReason, h.ID) || !strings.Contains(r.BlockReason, "claimed but not closed") {
+		t.Fatalf("expected claimed hypothesis to block finish, got: %+v", r)
+	}
+	ctx.Ledger.SetStatus(h.ID, scanctx.HypothesisRejected, "baseline and probe matched")
+	if hookLedgerFinishGate(state, nil).Block {
+		t.Fatal("expected gate to clear after claimed hypothesis is closed")
+	}
+}
+
+func TestHookLedgerFinishGateScopesDelegatedOwnership(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.FinishAttempts = 1
+	state.DelegatedAgent = true
+	state.DelegatedAgentID = "sub-a"
+
+	own := ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Endpoint: "/owned"})
+	ctx.Ledger.Assign(own.ID, "sub-a")
+	other := ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "idor", Endpoint: "/other"})
+	ctx.Ledger.Assign(other.ID, "sub-b")
+
+	r := hookLedgerFinishGate(state, nil)
+	if !r.Block || !strings.Contains(r.BlockReason, own.ID) {
+		t.Fatalf("expected delegated gate to block on its own testing work, got: %+v", r)
+	}
+	if strings.Contains(r.BlockReason, other.ID) {
+		t.Fatalf("delegated gate must not block on another specialist's work: %s", r.BlockReason)
+	}
+
+	ctx.Ledger.SetStatus(own.ID, scanctx.HypothesisRejected, "control matched")
+	if hookLedgerFinishGate(state, nil).Block {
+		t.Fatal("expected sub-a to finish while only sub-b still has testing work")
+	}
+
+	// A hypothesis created by the specialist belongs to it even before an
+	// explicit assignment, so proven evidence cannot escape its reporting gate.
+	created := ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "xss", Endpoint: "/created", Origin: "sub-a"})
+	ctx.Ledger.SetStatus(created.ID, scanctx.HypothesisProven, "")
+	if r = hookLedgerFinishGate(state, nil); !r.Block || !strings.Contains(r.BlockReason, created.ID) {
+		t.Fatalf("expected origin-owned proven work to block sub-a, got: %+v", r)
+	}
+	ctx.Ledger.AddEvidence(created.ID, scanctx.Evidence{Kind: scanctx.EvidenceFindingRef, FindingID: "XALG-A"})
+	if hookLedgerFinishGate(state, nil).Block {
+		t.Fatal("expected delegated gate to clear after its origin-owned finding was linked")
+	}
+
+	// The root coordinator remains responsible for all shared-ledger work.
+	state.DelegatedAgent = false
+	state.DelegatedAgentID = ""
+	if r = hookLedgerFinishGate(state, nil); !r.Block || !strings.Contains(r.BlockReason, other.ID) {
+		t.Fatalf("expected root gate to retain global visibility, got: %+v", r)
 	}
 }
 
@@ -189,6 +255,9 @@ func TestHookDelegationCoordinatorFiresOnceWithLedger(t *testing.T) {
 	ctx, state := newTestCtxState(t)
 	state.ReconDone = true
 	state.Iteration = 6
+	state.Plan = AutoPlan([]string{"/api/orders"}, nil)
+	state.PlanBuilt = true
+	state.LedgerSeeded = true
 	ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "idor", Endpoint: "/api/orders", Confidence: 0.7})
 
 	r := hookDelegationCoordinator(state, nil)
@@ -204,5 +273,59 @@ func TestHookDelegationCoordinatorFiresOnceWithLedger(t *testing.T) {
 	// One-time: subsequent calls are silent.
 	if hookDelegationCoordinator(state, nil).Nudge != "" {
 		t.Fatal("expected the delegation nudge to fire only once")
+	}
+}
+
+func TestHookDelegationCoordinatorWaitsForPlanAndLedger(t *testing.T) {
+	_, state := newTestCtxState(t)
+	state.ReconDone = true
+	state.Iteration = 6
+
+	if got := hookDelegationCoordinator(state, nil); got.Nudge != "" || state.DelegationNudgeFired {
+		t.Fatal("delegation must wait until a plan and its ledger hypotheses exist")
+	}
+	state.Plan = AutoPlan([]string{"/api/orders"}, nil)
+	state.PlanBuilt = true
+	if got := hookDelegationCoordinator(state, nil); got.Nudge != "" || state.DelegationNudgeFired {
+		t.Fatal("delegation must wait until the plan has been seeded into the ledger")
+	}
+	state.LedgerSeeded = true
+	if got := hookDelegationCoordinator(state, nil); got.Nudge == "" || !state.DelegationNudgeFired {
+		t.Fatal("expected delegation after plan and ledger initialization")
+	}
+
+	child := NewScanState()
+	child.DelegatedAgent = true
+	child.ReconDone = true
+	child.Iteration = 20
+	child.Plan = AutoPlan([]string{"/api/orders"}, nil)
+	child.PlanBuilt = true
+	child.LedgerSeeded = true
+	if got := hookDelegationCoordinator(child, nil); got.Nudge != "" || child.DelegationNudgeFired {
+		t.Fatal("delegated specialists must never receive another delegation nudge")
+	}
+}
+
+func TestDefaultHooksDelegateFromObservedSurfaceBeforeInventory(t *testing.T) {
+	ctx, state := newTestCtxState(t)
+	state.ReconDone = true
+	state.Iteration = 5
+	state.EndpointsTested["example.test/api/health"] = true
+
+	reg := NewHookRegistry()
+	RegisterDefaultHooks(reg)
+	first := reg.Fire(OnIterationStart, state, nil)
+	if state.Plan == nil || !state.PlanBuilt || !state.LedgerSeeded || ctx.Ledger.Len() == 0 {
+		t.Fatalf("first iteration did not build and seed a provisional plan: plan=%v built=%v seeded=%v ledger=%d",
+			state.Plan != nil, state.PlanBuilt, state.LedgerSeeded, ctx.Ledger.Len())
+	}
+	if strings.Contains(first.Nudge, "MULTI-AGENT DECOMPOSITION") {
+		t.Fatal("delegation should follow plan/ledger creation, not race it in the same hook pass")
+	}
+
+	state.Iteration = 6
+	second := reg.Fire(OnIterationStart, state, nil)
+	if !strings.Contains(second.Nudge, "MULTI-AGENT DECOMPOSITION") {
+		t.Fatalf("second iteration should require early delegation from the observed surface: %q", second.Nudge)
 	}
 }

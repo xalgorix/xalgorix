@@ -180,11 +180,13 @@ type Agent struct {
 	// agentGraph is shared by every agent delegated from this root, but owned
 	// by the root scan only. The graph itself is scan-scoped, so concurrent
 	// scans cannot overwrite runners or consume one another's worker slots.
-	agentGraph       *agentsgraph.Graph
-	ownsAgentGraph   bool
-	delegatedAgentID string
-	scanBudget       *scanBudget
-	lastBudgetTokens int
+	agentGraph        *agentsgraph.Graph
+	ownsAgentGraph    bool
+	delegatedAgentID  string
+	ctfMission        bool
+	benchmarkIsolated bool
+	scanBudget        *scanBudget
+	lastBudgetTokens  int
 }
 
 // AgentOption configures optional behavior on a *Agent. The
@@ -211,6 +213,16 @@ func WithLLMClient(c *llm.Client) AgentOption {
 	}
 }
 
+// WithBenchmarkIsolation constrains an agent-driven benchmark to evidence
+// obtainable through the declared target interface (plus an explicitly
+// attached source tree for white-box cases). It prevents a locally hosted
+// fixture from being "solved" by introspecting its Docker/container runtime.
+func WithBenchmarkIsolation() AgentOption {
+	return func(a *Agent) {
+		a.benchmarkIsolated = true
+	}
+}
+
 // withAgentGraph makes a delegated agent join its root scan's graph. It is
 // intentionally package-private: only the root runner should construct graph
 // children, and delegated agents must never stop or replace the shared graph.
@@ -230,6 +242,17 @@ func withParentContext(parent context.Context) AgentOption {
 			a.ctx = parent
 		}
 	}
+}
+
+func delegatedAgentOptions(ctx context.Context, graph *agentsgraph.Graph, budget *scanBudget, agentID string, benchmarkIsolated bool) []AgentOption {
+	opts := []AgentOption{
+		withParentContext(ctx),
+		withAgentGraph(graph, budget, agentID),
+	}
+	if benchmarkIsolated {
+		opts = append(opts, WithBenchmarkIsolation())
+	}
+	return opts
 }
 
 // NewAgent creates a new agent.
@@ -443,8 +466,11 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 			// All descendants join this root's graph and inherit its cancellation
 			// context. Creating a child therefore cannot overwrite another scan's
 			// runner or leave an uncancellable worker behind.
-			subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, sctx,
-				withParentContext(ctx), withAgentGraph(a.agentGraph, a.scanBudget, agentID))
+			subArgs := []any{sctx}
+			for _, opt := range delegatedAgentOptions(ctx, a.agentGraph, a.scanBudget, agentID, a.benchmarkIsolated) {
+				subArgs = append(subArgs, opt)
+			}
+			subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, subArgs...)
 			subAgent.SetPhaseRestrictions(a.allowedPhases)
 			subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)
 			subAgent.SetTargetAuth(a.targetAuth)
@@ -493,14 +519,20 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 					<-done
 				}
 			}()
-			subAgent.Run(targets, task)
+			delegatedTask := buildDelegatedTaskInstruction(task, agentID, a.ctfMission)
+			subAgent.Run(targets, delegatedTask)
 			close(subEvents)
 			<-done
 			streamClosed = true
 			return results.String(), delegatedErr
 		})
 	}
-	a.agentGraph.Register(reg)
+	// Only the root coordinator can delegate. Prompt wording alone is not a
+	// sufficient boundary: removing the graph tools from child registries makes
+	// nested delegation impossible and keeps the one-wave lifetime budget exact.
+	if a.delegatedAgentID == "" {
+		a.agentGraph.Register(reg)
+	}
 
 	// A coordinator cannot silently finish while delegated evidence is still
 	// running or has not been collected. Descendants skip this gate because the
@@ -528,6 +560,65 @@ func (a *Agent) delegatedWorkFinishGate(_ *ScanState, _ map[string]string) HookR
 		return HookResult{Block: true, BlockReason: fmt.Sprintf("%d delegated result(s) have not been collected. Read them before finishing:\n%s", pending, a.agentGraph.PendingSummary())}
 	}
 	return HookResult{}
+}
+
+// maybeAutoDelegate launches the one deterministic specialist wave once recon
+// has produced a grounded plan and shared ledger. Requiring the coordinator LLM
+// to remember spawn_agent proved nondeterministic in real runs: it could ignore
+// several explicit nudges and continue serial work until the scan deadline.
+// Engine-owned launch makes coverage parallel by construction while the graph's
+// lifetime cap and child tool registry still make additional/nested waves
+// impossible.
+func (a *Agent) maybeAutoDelegate(targets []string) string {
+	if a == nil || a.state == nil || a.registry == nil || a.agentGraph == nil ||
+		a.delegatedAgentID != "" || a.ctfMission || a.state.DiscoveryMode ||
+		a.state.ReconOnlyMode || a.state.DelegationAttempted ||
+		!a.state.ReconDone || a.state.Iteration < 5 || a.state.Plan == nil ||
+		!a.state.PlanBuilt || !a.state.LedgerSeeded || a.agentGraph.DelegationCount() > 0 {
+		return ""
+	}
+	if _, ok := a.registry.Get("spawn_agent"); !ok {
+		return ""
+	}
+
+	target := ""
+	if len(targets) > 0 {
+		target = strings.TrimSpace(targets[0])
+	}
+	spawned := make([]string, 0, len(defaultSpecialistProfiles))
+	for _, profile := range defaultSpecialistProfiles {
+		task := fmt.Sprintf(`Own ONLY the %q lane against %s.
+Assigned vulnerability classes: %s.
+Start with read_ledger(filter=schedulable), then claim_next_hypothesis separately for every assigned class. Do not repeat root reconnaissance or work outside this lane.
+Local workspace: create and use tmp/%s/ for every scanner-side artifact. Never use host /tmp and never read or overwrite another lane's scratch files.
+Required proof: %s.
+Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule)
+		args := map[string]string{
+			"name": profile.Role,
+			"task": task,
+		}
+		if target != "" {
+			args["target"] = target
+		}
+		a.emit(Event{Type: "tool_call", ToolName: "spawn_agent", ToolArgs: args})
+		result, err := a.registry.Execute("spawn_agent", args)
+		if err != nil {
+			result = tools.Result{Error: err.Error()}
+		}
+		a.emit(Event{Type: "tool_result", ToolName: "spawn_agent", ToolResult: result})
+		if result.Metadata == nil || result.Metadata["spawned"] != true {
+			continue
+		}
+		if id, _ := result.Metadata["agent_id"].(string); id != "" {
+			spawned = append(spawned, id)
+		}
+	}
+	if len(spawned) == 0 {
+		return ""
+	}
+	a.state.DelegationAttempted = true
+	a.state.DelegationNudgeFired = true
+	return fmt.Sprintf("🚀 ENGINE DELEGATION STARTED: launched %d non-overlapping specialists (%s). Continue the root's highest-value remaining work now; periodically collect each result with check_agent/wait_agent, verify candidates independently, and do not launch another wave.", len(spawned), strings.Join(spawned, ", "))
 }
 
 // SetDiscoveryMode configures the agent to skip minimum iteration checks on finish.
@@ -850,6 +941,10 @@ func (a *Agent) Run(targets []string, instruction string) {
 		return
 	}
 	a.targets = targets // remember the scan targets so probe_hypothesis can resolve a base URL for a bare path
+	if a.scanCtx != nil && a.delegatedAgentID == "" {
+		a.scanCtx.SetTargets(targets)
+	}
+	a.ctfMission = isExplicitCTFMission(instruction)
 	a.scanStart = time.Now()
 	if a.scanBudget != nil {
 		a.scanBudget.start()
@@ -895,6 +990,9 @@ func (a *Agent) Run(targets []string, instruction string) {
 		a.state.MinIterations = a.cfg.MinIterations
 	}
 	a.state.ScanContextID = a.scanCtx.ID
+	a.state.DelegatedAgent = a.delegatedAgentID != ""
+	a.state.DelegatedAgentID = a.delegatedAgentID
+	a.state.BenchmarkIsolated = a.benchmarkIsolated
 	a.state.DiscoveryMode = a.discoveryMode
 	a.state.AllowedPhases = append([]int(nil), a.allowedPhases...)
 	a.state.ReconOnlyMode = isReconReportOnlyPhaseSelection(a.allowedPhases)
@@ -946,6 +1044,16 @@ func (a *Agent) Run(targets []string, instruction string) {
 
 		// ── Hook: OnIterationStart ──
 		iterResult := a.hooks.Fire(OnIterationStart, a.state, nil)
+		if autoDelegation := a.maybeAutoDelegate(targets); autoDelegation != "" {
+			// If the hook also produced its model-directed decomposition prompt on
+			// this pass, replace it: the engine has already done that work. Keep a
+			// planner/coverage nudge alongside the launch status when applicable.
+			if strings.Contains(iterResult.Nudge, "MULTI-AGENT DECOMPOSITION") || iterResult.Nudge == "" {
+				iterResult.Nudge = autoDelegation
+			} else {
+				iterResult.Nudge = autoDelegation + "\n\n" + iterResult.Nudge
+			}
+		}
 		if iterResult.Nudge != "" {
 			a.msgMu.Lock()
 			a.messages = append(a.messages, llm.Message{Role: "user", Content: iterResult.Nudge})
@@ -1356,6 +1464,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if stuckResult.ForceSkip {
 				continue // skip executing this tool call
 			}
+
+			// Track coverage only after every scope, activity, policy, and loop
+			// guard has accepted the call. Recording at OnToolCall time would let
+			// a force-skipped request count as endpoint/class evidence even though
+			// it never reached the target.
+			a.hooks.Fire(OnToolExecute, a.state, toolArgs)
 
 			a.emit(Event{
 				Type:     "tool_call",

@@ -230,6 +230,120 @@ func TestWorkTracker_PythonActionVulnTracking(t *testing.T) {
 	}
 }
 
+func TestWorkTracker_KeepsEndpointClassPairsSeparate(t *testing.T) {
+	state := NewScanState()
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl -d "id=1' or 1=1--" https://target.com/api/users`,
+	})
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl https://target.com/api/leads`,
+	})
+
+	if !endpointTestedForClass(state, "/api/users", "sqli") {
+		t.Error("SQLi payload should cover its exact endpoint")
+	}
+	if endpointTestedForClass(state, "/api/leads", "sqli") {
+		t.Error("generic request must not inherit SQLi coverage from another endpoint")
+	}
+	if endpointTestedForClass(state, "/api/users", "xss") {
+		t.Error("SQLi coverage must not imply XSS coverage on the same endpoint")
+	}
+}
+
+func TestWorkTracker_LocalTargetIsNotAutomaticallySSRF(t *testing.T) {
+	state := NewScanState()
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl http://127.0.0.1:5001/api/users`,
+	})
+	if state.VulnClassesTested["ssrf"] {
+		t.Error("a loopback benchmark target by itself must not count as an SSRF probe")
+	}
+
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl "http://127.0.0.1:5001/proxy?url=http://localhost/admin"`,
+	})
+	if !endpointTestedForClass(state, "/proxy", "ssrf") {
+		t.Error("loopback supplied as a URL parameter should count as an SSRF probe")
+	}
+}
+
+func TestWorkTracker_TracksNativeHTTPAndVerifierTools(t *testing.T) {
+	state := NewScanState()
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "http_request",
+		"url":       "https://target.com/login",
+		"method":    "POST",
+		"body":      "username=admin' or 1=1--",
+	})
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "verify_ssti",
+		"url":       "https://target.com/render?name=test",
+	})
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "authz_matrix",
+		"url":       "https://target.com/api/orders/42",
+	})
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "browser_action",
+		"command":   "verify_xss",
+		"url":       "https://target.com/search?q=test",
+	})
+
+	for _, tc := range []struct {
+		endpoint string
+		class    string
+	}{
+		{endpoint: "/login", class: "sqli"},
+		{endpoint: "/render", class: "ssti"},
+		{endpoint: "/api/orders/42", class: "idor"},
+		{endpoint: "/search", class: "xss"},
+	} {
+		if !endpointTestedForClass(state, tc.endpoint, tc.class) {
+			t.Errorf("expected %s coverage on %s", tc.class, tc.endpoint)
+		}
+	}
+}
+
+func TestWorkTracker_CountsMeaningfulSecurityActions(t *testing.T) {
+	state := NewScanState()
+	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "echo done"})
+	hookWorkTracker(state, map[string]string{"tool_name": "browser_action", "command": "snapshot"})
+	if state.MeaningfulTestCalls != 0 {
+		t.Fatalf("no-op and observation-only calls should not satisfy specialist work, got %d", state.MeaningfulTestCalls)
+	}
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "verify_sqli",
+		"url":       "https://target.com/login",
+	})
+	if state.MeaningfulTestCalls != 1 {
+		t.Fatalf("deterministic verifier should count as one meaningful action, got %d", state.MeaningfulTestCalls)
+	}
+}
+
+func TestDefaultHooksTrackWorkOnlyAfterGuardsPass(t *testing.T) {
+	state := NewScanState()
+	registry := NewHookRegistry()
+	RegisterDefaultHooks(registry)
+	args := map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl -d "id=1' or 1=1--" https://target.com/api/users`,
+	}
+
+	registry.Fire(OnToolCall, state, args)
+	if state.MeaningfulTestCalls != 0 || endpointTestedForClass(state, "/api/users", "sqli") {
+		t.Fatal("a generated call must not count as executed coverage before all guards pass")
+	}
+
+	registry.Fire(OnToolExecute, state, args)
+	if state.MeaningfulTestCalls != 1 || !endpointTestedForClass(state, "/api/users", "sqli") {
+		t.Fatal("an accepted execution attempt should record meaningful exact coverage")
+	}
+}
+
 func TestCurlPreference_PythonRequestsNudge(t *testing.T) {
 	state := NewScanState()
 
@@ -471,6 +585,38 @@ func TestFinishGatekeeper_DiscoveryModeBlocksTooFew(t *testing.T) {
 	result := hookFinishGatekeeper(state, nil)
 	if !result.Block {
 		t.Error("Discovery mode should block with < 3 terminal calls")
+	}
+}
+
+func TestFinishGatekeeper_DelegatedSpecialistCanReturnCompletedLane(t *testing.T) {
+	state := NewScanState()
+	state.DelegatedAgent = true
+	state.Iteration = 8
+	state.TerminalCalls = 1
+	state.MeaningfulTestCalls = 3
+	plan := NewPlan()
+	plan.add(&Task{ID: "assigned-authz", Title: "test assigned authz hypotheses", Phase: 8, Status: TaskCompleted})
+	plan.add(&Task{ID: "report", Title: "return evidence", Phase: 22, Status: TaskCompleted})
+	state.Plan = plan
+
+	if result := hookFinishGatekeeper(state, nil); result.Block {
+		t.Fatalf("completed specialist lane should not inherit the root scan floor: %s", result.BlockReason)
+	}
+}
+
+func TestFinishGatekeeper_DelegatedSpecialistStillRequiresWorkAndPlanCompletion(t *testing.T) {
+	state := NewScanState()
+	state.DelegatedAgent = true
+	if result := hookFinishGatekeeper(state, nil); !result.Block {
+		t.Fatal("specialist with no security action must not finish")
+	}
+
+	state.MeaningfulTestCalls = 1
+	plan := NewPlan()
+	plan.add(&Task{ID: "assigned-sqli", Title: "test assigned SQLi hypotheses", Phase: 6, Status: TaskPending})
+	state.Plan = plan
+	if result := hookFinishGatekeeper(state, nil); !result.Block || !strings.Contains(result.BlockReason, "unfinished task") {
+		t.Fatalf("specialist with pending assigned work should be blocked by its plan, got: %+v", result)
 	}
 }
 
@@ -1229,6 +1375,9 @@ func TestDelegationCoordinatorNudgesOnceAfterRecon(t *testing.T) {
 	state.ReconDone = true
 	state.DetectedTechs["nodejs"] = true
 	state.DiscoveredEndpoints = []string{"/api/users", "/graphql"}
+	state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
+	state.PlanBuilt = true
+	state.LedgerSeeded = true
 
 	result := hookDelegationCoordinator(state, nil)
 	// The nudge is now ledger-driven and built from the deterministic specialist
@@ -1255,12 +1404,95 @@ func TestDelegationCoordinatorSkipsDiscoveryAndExistingDelegation(t *testing.T) 
 	}
 
 	state.DiscoveryMode = false
-	hookWorkTracker(state, map[string]string{"tool_name": "spawn_agent"})
+	hookWorkTracker(state, map[string]string{"tool_name": "spawn_agent", "name": "authz", "task": "test role boundaries"})
 	if !state.DelegationAttempted {
 		t.Fatal("spawn_agent call did not mark delegation attempted")
 	}
 	if result := hookDelegationCoordinator(state, nil); result.Nudge != "" {
 		t.Fatalf("coordinator with an existing delegation was nudged again: %q", result.Nudge)
+	}
+}
+
+func TestDelegationCoordinatorRetriesMalformedSpawnWithoutLooping(t *testing.T) {
+	state := NewScanState()
+	state.Iteration = 5
+	state.ReconDone = true
+	state.Plan = AutoPlan([]string{"/api/users"}, nil)
+	state.PlanBuilt = true
+	state.LedgerSeeded = true
+
+	if first := hookDelegationCoordinator(state, nil); first.Nudge == "" {
+		t.Fatal("expected initial delegation nudge")
+	}
+	// Missing task is the exact malformed call observed in the real run.
+	hookWorkTracker(state, map[string]string{"tool_name": "spawn_agent", "name": "authz"})
+	if state.DelegationAttempted {
+		t.Fatal("malformed spawn must not count as a successful delegation attempt")
+	}
+
+	state.Iteration = 6
+	if early := hookDelegationCoordinator(state, nil); early.Nudge != "" {
+		t.Fatalf("one-turn ledger-reading grace period should be quiet: %q", early.Nudge)
+	}
+	state.Iteration = 7
+	if reminder := hookDelegationCoordinator(state, nil); !strings.Contains(reminder.Nudge, "BOTH required parameters") {
+		t.Fatalf("expected schema-explicit delegation reminder, got %q", reminder.Nudge)
+	}
+	state.Iteration = 9
+	if reminder := hookDelegationCoordinator(state, nil); reminder.Nudge == "" {
+		t.Fatal("expected the second bounded reminder")
+	}
+	state.Iteration = 11
+	if extra := hookDelegationCoordinator(state, nil); extra.Nudge != "" {
+		t.Fatalf("delegation reminders must be bounded, got %q", extra.Nudge)
+	}
+}
+
+func TestBenchmarkIsolationGuardBlocksHostAssistance(t *testing.T) {
+	state := NewScanState()
+	state.BenchmarkIsolated = true
+	blocked := []map[string]string{
+		{"tool_name": "terminal_execute", "command": "docker ps && docker exec fixture cat /etc/app/config"},
+		{"tool_name": "terminal_execute", "command": "sudo /usr/bin/podman inspect fixture"},
+		{"tool_name": "terminal_execute", "command": "curl --unix-socket /var/run/docker.sock http://localhost/containers/json"},
+		{"tool_name": "python_action", "code": "subprocess.run(['kubectl', 'get', 'pods'])"},
+		{"tool_name": "terminal_execute", "command": "sqlite3 /tmp/grafana.db '.tables'"},
+		{"tool_name": "terminal_execute", "command": "# inspect downloaded evidence\nsqlite3 /tmp/grafana.db '.tables'"},
+		{"tool_name": "terminal_execute", "command": "curl http://target/file -o /tmp/proof.bin"},
+		{"tool_name": "terminal_execute", "command": "mkdir -p /tmp/work"},
+		{"tool_name": "terminal_execute", "command": `curl -s -c /tmp/cookies.txt -X POST http://target/login`},
+		{"tool_name": "terminal_execute", "command": `curl --cookie-jar=/tmp/cookies.txt http://target/login`},
+		{"tool_name": "terminal_execute", "command": `curl -b /tmp/cookies.txt http://target/private`},
+		{"tool_name": "terminal_execute", "command": `find / -name "rockyou*" 2>/dev/null | head`},
+		{"tool_name": "terminal_execute", "command": `cd tmp; sudo /usr/bin/du / -d 2`},
+	}
+	for _, args := range blocked {
+		if got := hookBenchmarkIsolationGuard(state, args); !got.ForceSkip || !strings.Contains(got.Nudge, "BENCHMARK") {
+			t.Errorf("host-assisted benchmark command was not blocked: args=%v result=%+v", args, got)
+		}
+	}
+}
+
+func TestBenchmarkIsolationGuardAllowsTargetEvidence(t *testing.T) {
+	state := NewScanState()
+	state.BenchmarkIsolated = true
+	allowed := []map[string]string{
+		{"tool_name": "terminal_execute", "command": `curl --path-as-is "http://127.0.0.1:3300/public/plugins/x/../../proc/self/environ" -o tmp/proof.txt`},
+		{"tool_name": "terminal_execute", "command": `curl "http://127.0.0.1:3300/read?path=/tmp/flag"`},
+		{"tool_name": "terminal_execute", "command": `find /usr/share/wordlists -name "rockyou*"`},
+		{"tool_name": "verify_sqli", "url": "http://127.0.0.1:3300/api/search?q=1"},
+	}
+	for _, args := range allowed {
+		if got := hookBenchmarkIsolationGuard(state, args); got.ForceSkip {
+			t.Errorf("valid target-interface evidence was blocked: args=%v result=%+v", args, got)
+		}
+	}
+
+	state.BenchmarkIsolated = false
+	if got := hookBenchmarkIsolationGuard(state, map[string]string{
+		"tool_name": "terminal_execute", "command": "docker ps",
+	}); got.ForceSkip {
+		t.Fatal("benchmark-only guard changed a normal production scan")
 	}
 }
 
@@ -1280,11 +1512,11 @@ func TestThrottledFullPortNmap(t *testing.T) {
 	}
 	ok := []string{
 		"nmap -sV -sC --top-ports 200 --open target",  // bounded (the recommended fix)
-		"nmap -sV -p- -T4 target",                      // full-port but NOT throttled -> fine
-		"nmap --max-rate 2 --top-ports 100 target",     // throttled but bounded -> fine
-		"nmap -p 8080,8443 --scan-delay 500ms target",  // specific ports, not a full sweep
-		"nmap --max-rate 5000 -p- target",              // full sweep at a high rate -> not throttled
-		"curl -s http://target/",                       // not nmap
+		"nmap -sV -p- -T4 target",                     // full-port but NOT throttled -> fine
+		"nmap --max-rate 2 --top-ports 100 target",    // throttled but bounded -> fine
+		"nmap -p 8080,8443 --scan-delay 500ms target", // specific ports, not a full sweep
+		"nmap --max-rate 5000 -p- target",             // full sweep at a high rate -> not throttled
+		"curl -s http://target/",                      // not nmap
 	}
 	for _, c := range ok {
 		if throttledFullPortNmap(c) {
