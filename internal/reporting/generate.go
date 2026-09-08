@@ -1,6 +1,7 @@
 package reporting
 
 import (
+	"bytes"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -127,9 +128,9 @@ func sanitizeScanForPDF(s *Scan) *Scan {
 // Options configures a single Generate invocation.
 //
 // LogoPath is an OPTIONAL pre-resolved, pre-validated absolute path to a
-// PNG/JPEG logo. When empty, the cover page falls back to a monogram of
-// the brand initials. Callers in the web layer typically resolve and
-// validate the path with ValidLogo before populating this field.
+// PNG/JPEG logo for trusted local callers. The web layer supplies LogoData
+// and LogoType (png/jpeg) instead, so the renderer cannot reopen a user path.
+// LogoData takes precedence over LogoPath. With neither, branding uses initials.
 //
 // ScanDir is the per-scan working directory. When non-empty the report
 // is written to <ScanDir>/<filename>; otherwise it is written to
@@ -139,6 +140,8 @@ func sanitizeScanForPDF(s *Scan) *Scan {
 // FallbackDir is consulted only when ScanDir is empty.
 type Options struct {
 	LogoPath    string
+	LogoData    []byte
+	LogoType    string
 	ScanDir     string
 	FallbackDir string
 }
@@ -188,6 +191,9 @@ func Generate(scan *Scan, opts Options) (string, error) {
 	duration := FormatDuration(startTime, endTime)
 	brandName := BrandName(scan)
 	logoPath := opts.LogoPath
+	if len(opts.LogoData) > 0 {
+		logoPath = "uploaded-report-logo"
+	}
 	hasLogo := logoPath != ""
 
 	const (
@@ -700,7 +706,12 @@ func Generate(scan *Scan, opts Options) (string, error) {
 	if hasLogo {
 		titleW = cardW - 66
 		logoX, logoY, logoSize := marginX+cardW-58, 40.0, 58.0
-		info := pdf.RegisterImage(logoPath, "")
+		var info *fpdf.ImageInfoType
+		if len(opts.LogoData) > 0 {
+			info = pdf.RegisterImageOptionsReader(logoPath, fpdf.ImageOptions{ImageType: opts.LogoType}, bytes.NewReader(opts.LogoData))
+		} else {
+			info = pdf.RegisterImage(logoPath, "")
+		}
 		if info != nil && info.Height() > 0 && info.Width() > 0 {
 			imgW := logoSize
 			imgH := info.Height() * imgW / info.Width()

@@ -129,9 +129,9 @@ func TestGenerateReportResolvesUploadedLogoPath(t *testing.T) {
 		Events: []WSEvent{{Type: "message", Content: "Tech stack detected: nginx"}},
 	}
 
-	resolved, ok := s.resolveReportLogoPath(rec.LogoPath)
-	if !ok || resolved != logoPath {
-		t.Fatalf("resolveReportLogoPath() = %q, %v; want %q, true", resolved, ok, logoPath)
+	logoData, logoType := s.loadReportLogo(rec.LogoPath)
+	if len(logoData) == 0 || logoType != "png" {
+		t.Fatalf("loadReportLogo() returned %d bytes, %q; want PNG data", len(logoData), logoType)
 	}
 	reportPath, err := s.generateReportAt(rec, scanDir)
 	if err != nil {

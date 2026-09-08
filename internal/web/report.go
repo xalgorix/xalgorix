@@ -1,10 +1,12 @@
 package web
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	_ "image/jpeg" // register JPEG decoder for image.Decode on uploaded logos
 	_ "image/png"  // register PNG decoder for image.Decode on uploaded logos
+	"io"
 	"math"
 	"net/url"
 	"os"
@@ -227,46 +229,55 @@ func supportedReportLogoExt(path string) bool {
 	}
 }
 
-func validReportLogo(path string) bool {
-	if !supportedReportLogoExt(path) {
-		return false
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	_, _, err = image.DecodeConfig(file)
-	return err == nil
-}
+const maxReportLogoBytes = 5 << 20
 
-func (s *Server) resolveReportLogoPath(logoPath string) (string, bool) {
+// loadReportLogo reads an uploaded logo through a directory-bound handle.
+// Renderers receive the validated bytes, never a path to reopen after validation.
+func (s *Server) loadReportLogo(logoPath string) ([]byte, string) {
 	logoPath = strings.TrimSpace(logoPath)
-	if logoPath == "" {
-		return "", false
+	if logoPath == "" || strings.TrimSpace(s.dataDir) == "" {
+		return nil, ""
 	}
-	var candidates []string
+	logosDir, err := filepath.Abs(filepath.Join(s.dataDir, "logos"))
+	if err != nil {
+		return nil, ""
+	}
+	name := logoPath
 	if strings.HasPrefix(logoPath, "/uploads/logos/") {
-		candidates = append(candidates, filepath.Join(s.dataDir, "logos", filepath.Base(logoPath)))
+		name = strings.TrimPrefix(logoPath, "/uploads/logos/")
 	} else if filepath.IsAbs(logoPath) {
-		candidates = append(candidates, logoPath)
-	} else {
-		candidates = append(candidates,
-			filepath.Join(s.currentScanDir, logoPath),
-			filepath.Join(s.dataDir, "logos", filepath.Base(logoPath)),
-			logoPath,
-		)
-	}
-	for _, candidate := range candidates {
-		if validReportLogo(candidate) {
-			return candidate, true
+		// Keep legacy saved absolute paths only when they name an upload.
+		name, err = filepath.Rel(logosDir, logoPath)
+		if err != nil {
+			return nil, ""
 		}
 	}
-	return "", false
+	if !filepath.IsLocal(name) || strings.ContainsAny(name, "/\\:\x00") || !supportedReportLogoExt(name) {
+		return nil, ""
+	}
+	root, err := os.OpenRoot(logosDir)
+	if err != nil {
+		return nil, ""
+	}
+	defer func() { _ = root.Close() }()
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxReportLogoBytes {
+		return nil, ""
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxReportLogoBytes+1))
+	if err != nil || len(data) > maxReportLogoBytes {
+		return nil, ""
+	}
+	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || (format != "png" && format != "jpeg") {
+		return nil, ""
+	}
+	return data, format
 }
 
 // riskScore computes a weighted overall risk score (0-10) from vulnerabilities.
@@ -548,7 +559,9 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 	endTime := parseReportTime(scan.FinishedAt)
 	duration := formatReportDuration(startTime, endTime)
 	brandName := reportBrandName(scan)
-	logoPath, hasLogo := s.resolveReportLogoPath(scan.LogoPath)
+	logoData, logoType := s.loadReportLogo(scan.LogoPath)
+	hasLogo := len(logoData) > 0
+	const logoPath = "uploaded-report-logo"
 
 	// Helper: set text color
 	setColor := func(c [3]int) {
@@ -577,7 +590,7 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 		drawRect(x, y, w, h, palette.muted)
 		drawStrokeRect(x, y, w, h, border)
 		if hasLogo {
-			info := pdf.RegisterImage(logoPath, "")
+			info := pdf.RegisterImageOptionsReader(logoPath, fpdf.ImageOptions{ImageType: logoType}, bytes.NewReader(logoData))
 			if info != nil && info.Height() > 0 && info.Width() > 0 {
 				maxW := w - 6
 				maxH := h - 6
