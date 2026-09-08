@@ -162,20 +162,6 @@ func toReportingScan(scan *ScanRecord) *pdfreport.Scan {
 
 // generateReportAt generates a PDF report, saving it to a specific directory.
 func (s *Server) generateReportAt(scan *ScanRecord, scanDir string) (string, error) {
-	// resolveReportLogoPath consults s.currentScanDir as one of its
-	// candidate directories, so it still needs the temporary swap even
-	// though the renderer itself now takes scanDir as an explicit param.
-	s.mu.Lock()
-	prevDir := s.currentScanDir
-	s.currentScanDir = scanDir
-	s.mu.Unlock()
-
-	restoreScanDir := func() {
-		s.mu.Lock()
-		s.currentScanDir = prevDir
-		s.mu.Unlock()
-	}
-
 	// The redesigned reporting package currently renders with Latin core
 	// fonts. Preserve the localized/CJK renderer added on main for non-English
 	// reports until that support is moved into internal/reporting.
@@ -184,15 +170,24 @@ func (s *Server) generateReportAt(scan *ScanRecord, scanDir string) (string, err
 		language = config.NormalizeLanguage(s.cfg.Language)
 	}
 	if language != config.DefaultLanguage {
-		defer restoreScanDir()
+		// The localized renderer still uses currentScanDir for its output path.
+		s.mu.Lock()
+		prevDir := s.currentScanDir
+		s.currentScanDir = scanDir
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			s.currentScanDir = prevDir
+			s.mu.Unlock()
+		}()
 		return s.generateReport(scan)
 	}
 
-	logoPath, _ := s.resolveReportLogoPath(scan.LogoPath)
-	restoreScanDir()
+	logoData, logoType := s.loadReportLogo(scan.LogoPath)
 
 	return pdfreport.Generate(toReportingScan(scan), pdfreport.Options{
-		LogoPath:    logoPath,
+		LogoData:    logoData,
+		LogoType:    logoType,
 		ScanDir:     scanDir,
 		FallbackDir: s.dataDir,
 	})
