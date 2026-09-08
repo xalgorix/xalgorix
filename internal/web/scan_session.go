@@ -593,7 +593,11 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		// An abnormal LLM-side abort (refused tools / empty responses / repeated
 		// errors / rate-limit) reuses the "finished" event type but is NOT a
 		// clean completion. Record the reason so finalize marks the scan failed.
-		if evt.Aborted {
+		// Delegated-agent events share the root event stream. A failed specialist
+		// must be surfaced to the coordinator (the agent graph marks it failed),
+		// but must not poison the root session's final status: the coordinator can
+		// still cover that lane itself or use another specialist.
+		if evt.Aborted && evt.AgentID == "" {
 			sess.abortReason = evt.AbortReason
 			if sess.abortReason == "" {
 				sess.abortReason = "llm_aborted"

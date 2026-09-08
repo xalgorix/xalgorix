@@ -73,3 +73,13 @@ func TestCanonicalizeAssistantTurn_NoProse(t *testing.T) {
 		t.Fatalf("expected 1 finish call, got %+v", calls)
 	}
 }
+
+func TestAuthoritativeFinishSummary(t *testing.T) {
+	got := authoritativeFinishSummary("Completed with 24 findings.", 23)
+	if !strings.HasPrefix(got, "Authoritative verified finding count: 23") {
+		t.Fatalf("authoritative count missing: %q", got)
+	}
+	if !strings.Contains(got, "Agent narrative:\nCompleted with 24 findings.") {
+		t.Fatalf("agent narrative should remain available but labeled: %q", got)
+	}
+}

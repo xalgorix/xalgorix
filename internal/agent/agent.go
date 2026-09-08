@@ -679,6 +679,20 @@ func canonicalizeAssistantTurn(cleanText string, toolCalls []llm.ToolCall) strin
 	return strings.TrimSpace(b.String())
 }
 
+// authoritativeFinishSummary keeps the deterministic vulnerability store as
+// the source of truth. Agent-written summaries are useful narrative, but the
+// model may miscount duplicated IDs (the production pentest-ground run claimed
+// 24 while the store held 23). Prefixing the exact persisted count makes that
+// mismatch visible and prevents downstream UIs from treating model arithmetic
+// as authoritative.
+func authoritativeFinishSummary(summary string, findingCount int) string {
+	prefix := fmt.Sprintf("Authoritative verified finding count: %d", findingCount)
+	if strings.TrimSpace(summary) == "" {
+		return prefix
+	}
+	return prefix + "\n\nAgent narrative:\n" + strings.TrimSpace(summary)
+}
+
 // stripThink removes <think>...</think> blocks from the response.
 func stripThink(s string) string {
 	return thinkRegex.ReplaceAllString(s, "")
@@ -1192,7 +1206,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// ConsecutiveErrors reset is handled by OnHealthyResponse hook below
 
 		// ── Hook: OnEmptyResponse ──
-		if response == "" {
+		if strings.TrimSpace(response) == "" {
 			emptyResult := a.hooks.Fire(OnEmptyResponse, a.state, nil)
 			a.emit(Event{Type: "message", Content: fmt.Sprintf("⚠️ LLM returned empty response (%d/12)", a.state.EmptyResponseCount), TotalTokens: tokenCount()})
 			if emptyResult.ForceSkip {
@@ -1212,12 +1226,11 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// Strip <think>...</think> blocks for parsing
 		responseClean := stripThink(response)
 
-		// Show the LLM's text
+		// Extract display prose. It is emitted only after malformed tool-output
+		// detection below so provider control-token leaks never pollute the UI or
+		// get persisted back into the model's conversation.
 		cleanText := llm.CleanContent(responseClean)
 		cleanText = strings.TrimSpace(cleanText)
-		if cleanText != "" {
-			a.emit(Event{Type: "message", Content: cleanText, TotalTokens: tokenCount()})
-		}
 
 		toolCalls := llm.ParseToolCalls(responseClean)
 		// ── Drop empty-Args calls for tools that require parameters ──
@@ -1276,6 +1289,25 @@ func (a *Agent) Run(targets []string, instruction string) {
 				}
 			}
 		}
+
+		// Distinguish ordinary prose-only reasoning from an attempted tool call
+		// corrupted by the provider/model protocol. The latter must be discarded
+		// rather than appended to history: feeding MiniMax's leaked `<]minimax[>`
+		// delimiters or a bare `<tool_call>` marker back to the model caused it to
+		// mimic the corruption for 30 turns and falsely finish a scan.
+		malformedToolReason := ""
+		if len(toolCalls) == 0 {
+			malformedToolReason = llm.MalformedToolOutputReason(responseClean)
+		}
+		if malformedToolReason != "" {
+			a.emit(Event{
+				Type:        "error",
+				Content:     fmt.Sprintf("⚠️ Discarded malformed LLM tool output (%s); requesting a clean executable call.", malformedToolReason),
+				TotalTokens: tokenCount(),
+			})
+		} else if cleanText != "" {
+			a.emit(Event{Type: "message", Content: cleanText, TotalTokens: tokenCount()})
+		}
 		// Enforce the tool-call budget WITHIN the batch. overBudget is only
 		// checked at iteration start, so a single response emitting many calls
 		// could otherwise blow past XALGORIX_MAX_TOOL_CALLS. Truncate the batch
@@ -1313,20 +1345,28 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// canonical form keeps the conversation self-consistent so the model
 		// stays on-format. When NO tool call was found, store the raw response so
 		// the no-tool hook's format nudge reflects the real (malformed) output.
-		assistantContent := response
-		if len(toolCalls) > 0 {
-			assistantContent = canonicalizeAssistantTurn(cleanText, toolCalls)
+		if malformedToolReason == "" {
+			assistantContent := response
+			if len(toolCalls) > 0 {
+				assistantContent = canonicalizeAssistantTurn(cleanText, toolCalls)
+			}
+			a.msgMu.Lock()
+			a.messages = append(a.messages, llm.Message{Role: "assistant", Content: assistantContent})
+			a.msgMu.Unlock()
 		}
-		a.msgMu.Lock()
-		a.messages = append(a.messages, llm.Message{Role: "assistant", Content: assistantContent})
-		a.msgMu.Unlock()
 
 		// ── Hook: OnNoToolResponse ──
 		if len(toolCalls) == 0 {
-			noToolResult := a.hooks.Fire(OnNoToolResponse, a.state, map[string]string{"response": cleanText})
+			noToolResult := a.hooks.Fire(OnNoToolResponse, a.state, map[string]string{
+				"response":         cleanText,
+				"malformed_reason": malformedToolReason,
+			})
 			if noToolResult.ForceSkip {
 				reason, detail := classifyNoToolAbort(a.state)
-				a.emit(Event{Type: "finished", Content: detail, TotalTokens: tokenCount(), Aborted: false, AbortReason: reason})
+				if noToolResult.EmitMessage != "" {
+					a.emit(Event{Type: "error", Content: noToolResult.EmitMessage, TotalTokens: tokenCount()})
+				}
+				a.emit(Event{Type: "finished", Content: detail, TotalTokens: tokenCount(), Aborted: true, AbortReason: reason})
 				return
 			}
 			// Reasoning-loop recovery is NUDGE-ONLY: we inject a focused
@@ -1342,6 +1382,16 @@ func (a *Agent) Run(targets []string, instruction string) {
 				a.msgMu.Lock()
 				a.messages = append(a.messages, llm.Message{Role: "user", Content: noToolResult.Nudge})
 				a.msgMu.Unlock()
+			}
+			// Avoid a rapid paid retry storm for provider-protocol corruption. The
+			// delay is deliberately small and bounded; ordinary prose-only turns
+			// keep their existing immediate retry behavior.
+			if malformedToolReason != "" {
+				seconds := a.state.MalformedToolOutputCount
+				if seconds > 3 {
+					seconds = 3
+				}
+				time.Sleep(time.Duration(seconds) * time.Second)
 			}
 			continue
 		}
@@ -1520,7 +1570,15 @@ func (a *Agent) Run(targets []string, instruction string) {
 					a.client.SetTemperature(TempValidator)
 					continue
 				}
-				a.emit(Event{Type: "finished", Content: result.Output, TotalTokens: tokenCount()})
+				content := result.Output
+				if !a.state.DelegatedAgent {
+					count := 0
+					if a.scanCtx != nil {
+						count = len(reporting.GetVulnerabilitiesForContext(a.scanCtx.ID))
+					}
+					content = authoritativeFinishSummary(content, count)
+				}
+				a.emit(Event{Type: "finished", Content: content, TotalTokens: tokenCount()})
 				return
 			}
 

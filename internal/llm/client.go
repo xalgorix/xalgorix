@@ -642,6 +642,19 @@ func modelRequiresFixedTemperature(model string) bool {
 	return strings.Contains(m, "kimi-k2.6") || strings.Contains(m, "kimi-k3")
 }
 
+// modelRequiresPositiveTemperature identifies providers/models whose API
+// rejects temperature=0. MiniMax's OpenAI-compatible contract requires a
+// value in (0, 1] and recommends 1. The agent normally applies a deterministic
+// 0.0 scanner override, so without this guard MiniMax behavior depends on
+// undocumented server coercion and can degrade into malformed output.
+func modelRequiresPositiveTemperature(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	return strings.HasPrefix(m, "minimax-")
+}
+
 // effectiveTemperature returns the temperature to send. Models that only accept
 // the default (Kimi K2.6 / K3) always get 1 regardless of config or per-call
 // overrides. Otherwise the per-call override wins, falling back to the config
@@ -651,10 +664,17 @@ func (c *Client) effectiveTemperature() *float64 {
 		one := 1.0
 		return &one
 	}
+	var selected *float64
 	if v, ok := c.tempOverride.Load().(*float64); ok && v != nil {
-		return v
+		selected = v
+	} else {
+		selected = c.cfg.Temperature
 	}
-	return c.cfg.Temperature
+	if modelRequiresPositiveTemperature(c.apiModel) && selected != nil && *selected <= 0 {
+		one := 1.0
+		return &one
+	}
+	return selected
 }
 
 // maxOutputTokens returns the per-call completion cap (max_tokens). Reasoning

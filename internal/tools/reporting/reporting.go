@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -539,11 +541,33 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 		return tools.Result{Output: rejection}, nil
 	}
 
+	// ── Gate 3.25: Deterministic CVSS reconciliation ──
+	// A proven finding must not be lost merely because the reporting agent
+	// over-claimed I:H/A:H or forgot to update the numeric score after correcting
+	// its vector. Normalize only unsupported impact metrics, then compute the
+	// authoritative base score and severity directly from a valid CVSS v3 vector.
+	// The original severity is retained for the audit/output trail below.
+	claimSeverity := severity
+	cvssFix := reconcileCVSS(args["cvss_vector"], args["cvss"], severity, proof)
+	cvssOriginalSeverity := ""
+	if cvssFix.Valid {
+		args["cvss_vector"] = cvssFix.Vector
+		args["cvss"] = fmt.Sprintf("%.1f", cvssFix.Score)
+		if cvssFix.Severity != severity {
+			cvssOriginalSeverity = severity
+			severity = cvssFix.Severity
+			args["severity"] = severity
+		}
+		isHighSeverity = severity == "critical" || severity == "high" || severity == "medium"
+	}
+
 	// ── Gate 3.5: Claim consistency — does the evidence actually support the
 	// claimed CWE / verification_method / CVSS impact? This is a SEMANTIC check
 	// (relational) rather than a keyword blocklist, so it generalizes across the
-	// many shapes of "mislabeled / inflated" findings.
-	if rejection := checkClaimConsistency(title, args["cwe_id"], method, args["cvss_vector"], severity, args["description"], proof); rejection != "" {
+	// many shapes of "mislabeled / inflated" findings. Use the pre-reconciliation
+	// severity so an inflated vector cannot evade the remaining semantic checks
+	// merely because normalization reduced its final score to informational.
+	if rejection := checkClaimConsistency(title, args["cwe_id"], method, args["cvss_vector"], claimSeverity, args["description"], proof); rejection != "" {
 		return tools.Result{Output: rejection}, nil
 	}
 
@@ -613,9 +637,11 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	}
 
 	// ── Gate 5: Severity classification — enforce max severity per vuln type ──
-	originalSeverity := ""
+	originalSeverity := cvssOriginalSeverity
 	if cappedSev, reason := classifySeverity(title, args["description"], severity, proof); cappedSev != severity {
-		originalSeverity = severity
+		if originalSeverity == "" {
+			originalSeverity = severity
+		}
 		severity = cappedSev
 		_ = reason // will be included in output message below
 	}
@@ -777,10 +803,21 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 			msg += fmt.Sprintf("\n⚠️ SEVERITY ADJUSTED from %s → %s", strings.ToUpper(originalSeverity), strings.ToUpper(severity))
 		}
 	}
+	if cvssFix.Valid && cvssFix.Changed {
+		msg += "\n" + cvssFix.Message()
+	}
+
+	metadata := map[string]any{"vuln_id": vuln.ID, "verified": vuln.Verified}
+	if cvssFix.Valid && cvssFix.Changed {
+		metadata["cvss_adjusted"] = true
+		metadata["original_cvss"] = cvssFix.OriginalScore
+		metadata["original_cvss_vector"] = cvssFix.OriginalVector
+		metadata["cvss_vector"] = cvssFix.Vector
+	}
 
 	return tools.Result{
 		Output:   msg,
-		Metadata: map[string]any{"vuln_id": vuln.ID, "verified": vuln.Verified},
+		Metadata: metadata,
 	}, nil
 }
 
@@ -822,20 +859,19 @@ func duplicateResult(existing Vulnerability, msg string) tools.Result {
 
 func findDuplicateVulnerability(existing []Vulnerability, title, description, cve, cwe, target, endpoint string) (Vulnerability, string, bool) {
 	normalizedTitle := normalizeFindingText(title)
-	normalizedTarget := normalizeEndpoint(target)
 	// Endpoints use the templated key so object-ID variants of the same path
-	// (/orders/1042 vs /orders/2087) are recognized as one finding. Targets are
-	// hosts, not object paths, so they keep the plain normalization.
-	normalizedEndpoint := dedupEndpointKey(endpoint)
+	// (/orders/1042 vs /orders/2087) are recognized as one finding. Absolute
+	// same-origin endpoints are reduced to their path, so "/tokens" and
+	// "https://example.com/tokens" cannot evade deduplication.
+	normalizedEndpoint := dedupEndpointKeyForTarget(target, endpoint)
 	vulnType := extractVulnTypeWithCWE(title, description, cwe)
 	reportedCVEs := findingCVEs(title, description, cve)
 
 	for _, vuln := range existing {
 		existingTitle := normalizeFindingText(vuln.Title)
-		existingTarget := normalizeEndpoint(vuln.Target)
-		existingEndpoint := dedupEndpointKey(vuln.Endpoint)
+		existingEndpoint := dedupEndpointKeyForTarget(vuln.Target, vuln.Endpoint)
 		existingType := extractVulnTypeWithCWE(vuln.Title, vuln.Description, vuln.CWE)
-		sameTarget := normalizedTarget == existingTarget
+		sameTarget := sameDedupTarget(target, vuln.Target)
 		if sameTarget && sharesCVE(reportedCVEs, findingCVEs(vuln.Title, vuln.Description, vuln.CVE)) {
 			return vuln, fmt.Sprintf("⚠️ DUPLICATE: The same CVE is already reported on target '%s' as %s ('%s'). Skipping the alternate proof endpoint '%s'.", target, vuln.ID, vuln.Title, endpoint), true
 		}
@@ -967,6 +1003,251 @@ func anyContains(s string, subs ...string) bool {
 	return false
 }
 
+var integrityProofMarkers = []string{
+	"deleted", "modified", "created", "updated", "overwrote", "overwritten",
+	"changed", "wrote", "inserted", "tampered", "state change", "reset", "added",
+	"removed", "poisoned",
+}
+
+var highIntegrityProofMarkers = []string{
+	"rce", "remote code execution", "command execution", "root shell", "uid=",
+	"arbitrary file write", "privilege escalation", "administrator takeover",
+	"admin takeover", "full database write", "mass modification", "system configuration changed",
+}
+
+var availabilityProofMarkers = []string{
+	"service degraded", "performance degraded", "resource exhaustion", "memory exhaustion",
+	"cpu exhaustion", "redos", "timed out for", "stopped responding",
+}
+
+var highAvailabilityProofMarkers = []string{
+	"rce", "command execution", "remote code execution", "shell", "uid=", "whoami",
+	"denial of service", "service unavailable", "service outage", "server crashed",
+	"process crashed", "became unavailable",
+}
+
+// Remove explicitly negated impact statements before looking for evidence.
+// Without this, phrases such as "no actual state change" accidentally match
+// the positive marker "state change" and preserve an inflated I:H vector.
+var negatedImpactEvidenceRe = regexp.MustCompile(`(?i)\b(?:no|not|never|without|did\s+not|does\s+not|was\s+not|were\s+not|failed\s+to|unable\s+to|could\s+not)\b[^.;\n]{0,64}\b(?:deleted?|modified?|created?|updated?|overwrit(?:e|ten)|changed?|wrote|written|inserted?|tampered?|state\s+change|reset|added?|removed?|poisoned?|service\s+(?:degraded|unavailable|outage)|performance\s+degraded|resource\s+exhaustion|memory\s+exhaustion|cpu\s+exhaustion|redos|timed\s+out|crashed?|stopped\s+responding)\b`)
+
+func positiveImpactEvidence(proof string) string {
+	return negatedImpactEvidenceRe.ReplaceAllString(strings.ToLower(proof), "")
+}
+
+func hasIntegrityProof(proof string) bool {
+	return anyContains(positiveImpactEvidence(proof), integrityProofMarkers...)
+}
+
+func hasHighIntegrityProof(proof string) bool {
+	return anyContains(positiveImpactEvidence(proof), highIntegrityProofMarkers...)
+}
+
+func hasAvailabilityProof(proof string) bool {
+	return anyContains(positiveImpactEvidence(proof), availabilityProofMarkers...)
+}
+
+func hasHighAvailabilityProof(proof string) bool {
+	return anyContains(positiveImpactEvidence(proof), highAvailabilityProofMarkers...)
+}
+
+type parsedCVSSBaseVector struct {
+	parts   []string
+	metrics map[string]string
+	index   map[string]int
+}
+
+var cvssBaseMetricValues = map[string]map[string]bool{
+	"AV": {"N": true, "A": true, "L": true, "P": true},
+	"AC": {"L": true, "H": true},
+	"PR": {"N": true, "L": true, "H": true},
+	"UI": {"N": true, "R": true},
+	"S":  {"U": true, "C": true},
+	"C":  {"N": true, "L": true, "H": true},
+	"I":  {"N": true, "L": true, "H": true},
+	"A":  {"N": true, "L": true, "H": true},
+}
+
+// parseCVSSBaseVector accepts a complete CVSS 3.0/3.1 base vector. Requiring
+// exactly the eight base metrics keeps automatic rewriting fail-closed: a
+// malformed or non-base vector continues through the existing validation path
+// instead of being partially interpreted and silently changed.
+func parseCVSSBaseVector(raw string) (parsedCVSSBaseVector, bool) {
+	parts := strings.Split(strings.ToUpper(strings.TrimSpace(raw)), "/")
+	if len(parts) != 9 || (parts[0] != "CVSS:3.0" && parts[0] != "CVSS:3.1") {
+		return parsedCVSSBaseVector{}, false
+	}
+
+	parsed := parsedCVSSBaseVector{
+		parts:   append([]string(nil), parts...),
+		metrics: make(map[string]string, 8),
+		index:   make(map[string]int, 8),
+	}
+	for i, part := range parts[1:] {
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			return parsedCVSSBaseVector{}, false
+		}
+		metric, value := kv[0], kv[1]
+		allowed, known := cvssBaseMetricValues[metric]
+		if !known || !allowed[value] {
+			return parsedCVSSBaseVector{}, false
+		}
+		if _, duplicate := parsed.metrics[metric]; duplicate {
+			return parsedCVSSBaseVector{}, false
+		}
+		parsed.metrics[metric] = value
+		parsed.index[metric] = i + 1
+	}
+	if len(parsed.metrics) != len(cvssBaseMetricValues) {
+		return parsedCVSSBaseVector{}, false
+	}
+	return parsed, true
+}
+
+func (v *parsedCVSSBaseVector) set(metric, value string) {
+	v.metrics[metric] = value
+	v.parts[v.index[metric]] = metric + ":" + value
+}
+
+func (v parsedCVSSBaseVector) String() string {
+	return strings.Join(v.parts, "/")
+}
+
+func cvssImpactWeight(value string) float64 {
+	switch value {
+	case "H":
+		return 0.56
+	case "L":
+		return 0.22
+	default:
+		return 0
+	}
+}
+
+func roundUpCVSS(value float64) float64 {
+	// CVSS uses Roundup, not conventional rounding: the smallest one-decimal
+	// number greater than or equal to the unrounded score.
+	return math.Ceil((value-1e-10)*10) / 10
+}
+
+func scoreCVSSBaseVector(vector parsedCVSSBaseVector) float64 {
+	av := map[string]float64{"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}[vector.metrics["AV"]]
+	ac := map[string]float64{"L": 0.77, "H": 0.44}[vector.metrics["AC"]]
+	ui := map[string]float64{"N": 0.85, "R": 0.62}[vector.metrics["UI"]]
+
+	prWeights := map[string]float64{"N": 0.85, "L": 0.62, "H": 0.27}
+	if vector.metrics["S"] == "C" {
+		prWeights = map[string]float64{"N": 0.85, "L": 0.68, "H": 0.50}
+	}
+	pr := prWeights[vector.metrics["PR"]]
+
+	c := cvssImpactWeight(vector.metrics["C"])
+	i := cvssImpactWeight(vector.metrics["I"])
+	a := cvssImpactWeight(vector.metrics["A"])
+	impactSubScore := 1 - ((1 - c) * (1 - i) * (1 - a))
+
+	var impact float64
+	if vector.metrics["S"] == "C" {
+		impact = 7.52*(impactSubScore-0.029) - 3.25*math.Pow(impactSubScore-0.02, 15)
+	} else {
+		impact = 6.42 * impactSubScore
+	}
+	if impact <= 0 {
+		return 0
+	}
+
+	exploitability := 8.22 * av * ac * pr * ui
+	if vector.metrics["S"] == "C" {
+		return roundUpCVSS(math.Min(1.08*(impact+exploitability), 10))
+	}
+	return roundUpCVSS(math.Min(impact+exploitability, 10))
+}
+
+type cvssReconciliation struct {
+	Valid            bool
+	Changed          bool
+	VectorChanged    bool
+	ScoreChanged     bool
+	SeverityChanged  bool
+	HadOriginalScore bool
+	OriginalVector   string
+	Vector           string
+	OriginalScore    float64
+	Score            float64
+	OriginalSeverity string
+	Severity         string
+	ImpactChanges    []string
+}
+
+// reconcileCVSS preserves a proven finding while removing unsupported high
+// integrity/availability claims. The vector-derived score is authoritative,
+// preventing combinations such as C:H/I:N/A:N being persisted as 9.8 Critical.
+func reconcileCVSS(vector, scoreText, severity, proof string) cvssReconciliation {
+	parsed, ok := parseCVSSBaseVector(vector)
+	if !ok {
+		return cvssReconciliation{}
+	}
+
+	r := cvssReconciliation{
+		Valid:            true,
+		OriginalVector:   strings.TrimSpace(vector),
+		OriginalSeverity: strings.ToLower(strings.TrimSpace(severity)),
+	}
+	if parsed.metrics["I"] == "H" && !hasHighIntegrityProof(proof) {
+		normalized := "N"
+		if hasIntegrityProof(proof) {
+			normalized = "L"
+		}
+		parsed.set("I", normalized)
+		r.ImpactChanges = append(r.ImpactChanges, "I:H → I:"+normalized)
+	}
+	if parsed.metrics["A"] == "H" && !hasHighAvailabilityProof(proof) {
+		normalized := "N"
+		if hasAvailabilityProof(proof) {
+			normalized = "L"
+		}
+		parsed.set("A", normalized)
+		r.ImpactChanges = append(r.ImpactChanges, "A:H → A:"+normalized)
+	}
+
+	r.Vector = parsed.String()
+	r.VectorChanged = r.Vector != strings.ToUpper(r.OriginalVector)
+	r.Score = scoreCVSSBaseVector(parsed)
+	if submitted, err := strconv.ParseFloat(strings.TrimSpace(scoreText), 64); err == nil {
+		r.HadOriginalScore = true
+		r.OriginalScore = submitted
+		r.ScoreChanged = math.Abs(submitted-r.Score) >= 0.05
+	} else {
+		r.ScoreChanged = true
+	}
+	r.Severity = severityFromCVSS(r.Score)
+	r.SeverityChanged = r.Severity != r.OriginalSeverity
+	r.Changed = r.VectorChanged || r.ScoreChanged || r.SeverityChanged
+	return r
+}
+
+func (r cvssReconciliation) Message() string {
+	var changes []string
+	if len(r.ImpactChanges) > 0 {
+		changes = append(changes, "unsupported impact "+strings.Join(r.ImpactChanges, ", "))
+	}
+	if r.ScoreChanged {
+		if r.HadOriginalScore {
+			changes = append(changes, fmt.Sprintf("base score %.1f → %.1f", r.OriginalScore, r.Score))
+		} else {
+			changes = append(changes, fmt.Sprintf("base score set to %.1f", r.Score))
+		}
+	}
+	if r.SeverityChanged {
+		changes = append(changes, fmt.Sprintf("severity %s → %s", strings.ToUpper(r.OriginalSeverity), strings.ToUpper(r.Severity)))
+	}
+	if len(changes) == 0 {
+		return ""
+	}
+	return "⚠️ CVSS NORMALIZED: " + strings.Join(changes, "; ") + ". The finding was preserved automatically."
+}
+
 // checkClaimConsistency rejects findings whose claimed CWE, verification_method,
 // or CVSS impact is not supported by the evidence. Unlike checkFalsePositive
 // (a list of known FP shapes), this checks the finding for INTERNAL CONSISTENCY:
@@ -1022,9 +1303,7 @@ func checkClaimConsistency(title, cwe, method, cvssVector, severity, description
 		// hypothetical follow-on impact (for example, "the leaked signing key can
 		// enable takeover"); that is not evidence that integrity impact was
 		// actually demonstrated and must not inflate a read-only primitive.
-		if !anyContains(proofL, "deleted", "modified", "created", "updated", "overwrote", "overwritten",
-			"changed", "wrote", "inserted", "tampered", "state change", "rce", "command execution",
-			"shell", "uid=", "reset", "added", "removed", "poisoned") {
+		if !hasHighIntegrityProof(proofL) {
 			return "❌ REJECTED (claim consistency): the CVSS vector claims High Integrity impact (I:H) but the proof shows no actual state change. Lower the vector to I:L/I:N or provide integrity-impact evidence."
 		}
 	}
@@ -1036,10 +1315,7 @@ func checkClaimConsistency(title, cwe, method, cvssVector, severity, description
 	//    destroying the affected service; otherwise require a demonstrated crash,
 	//    outage, or resource-exhaustion result.
 	if strings.Contains(vec, "A:H") {
-		if !anyContains(proofL, "rce", "command execution", "remote code execution", "shell", "uid=", "whoami",
-			"denial of service", "service unavailable", "service outage", "server crashed", "process crashed",
-			"resource exhaustion", "memory exhaustion", "cpu exhaustion", "redos", "timed out for",
-			"became unavailable", "stopped responding") {
+		if !hasHighAvailabilityProof(proofL) {
 			return "❌ REJECTED (claim consistency): the CVSS vector claims High Availability impact (A:H) but the proof shows no code execution, crash, outage, or resource exhaustion. Lower the vector to A:L/A:N or provide availability-impact evidence."
 		}
 	}
@@ -2989,6 +3265,110 @@ func normalizeEndpoint(endpoint string) string {
 	endpoint = strings.TrimRight(endpoint, "/")
 	// Lowercase for consistent comparison
 	return strings.ToLower(endpoint)
+}
+
+type dedupTargetOrigin struct {
+	scheme string
+	host   string
+	port   string
+}
+
+func parseDedupTargetOrigin(raw string) (dedupTargetOrigin, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return dedupTargetOrigin{}, false
+	}
+	parseValue := raw
+	if !strings.Contains(raw, "://") {
+		parseValue = "//" + strings.TrimPrefix(raw, "//")
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil || u.Hostname() == "" {
+		return dedupTargetOrigin{}, false
+	}
+	return dedupTargetOrigin{
+		scheme: strings.ToLower(u.Scheme),
+		host:   strings.ToLower(u.Hostname()),
+		port:   u.Port(),
+	}, true
+}
+
+// sameDedupTarget treats a missing scheme as unspecified (rather than a
+// different host), while preserving explicit HTTP-vs-HTTPS distinctions. This
+// handles agents alternately reporting "example.com:9000" and
+// "https://example.com:9000" for the same scan without merging two explicitly
+// different services.
+func sameDedupTarget(left, right string) bool {
+	l, lok := parseDedupTargetOrigin(left)
+	r, rok := parseDedupTargetOrigin(right)
+	if !lok || !rok {
+		return normalizeEndpoint(left) == normalizeEndpoint(right)
+	}
+	if l.host != r.host {
+		return false
+	}
+	if !sameDedupPort(l, r) {
+		return false
+	}
+	if l.scheme != "" && r.scheme != "" && l.scheme != r.scheme {
+		return false
+	}
+	return true
+}
+
+func sameDedupPort(left, right dedupTargetOrigin) bool {
+	if left.port == right.port {
+		return true
+	}
+	defaultPort := func(origin dedupTargetOrigin) string {
+		switch origin.scheme {
+		case "http":
+			return "80"
+		case "https":
+			return "443"
+		default:
+			return ""
+		}
+	}
+	lp, rp := left.port, right.port
+	if lp == "" {
+		lp = defaultPort(left)
+	}
+	if rp == "" {
+		rp = defaultPort(right)
+	}
+	// A scheme-less host with no explicit port may represent the other side's
+	// default HTTP(S) origin, but it must never wildcard-match a non-default
+	// service such as :9000.
+	if lp == "" && (rp == "80" || rp == "443") {
+		return true
+	}
+	if rp == "" && (lp == "80" || lp == "443") {
+		return true
+	}
+	return lp == rp
+}
+
+// dedupEndpointKeyForTarget canonicalizes the two endpoint shapes agents most
+// commonly alternate between: an origin-relative path and a full same-origin
+// URL. Cross-origin absolute endpoints remain absolute so findings on a pivoted
+// service are not accidentally merged.
+func dedupEndpointKeyForTarget(target, endpoint string) string {
+	raw := strings.TrimSpace(endpoint)
+	if u, err := url.Parse(raw); err == nil && u.IsAbs() && u.Hostname() != "" {
+		origin := u.Scheme + "://" + u.Host
+		if sameDedupTarget(target, origin) {
+			// URL.Path is decoded, so templated placeholders such as "{flag}"
+			// remain identical to their origin-relative representation instead of
+			// becoming "%7Bflag%7D" and bypassing deduplication.
+			path := u.Path
+			if path == "" {
+				path = "/"
+			}
+			return templatePathParams(normalizeEndpoint(path))
+		}
+	}
+	return dedupEndpointKey(raw)
 }
 
 // idPathSegment matches a single path segment that is an opaque per-object

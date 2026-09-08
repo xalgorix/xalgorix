@@ -156,6 +156,42 @@ func TestNoToolHandler_RefusalPriority(t *testing.T) {
 	}
 }
 
+func TestNoToolHandler_MalformedProtocolIsBoundedAndClassified(t *testing.T) {
+	state := NewScanState()
+	state.NoToolAbortConfigured = true
+	state.NoToolAbortLimit = 0 // generic no-tool abort disabled must not allow protocol retry storms
+
+	for i := 1; i < MalformedToolAbortAt; i++ {
+		res := hookNoToolHandler(state, map[string]string{
+			"response":         "agent <tool_call>",
+			"malformed_reason": "unparsed_tool_call",
+		})
+		if res.ForceSkip {
+			t.Fatalf("malformed output aborted too early at %d: %+v", i, res)
+		}
+		if !strings.Contains(res.Nudge, "TOOL PROTOCOL RECOVERY") {
+			t.Fatalf("malformed output missing protocol-recovery nudge at %d: %q", i, res.Nudge)
+		}
+	}
+
+	res := hookNoToolHandler(state, map[string]string{
+		"response":         "echo]<]minimax[>[",
+		"malformed_reason": "provider_control_token_leak",
+	})
+	if !res.ForceSkip {
+		t.Fatalf("expected bounded malformed-output abort at %d: %+v", state.MalformedToolOutputCount, res)
+	}
+	reason, detail := classifyNoToolAbort(state)
+	if reason != "llm_malformed_tool_output" || !strings.Contains(strings.ToLower(detail), "stopped incomplete") {
+		t.Fatalf("unexpected malformed classification: reason=%q detail=%q", reason, detail)
+	}
+
+	hookResetOnSuccess(state, nil)
+	if state.MalformedToolOutputCount != 0 {
+		t.Fatalf("healthy tool response did not reset malformed counter: %d", state.MalformedToolOutputCount)
+	}
+}
+
 // classifyNoToolAbort must distinguish the density reasoning loop, a safety
 // refusal, and the generic consecutive stall.
 func TestClassifyNoToolAbort_Reasons(t *testing.T) {
