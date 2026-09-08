@@ -87,3 +87,30 @@ func TestProcessEvent_AbortedWithoutReasonUsesFallback(t *testing.T) {
 		t.Fatalf("abortReason = %q, want %q", sess.abortReason, "llm_aborted")
 	}
 }
+
+func TestProcessEvent_DelegatedAbortDoesNotAbortRootSession(t *testing.T) {
+	s := newTestServer(t, nil)
+	sctx := scanctx.New("delegated-abort", t.TempDir())
+	defer sctx.Close()
+
+	sess := &scanSession{
+		id:      "delegated-abort",
+		target:  "https://example.com",
+		scanDir: t.TempDir(),
+		record:  &ScanRecord{ID: "delegated-abort", Target: "https://example.com", Status: "running"},
+		sctx:    sctx,
+		server:  s,
+	}
+
+	s.processEvent(agent.Event{
+		Type:        "finished",
+		Content:     "specialist stopped incomplete",
+		AgentID:     "sub_1",
+		Aborted:     true,
+		AbortReason: "llm_malformed_tool_output",
+	}, sess)
+
+	if sess.abortReason != "" {
+		t.Fatalf("delegated abort poisoned root abortReason: %q", sess.abortReason)
+	}
+}

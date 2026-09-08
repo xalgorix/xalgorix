@@ -115,6 +115,11 @@ type ScanState struct {
 	EmptyResponseCount         int
 	NoToolCount                int
 	RefusalCount               int // consecutive responses that look like a model-side safety refusal
+	// MalformedToolOutputCount counts protocol-corrupt responses since the
+	// last successfully parsed tool call. Unlike ordinary prose-only turns,
+	// these contain leaked provider control tokens or broken tool markup and
+	// must never be mistaken for a clean reasoning completion.
+	MalformedToolOutputCount int
 
 	// Repeated-call loop detection (orthogonal to the browser/search stuck
 	// tracking above). Catches the agent regenerating the same tool call with
@@ -335,6 +340,7 @@ const (
 	ReasoningDensityMinResponses  = 40   // need ≥ this many no-tool responses before the density safety net applies
 	ReasoningDensityAbortRatio    = 0.85 // > this fraction of no-tool responses …
 	ReasoningDensityAbortMinIters = 80   // … once ≥ this many iterations elapsed → abort (bounded mode only)
+	MalformedToolAbortAt          = 5    // protocol-corrupt replies → stop incomplete before a paid retry storm
 )
 
 // noteBlockedToolCall records that a Gated_Tool call was rejected by a block
@@ -2065,11 +2071,41 @@ func noToolAbortLimit(state *ScanState) int {
 func hookNoToolHandler(state *ScanState, args map[string]string) HookResult {
 	state.NoToolCount++
 	state.TotalNoToolResponses++
+	malformedReason := strings.TrimSpace(args["malformed_reason"])
+	if malformedReason != "" {
+		state.MalformedToolOutputCount++
+	}
 
 	if isRefusal(args["response"]) {
 		state.RefusalCount++
 	} else {
 		state.RefusalCount = 0
+	}
+
+	// A response containing provider control tokens or broken tool-call markup
+	// is not normal multi-turn reasoning. Discarding the malformed assistant
+	// turn (done by the caller) and immediately reinforcing the exact XML
+	// contract gives the model a bounded chance to recover without teaching it
+	// to mimic its own corrupted output. The dedicated ceiling applies even
+	// when the generic no-tool abort is disabled: endlessly replaying malformed
+	// provider output cannot add coverage and can consume an entire token plan.
+	if malformedReason != "" {
+		if state.MalformedToolOutputCount >= MalformedToolAbortAt {
+			return HookResult{
+				ForceSkip: true,
+				EmitMessage: fmt.Sprintf(
+					"⛔ Agent stopped incomplete after %d malformed tool responses (%s). Existing verified findings were preserved; remaining coverage must be resumed with a healthy model response.",
+					state.MalformedToolOutputCount, malformedReason),
+			}
+		}
+		return HookResult{Nudge: fmt.Sprintf(`⚠️ TOOL PROTOCOL RECOVERY (%s)
+
+Your previous response was discarded because it contained provider control tokens or malformed tool syntax and could not execute. Do not repeat it, do not emit <tool_call>, and do not output prose-only planning.
+
+Your NEXT response must contain exactly one executable Xalgorix XML call, for example:
+<function=terminal_execute>
+<parameter=command>curl -sk https://TARGET/path</parameter>
+</function>`, malformedReason)}
 	}
 
 	// abortAt <= 0 means "never give up": the scan keeps nudging so the model
@@ -2211,14 +2247,19 @@ Call ONE tool NOW. Do NOT output any plain text without a tool call.`
 //   - the classic consecutive "stopped taking actions" stall (almost always
 //     context exhaustion / reasoning loop, not a target problem).
 func classifyNoToolAbort(state *ScanState) (reason, detail string) {
+	if state != nil && state.MalformedToolOutputCount >= MalformedToolAbortAt {
+		return "llm_malformed_tool_output", fmt.Sprintf(
+			"Agent stopped incomplete: the model emitted %d malformed tool responses. Existing verified findings were preserved, but planned endpoint coverage may be unfinished.",
+			state.MalformedToolOutputCount)
+	}
 	if state != nil && state.ConsecutiveRateLimitErrors >= 3 {
-		return "target_rate_limited", "Scan completed: Target active rate-limiting / HTTP 429 detected across multiple probe attempts. Findings collected up to rate limit are preserved in dashboard."
+		return "target_rate_limited", "Agent stopped before clean completion: target active rate-limiting / HTTP 429 was detected across multiple probe attempts. Findings collected up to the rate limit are preserved."
 	}
 	if state != nil && state.ConsecutiveTargetErrors >= 3 {
-		return "target_unreachable_or_banned", "Scan completed: Target host unresponsive or client IP blocked (connection refused / timeout across 3+ consecutive requests). Assessment safely finalized with existing findings."
+		return "target_unreachable_or_banned", "Agent stopped before clean completion: target host unresponsive or client IP blocked (connection refused / timeout across 3+ consecutive requests). Existing findings are preserved."
 	}
 	if state != nil && state.RefusalCount >= 3 {
-		return "llm_safety_refusal", "Scan completed: Model safety refusal detected. Switch to an authorized security testing model to continue full deep probing."
+		return "llm_safety_refusal", "Agent stopped incomplete: model safety refusal detected. Switch to an authorized security-testing model to continue full probing."
 	}
 	if state != nil && state.TotalNoToolResponses >= ReasoningDensityMinResponses {
 		iters := state.Iteration + 1
@@ -2226,13 +2267,13 @@ func classifyNoToolAbort(state *ScanState) (reason, detail string) {
 			ratio := float64(state.TotalNoToolResponses) / float64(iters)
 			if ratio > ReasoningDensityAbortRatio {
 				return "llm_reasoning_loop", fmt.Sprintf(
-					"Scan completed: Model reasoning loop detected — %d of %d turns (%.0f%%) produced non-tool reasoning. Assessment concluded with all verified findings saved.",
+					"Agent stopped incomplete: model reasoning loop detected — %d of %d turns (%.0f%%) produced non-tool reasoning. Existing verified findings were preserved, but coverage may be unfinished.",
 					state.TotalNoToolResponses, iters, ratio*100)
 			}
 		}
 	}
 	abortAt := noToolAbortLimit(state)
-	return "llm_no_tool_calls", fmt.Sprintf("Scan completed: Assessment concluded after %d consecutive responses with no tool call. All verified findings saved to dashboard.", abortAt)
+	return "llm_no_tool_calls", fmt.Sprintf("Agent stopped incomplete after %d consecutive responses with no tool call. Existing verified findings were preserved, but planned coverage may be unfinished.", abortAt)
 }
 
 // isRefusal reports whether the model's text looks like a safety/ethics refusal
@@ -2594,5 +2635,6 @@ func hookResetOnSuccess(state *ScanState, args map[string]string) HookResult {
 	state.EmptyResponseCount = 0
 	state.NoToolCount = 0
 	state.RefusalCount = 0
+	state.MalformedToolOutputCount = 0
 	return HookResult{}
 }

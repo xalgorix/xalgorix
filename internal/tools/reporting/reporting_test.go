@@ -1050,6 +1050,114 @@ func TestCheckClaimConsistency(t *testing.T) {
 	}
 }
 
+func TestScoreCVSSBaseVector(t *testing.T) {
+	tests := []struct {
+		vector string
+		want   float64
+	}{
+		{"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", 9.8},
+		{"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", 7.5},
+		{"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N", 6.5},
+		{"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H", 8.1},
+		{"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N", 7.2},
+	}
+	for _, tt := range tests {
+		parsed, ok := parseCVSSBaseVector(tt.vector)
+		if !ok {
+			t.Fatalf("valid vector was rejected: %s", tt.vector)
+		}
+		if got := scoreCVSSBaseVector(parsed); got != tt.want {
+			t.Errorf("scoreCVSSBaseVector(%q) = %.1f, want %.1f", tt.vector, got, tt.want)
+		}
+	}
+}
+
+func TestReportAutoNormalizesUnsupportedCVSSImpact(t *testing.T) {
+	ctx := "cvss-auto-normalize-impact"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	args := validReportArgs()
+	args["severity"] = "critical"
+	args["cvss"] = "9.8"
+	args["cvss_vector"] = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+	args["exploitation_proof"] = "UNION SELECT dumped the users table and exposed password records in a read-only response"
+
+	result, err := reportVulnWithContextID(ctx, args)
+	if err != nil {
+		t.Fatalf("report error: %v", err)
+	}
+	if strings.Contains(result.Output, "REJECTED") {
+		t.Fatalf("proven finding must be preserved after CVSS normalization: %s", result.Output)
+	}
+	vulns := GetVulnerabilitiesForContext(ctx)
+	if len(vulns) != 1 {
+		t.Fatalf("stored vulnerabilities = %d, want 1", len(vulns))
+	}
+	v := vulns[0]
+	if v.CVSSVector != "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N" {
+		t.Errorf("CVSS vector = %q, want unsupported I:H normalized to I:N", v.CVSSVector)
+	}
+	if v.CVSS != 7.5 || v.Severity != "high" {
+		t.Errorf("stored CVSS/severity = %.1f/%s, want 7.5/high", v.CVSS, v.Severity)
+	}
+	if v.OriginalSeverity != "critical" {
+		t.Errorf("original severity = %q, want critical", v.OriginalSeverity)
+	}
+	if adjusted, _ := result.Metadata["cvss_adjusted"].(bool); !adjusted {
+		t.Fatalf("result metadata must expose cvss_adjusted=true: %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Output, "finding was preserved automatically") {
+		t.Fatalf("normalization message missing from output: %s", result.Output)
+	}
+}
+
+func TestReconcileCVSSKeepsProvenRCEImpact(t *testing.T) {
+	r := reconcileCVSS(
+		"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+		"9.8", "critical", "command execution returned uid=0(root)",
+	)
+	if !r.Valid || r.Changed {
+		t.Fatalf("proven RCE vector should remain unchanged: %#v", r)
+	}
+}
+
+func TestReconcileCVSSDowngradesLimitedStateChangeToLowIntegrity(t *testing.T) {
+	r := reconcileCVSS(
+		"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H",
+		"9.8", "critical", "The request updated the current user's display-name field; the service stayed healthy.",
+	)
+	if !r.Valid || !r.Changed {
+		t.Fatalf("limited state change should be reconciled: %#v", r)
+	}
+	if !strings.Contains(r.Vector, "/I:L/A:N") {
+		t.Fatalf("limited state change should become I:L and unsupported availability A:N: %s", r.Vector)
+	}
+}
+
+func TestReconcileCVSSDoesNotTreatNegatedStateChangeAsEvidence(t *testing.T) {
+	r := reconcileCVSS(
+		"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+		"9.8", "critical", "The response exposed records, but no actual state change was observed.",
+	)
+	if !r.Valid || !r.Changed || !strings.Contains(r.Vector, "/I:N/A:N") {
+		t.Fatalf("negated state-change phrase must not preserve integrity impact: %#v", r)
+	}
+}
+
+func TestReconcileCVSSCorrectsScoreWithoutChangingVector(t *testing.T) {
+	r := reconcileCVSS(
+		"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+		"8.1", "high", "UNION SELECT dumped password records from the users table",
+	)
+	if !r.Valid || !r.Changed || r.VectorChanged {
+		t.Fatalf("expected score-only reconciliation: %#v", r)
+	}
+	if r.Score != 6.5 || r.Severity != "medium" {
+		t.Fatalf("reconciled score/severity = %.1f/%s, want 6.5/medium", r.Score, r.Severity)
+	}
+}
+
 func TestCheckFalsePositive_OpenAPISpecExposure(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2026,6 +2134,66 @@ func TestDedupEndpointKey_NormalizesThenTemplates(t *testing.T) {
 	want := "https://app.example.com/orders/{id}/items/{id}"
 	if got != want {
 		t.Fatalf("dedupEndpointKey = %q, want %q", got, want)
+	}
+}
+
+func TestDedupEndpointKeyForTarget_RelativeAndAbsoluteMatch(t *testing.T) {
+	target := "https://pentest-ground.com:9000"
+	if got, want := dedupEndpointKeyForTarget(target, "https://pentest-ground.com:9000/User/1042?q=x"), "/user/{id}"; got != want {
+		t.Fatalf("same-origin absolute endpoint key = %q, want %q", got, want)
+	}
+	if got, want := dedupEndpointKeyForTarget(target, "/User/2087#proof"), "/user/{id}"; got != want {
+		t.Fatalf("relative endpoint key = %q, want %q", got, want)
+	}
+}
+
+func TestFindDuplicateVulnerability_AbsoluteAndRelativeEndpointDedup(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "Unauthenticated SQL Injection in tokens", Description: "union SQL injection",
+		Target: "https://pentest-ground.com:9000", Endpoint: "/tokens",
+	}}
+	dup, _, isDup := findDuplicateVulnerability(existing,
+		"SQL Injection Authentication Bypass on /tokens", "UNION SELECT SQL injection", "", "CWE-89",
+		"https://pentest-ground.com:9000", "https://pentest-ground.com:9000/tokens")
+	if !isDup || dup.ID != "XALG-1" {
+		t.Fatalf("full same-origin URL must dedup against relative endpoint: duplicate=%v id=%q", isDup, dup.ID)
+	}
+}
+
+func TestFindDuplicateVulnerability_MissingTargetSchemeDedup(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "OS Command Injection via uptime", Description: "root RCE",
+		Target: "https://pentest-ground.com:9000", Endpoint: "https://pentest-ground.com:9000/uptime/{flag}",
+	}}
+	dup, _, isDup := findDuplicateVulnerability(existing,
+		"Unauthenticated command injection in uptime", "command injection gives RCE", "", "CWE-78",
+		"pentest-ground.com:9000", "/uptime/{flag}")
+	if !isDup || dup.ID != "XALG-1" {
+		t.Fatalf("scheme-omitted target must match the same host/port: duplicate=%v id=%q", isDup, dup.ID)
+	}
+}
+
+func TestFindDuplicateVulnerability_ExplicitDifferentSchemesRemainDistinct(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "SQL Injection", Description: "SQL injection",
+		Target: "https://app.example.com", Endpoint: "/tokens",
+	}}
+	if _, _, isDup := findDuplicateVulnerability(existing,
+		"SQL Injection", "SQL injection", "", "CWE-89",
+		"http://app.example.com", "/tokens"); isDup {
+		t.Fatal("explicit HTTP and HTTPS targets must remain distinct")
+	}
+}
+
+func TestFindDuplicateVulnerability_MissingPortDoesNotMatchNonDefaultService(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "SQL Injection", Description: "SQL injection",
+		Target: "https://app.example.com:9000", Endpoint: "/tokens",
+	}}
+	if _, _, isDup := findDuplicateVulnerability(existing,
+		"SQL Injection", "SQL injection", "", "CWE-89",
+		"https://app.example.com", "/tokens"); isDup {
+		t.Fatal("default HTTPS origin and explicit :9000 service must remain distinct")
 	}
 }
 

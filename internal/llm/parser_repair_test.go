@@ -143,3 +143,45 @@ func TestCleanContent_StripsRepairedMalformedCall(t *testing.T) {
 		t.Errorf("CleanContent = %q, want %q", got, "Running fingerprint:")
 	}
 }
+
+func TestMalformedToolOutputReason(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "MiniMax internal control token leak",
+			in:   "echo]<]minimax[>[\\nReading /reservation/user1",
+			want: "provider_control_token_leak",
+		},
+		{
+			name: "bare tool-call marker",
+			in:   "agent\\n<tool_call>",
+			want: "unparsed_tool_call",
+		},
+		{
+			name: "unrecoverable XML residue",
+			in:   "<function>terminal_execute</function>",
+			want: "malformed_tool_xml",
+		},
+		{
+			name: "ordinary prose",
+			in:   "I should make a tool call next.",
+			want: "",
+		},
+		{
+			name: "valid parsed call is classified only by caller",
+			in:   "normal text with no protocol tags",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MalformedToolOutputReason(tt.in); got != tt.want {
+				t.Fatalf("MalformedToolOutputReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -64,3 +64,27 @@ func TestEffectiveTemperature_NormalModelHonorsOverride(t *testing.T) {
 		t.Fatalf("gpt-4o overridden temperature = %v, want 0.7", got)
 	}
 }
+
+func TestEffectiveTemperature_MiniMaxClampsZeroOnly(t *testing.T) {
+	configured := 0.4
+	c := NewClient(&config.Config{LLM: "minimax/MiniMax-M3", APIKey: "k", Temperature: &configured})
+
+	if !modelRequiresPositiveTemperature("minimax/MiniMax-M3") {
+		t.Fatal("MiniMax-M3 should require a positive temperature")
+	}
+	if got := c.effectiveTemperature(); got == nil || *got != configured {
+		t.Fatalf("MiniMax configured positive temperature = %v, want %v", got, configured)
+	}
+
+	zero := 0.0
+	c.SetTemperature(&zero) // scanner/validator role override
+	if got := c.effectiveTemperature(); got == nil || *got != 1.0 {
+		t.Fatalf("MiniMax zero override = %v, want provider-safe 1.0", got)
+	}
+
+	positive := 0.2
+	c.SetTemperature(&positive)
+	if got := c.effectiveTemperature(); got == nil || *got != positive {
+		t.Fatalf("MiniMax positive override = %v, want %v", got, positive)
+	}
+}

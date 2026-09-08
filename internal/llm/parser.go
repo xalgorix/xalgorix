@@ -103,7 +103,36 @@ var (
 	// cannot: a call carrying only {command}, which ties across terminal_execute
 	// / browser_action / pageagent and is therefore rejected as ambiguous.
 	nameHintRe = regexp.MustCompile(`(?s)([A-Za-z_][A-Za-z0-9_-]*)\s*>\s*$`)
+
+	// Provider/tool-protocol residue that cannot be executed by the XML tool
+	// parser. MiniMax has been observed leaking its internal channel delimiter
+	// (`<]minimax[>`) and sometimes emitting a bare `<tool_call>` marker with no
+	// function name or arguments. Treating those turns as ordinary prose caused
+	// the agent to make dozens of identical paid requests before falsely
+	// reporting a clean completion. These expressions are intentionally narrow:
+	// ordinary prose mentioning "tool call" is not classified as malformed.
+	providerControlTokenRe = regexp.MustCompile(`(?i)<\]\s*minimax\s*\[>`)
+	bareToolCallTagRe      = regexp.MustCompile(`(?is)</?tool_calls?\b[^>]*>`)
+	toolXMLResidueRe       = regexp.MustCompile(`(?is)</?function(?:\s*=|\b)|<parameter(?:\s*=|\s+)|</parameter>`)
 )
+
+// MalformedToolOutputReason returns a stable machine-readable reason when a
+// model response visibly attempted to use a tool protocol but did not contain
+// a parseable call. Callers should invoke this only after ParseToolCalls and
+// ParseOrphanedCalls have both failed, so recoverable malformed XML is still
+// executed normally. An empty result means the response is ordinary prose.
+func MalformedToolOutputReason(content string) string {
+	if providerControlTokenRe.MatchString(content) {
+		return "provider_control_token_leak"
+	}
+	if bareToolCallTagRe.MatchString(content) {
+		return "unparsed_tool_call"
+	}
+	if toolXMLResidueRe.MatchString(content) {
+		return "malformed_tool_xml"
+	}
+	return ""
+}
 
 // ParseToolCalls extracts tool calls from LLM XML output.
 func ParseToolCalls(content string) []ToolCall {
