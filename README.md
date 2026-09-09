@@ -173,12 +173,13 @@ Xalgorix is free and open source — self-host it forever, no strings attached. 
 
 |                                    | **Self-hosted** (this repo)              | **[Hosted cloud](https://www.xalgorix.com/)**   |
 | ---------------------------------- | ---------------------------------------- | ----------------------------------------------- |
-| Price to start                     | Free, Apache-2.0                         | Free tier · one full scan from $1               |
+| Price to start                     | Free engine, Apache-2.0                  | Free account · one-time $1 evaluation           |
 | LLM API key                        | Bring & manage your own                  | Included — none to wrangle                      |
 | Cost per scan                      | Raw LLM tokens — variable, can spike     | 1 credit per live host — predictable            |
 | Setup & ops                        | You install, update & run the toolchain  | Nothing to run — scan in ~60s                   |
 | Out-of-band infra (SSRF/blind RCE) | Stand up your own OOB server             | Managed OOB included                            |
-| Scheduling · team · RBAC           | Do it yourself                           | Built in                                        |
+| Scheduling                         | Built-in scheduler on your infrastructure | Managed daily / hourly schedules             |
+| Team · RBAC · shared credits        | Single-operator instance                 | Organization workspaces on Team                 |
 | Updates                            | `git pull` + rebuild                     | Always on the latest engine                     |
 | Data residency / offline           | ✅ stays on your infra · air-gap OK       | Runs on our infra (DPA available)               |
 
@@ -186,7 +187,7 @@ Xalgorix is free and open source — self-host it forever, no strings attached. 
 
 <div align="center">
 
-[**☁️ Try the hosted cloud — free →**](https://www.xalgorix.com/) &nbsp;·&nbsp; [**⚖️ Compare the real cost (calculator) →**](https://www.xalgorix.com/hosted-vs-self-hosted)
+[**☁️ Evaluate hosted Cloud — $1 trial →**](https://www.xalgorix.com/pricing) &nbsp;·&nbsp; [**⚖️ Compare Cloud and self-hosting →**](https://www.xalgorix.com/hosted-vs-self-hosted)
 
 </div>
 
