@@ -1356,19 +1356,25 @@ func runShellInternal(contextID string, command string) (string, int) {
 	// Compute timeout based on command type
 	cleanCmd, ratePolicyNotice := NormalizeCommandForRequestRatePolicy(contextID, command)
 	cleanCmd = InjectScanHeadersIntoCommand(cleanCmd)
-	timeout := computeTimeout(cleanCmd)
-	if timeout > hardMaxTimeout {
-		timeout = hardMaxTimeout
-	}
 
 	cfg := config.Get()
 	workDir := effectiveWorkDirForContext(contextID, cfg)
 	if err := prepareCommandWorkspace(workDir); err != nil {
 		return fmt.Sprintf("Failed to prepare command workspace %s: %v", workDir, err), -1
 	}
+	wordlistCmd, wordlistNotice, wordlistErr := normalizeCommandWordlists(cleanCmd, workDir)
+	if wordlistErr != nil {
+		return ratePolicyNotice + fmt.Sprintf("[WORDLIST] Could not prepare a portable wordlist: %v", wordlistErr), -1
+	}
+	cleanCmd = wordlistCmd
+	commandNotice := ratePolicyNotice + wordlistNotice
+	timeout := computeTimeout(cleanCmd)
+	if timeout > hardMaxTimeout {
+		timeout = hardMaxTimeout
+	}
 	rateRuntime, err := prepareRequestRateRuntime(workDir, requestRatePolicyForContext(contextID))
 	if err != nil {
-		return fmt.Sprintf("Failed to prepare request-rate runtime %s: %v", workDir, err), -1
+		return commandNotice + fmt.Sprintf("Failed to prepare request-rate runtime %s: %v", workDir, err), -1
 	}
 
 	// Set PATH to include common tool locations (dynamic - works for any user)
@@ -1386,7 +1392,7 @@ func runShellInternal(contextID string, command string) (string, int) {
 	waitCtx := commandWaitContext(contextID)
 	lease, err := resources.AcquireToolLeaseContext(waitCtx, heavy, toolLabel)
 	if err != nil {
-		return fmt.Sprintf("[CANCELED] Tool launch canceled before starting %q: %v", toolLabel, err), -1
+		return commandNotice + fmt.Sprintf("[CANCELED] Tool launch canceled before starting %q: %v", toolLabel, err), -1
 	}
 	defer lease.Release()
 	memLimitBytes := lease.MemoryLimitBytes()
@@ -1424,16 +1430,16 @@ func runShellInternal(contextID string, command string) (string, int) {
 	// Use pipes for real-time output streaming
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Sprintf("Failed to create stdout pipe: %v", err), -1
+		return commandNotice + fmt.Sprintf("Failed to create stdout pipe: %v", err), -1
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Sprintf("Failed to create stderr pipe: %v", err), -1
+		return commandNotice + fmt.Sprintf("Failed to create stderr pipe: %v", err), -1
 	}
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
-		return fmt.Sprintf("Failed to start command: %v", err), -1
+		return commandNotice + fmt.Sprintf("Failed to start command: %v", err), -1
 	}
 
 	// ── Layer 3: Post-start process limits ──
@@ -1523,16 +1529,16 @@ func runShellInternal(contextID string, command string) (string, int) {
 			exitCode = exitErr.ExitCode()
 		} else if ctx.Err() == context.DeadlineExceeded {
 			// Command was killed by timeout
-			return ratePolicyNotice + fmt.Sprintf("[TIMEOUT] Command killed after %s. Use more targeted scans (fewer ports, specific paths, smaller scope) to stay within the time limit.\nPartial stdout:\n%s\nPartial stderr:\n%s",
+			return commandNotice + fmt.Sprintf("[TIMEOUT] Command killed after %s. Use more targeted scans (fewer ports, specific paths, smaller scope) to stay within the time limit.\nPartial stdout:\n%s\nPartial stderr:\n%s",
 				timeout.Round(time.Second), truncate(stdoutStr), truncate(stderrStr)), -1
 		} else if ctx.Err() == context.Canceled {
 			// Context was canceled (Stop or watchdog kill)
-			return ratePolicyNotice + fmt.Sprintf("Command canceled.\nPartial stdout:\n%s\nPartial stderr:\n%s",
+			return commandNotice + fmt.Sprintf("Command canceled.\nPartial stdout:\n%s\nPartial stderr:\n%s",
 				truncate(stdoutStr), truncate(stderrStr)), -1
 		}
 	}
 
-	return ratePolicyNotice + formatOutput(stdoutStr, stderrStr, exitCode), exitCode
+	return commandNotice + formatOutput(stdoutStr, stderrStr, exitCode), exitCode
 }
 
 func isCommandNotFound(output string) bool {
