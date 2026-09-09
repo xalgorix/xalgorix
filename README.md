@@ -29,26 +29,9 @@
   <a href="#-why-xalgorix">💡 Why Xalgorix</a> ·
   <a href="#-features">✨ Features</a> ·
   <a href="#-use-cases">🎯 Use Cases</a> ·
-  <a href="#-sponsors">🤝 Sponsors</a> ·
   <a href="https://www.xalgorix.com/">☁️ Hosted Cloud</a> ·
   <a href="https://docs.xalgorix.com">📖 Docs</a>
 </p>
-
----
-
-## 🤝 Sponsors
-
-Thanks to **[Swiftproxy](https://www.swiftproxy.net/?ref=xalgorix)** for sponsoring Xalgorix.
-
-<a href="https://www.swiftproxy.net/?ref=xalgorix">
-  <img src="assets/swiftproxy_xalgorix.png" alt="Swiftproxy sponsors Xalgorix — residential proxies for authorized testing across locations" width="860" />
-</a>
-
-Your app can behave differently depending on where a request comes from. For Xalgorix users checking their own applications across regions, Swiftproxy offers **location targeting** to review regional behavior and **sticky sessions** to help keep a consistent IP during a test session. It supports **HTTP(S) and SOCKS5**, the same proxy protocols Xalgorix supports.
-
-Residential proxies from **$0.70/GB**. **Free testing is available**, and Xalgorix users get **10% off** with code **`PROXY90`**.
-
-[**Explore Swiftproxy and request a free test →**](https://www.swiftproxy.net/?ref=xalgorix)
 
 ---
 
@@ -233,6 +216,20 @@ If Xalgorix saves you a triage cycle, please **[⭐ star the repo](https://githu
 | 🔔 Integrations   | AgentMail test inboxes, verification emails, OTP flows, email triage events, Discord and Telegram notifications.            |
 | ⚙️ Configuration  | Dashboard settings for LLM, AgentMail, Discord, Telegram, proxy, runtime, browser, auth, rate limits, and resources.       |
 | 🛡️ Runtime safety | Resource-aware instance limits and loopback-only binding unless external access is explicitly configured with auth.         |
+
+## 🤝 Sponsors
+
+Thanks to **[Swiftproxy](https://www.swiftproxy.net/?ref=xalgorix)** for sponsoring Xalgorix.
+
+<a href="https://www.swiftproxy.net/?ref=xalgorix">
+  <img src="assets/swiftproxy_xalgorix.png" alt="Swiftproxy sponsors Xalgorix — residential proxies for authorized testing across locations" width="860" />
+</a>
+
+Your app can behave differently depending on where a request comes from. For Xalgorix users checking their own applications across regions, Swiftproxy offers **location targeting** to review regional behavior and **sticky sessions** to help keep a consistent IP during a test session. It supports **HTTP(S) and SOCKS5**, the same proxy protocols Xalgorix supports.
+
+Residential proxies from **$0.70/GB**. **Free testing is available**, and Xalgorix users get **10% off** with code **`PROXY90`**.
+
+[**Explore Swiftproxy and request a free test →**](https://www.swiftproxy.net/?ref=xalgorix)
 
 ## 📥 Installation
 
