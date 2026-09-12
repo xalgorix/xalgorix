@@ -274,7 +274,7 @@ func RegisterWithVerifier(r *tools.Registry, verifier FindingVerifier) {
 		Name: "report_vulnerability",
 		Description: `Report a VERIFIED, EXPLOITABLE vulnerability with proof. CRITICAL RULES:
 1. You MUST have already EXPLOITED this vulnerability before calling this tool.
-2. You MUST provide exploitation_proof showing concrete evidence (extracted data, reflected payload, command output, callback, timing proof).
+2. You MUST provide exploitation_proof showing concrete evidence (extracted data, reflected payload, command output, callback, timing proof). Every quoted request/response must be the exact literal text returned by the tool — NEVER invent, alter, or embellish response bodies.
 3. Reports without exploitation proof for severity >= medium will be REJECTED — exploit first, then report.
 3b. MANDATORY CONTROL/BASELINE TEST for any "bypass", "desync", or "differential" claim: before reporting, prove the behavior does NOT already happen WITHOUT your exploit. Run the baseline and put BOTH results in exploitation_proof. Examples: a Host-header/deployment "bypass" → hit production directly with no Host trick; if the response is identical it is PUBLIC, not a bypass. Request smuggling → resend the two requests with NO CL/TE headers; two responses then = pipelining, not desync. OAuth "state CSRF" → the authorize endpoint echoing state=test is by design (state is client-validated); complete the callback. If baseline == exploit-result, it is a FALSE POSITIVE — do not report.
 4. Do NOT report missing headers, version disclosure, or scanner-only findings as vulnerabilities — those are INFO at best.

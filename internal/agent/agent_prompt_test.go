@@ -233,3 +233,29 @@ func TestWhiteboxGuidanceText(t *testing.T) {
 		t.Errorf("source-review guidance should retain the code_search methodology")
 	}
 }
+
+func TestSystemPromptIncludesProofIntegrityRule(t *testing.T) {
+	registry := tools.NewRegistry()
+	agent := &Agent{
+		cfg:      &config.Config{RateLimitRPS: 2},
+		registry: registry,
+	}
+	prompt := agent.buildSystemPrompt(
+		[]string{"https://example.test"},
+		"Perform a full authorized assessment.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"},
+	)
+
+	for _, expected := range []string{
+		"### PROOF-INTEGRITY RULE — NEVER INVENT OR ALTER REQUEST/RESPONSE TEXT",
+		"Every Request and Response block you include in exploitation_proof or any report MUST be the EXACT, literal text",
+		"NEVER invent, modify, embellish, summarize, or \"repair\" the content",
+		"NEVER claim a payload \"resulted in the execution of <command>\"",
+		"A 404-style JSON error that merely echoes the input parameter",
+		"If you cannot paste the real, unmodified response text, the finding is NOT proven",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("prompt missing proof-integrity requirement %q", expected)
+		}
+	}
+}
