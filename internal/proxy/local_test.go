@@ -251,6 +251,21 @@ func TestConcurrentLocalURLAndClose(t *testing.T) {
 	}
 }
 
+func TestManagerCloseBeforeLocalServeStarts(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{localListener: ln, localServer: &http.Server{}}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := net.DialTimeout("tcp", ln.Addr().String(), 100*time.Millisecond); err == nil {
+		conn.Close()
+		t.Fatal("listener remained open when Close ran before Serve")
+	}
+}
+
 func TestLocalProxyStripsHopByHopHeaders(t *testing.T) {
 	var receivedHeaders http.Header
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

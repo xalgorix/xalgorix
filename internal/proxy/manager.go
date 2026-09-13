@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -29,6 +30,7 @@ type Manager struct {
 	localOnce      sync.Once
 	localURL       string
 	localErr       error
+	localListener  net.Listener
 	localServer    *http.Server
 	localTransport *http.Transport
 }
@@ -204,6 +206,12 @@ func (m *Manager) Close() error {
 			firstErr = err
 		}
 		m.localServer = nil
+	}
+	// Serve may not have started yet, in which case http.Server.Close has
+	// not registered the listener and cannot close it for us.
+	if m.localListener != nil {
+		_ = m.localListener.Close()
+		m.localListener = nil
 	}
 	m.localURL = ""
 	// Never reset a sync.Once while LocalURL may still be using it. A closed

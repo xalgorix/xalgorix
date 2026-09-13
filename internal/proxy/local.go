@@ -45,6 +45,7 @@ func LocalURL() (string, error) {
 			return
 		}
 		m.localURL = "http://" + ln.Addr().String()
+		m.localListener = ln
 		srv := &http.Server{
 			Handler:           &localHandler{upstream: upstream, transport: tr},
 			ReadHeaderTimeout: 10 * time.Second,
