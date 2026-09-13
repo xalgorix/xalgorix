@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -203,6 +204,50 @@ func TestLocalProxyClose(t *testing.T) {
 	_, err = net.DialTimeout("tcp", parsed.Host, 500*time.Millisecond)
 	if err == nil {
 		t.Fatalf("expected connection to %s to fail after Close, but it succeeded", parsed.Host)
+	}
+}
+
+func TestConcurrentLocalURLAndClose(t *testing.T) {
+	for attempt := 0; attempt < 25; attempt++ {
+		if err := InitWithPolicy(true, true, "http://127.0.0.1:3128", "", "roundrobin", time.Second); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var localURL string
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 100; i++ {
+				if u, err := LocalURL(); err == nil {
+					localURL = u
+				}
+			}
+		}()
+		for i := 0; i < 2; i++ {
+			go func() {
+				defer wg.Done()
+				<-start
+				_ = Close()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if Enabled() || Required() {
+			t.Fatal("manager remained active after concurrent Close")
+		}
+		if localURL != "" {
+			parsed, err := url.Parse(localURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := net.DialTimeout("tcp", parsed.Host, 100*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				t.Fatalf("loopback proxy %s remained open after Close", parsed.Host)
+			}
+		}
 	}
 }
 

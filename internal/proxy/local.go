@@ -20,9 +20,14 @@ import (
 // credentials out of their command lines. It never connects directly to a
 // requested destination when the upstream is unavailable.
 func LocalURL() (string, error) {
-	m := defaultManager
+	m := defaultManager.Load()
 	if m == nil || !m.required || !m.enabled || m.pool == nil || m.pool.Len() != 1 {
 		return "", fmt.Errorf("local proxy requires one initialized, required upstream")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return "", fmt.Errorf("local proxy manager is closed")
 	}
 	m.localOnce.Do(func() {
 		upstream := m.pool.proxies[0]
@@ -33,6 +38,7 @@ func LocalURL() (string, error) {
 		}
 		tr := clonedDefaultTransport()
 		tr.Proxy = http.ProxyURL(upstreamURL)
+		m.localTransport = tr
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			m.localErr = fmt.Errorf("listen on loopback: %w", err)

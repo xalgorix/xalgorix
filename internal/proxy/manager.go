@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,19 +18,22 @@ import (
 // Go's http.Transport to reuse idle TCP connections (Keep-Alive) and avoids
 // socket exhaustion under load.
 type Manager struct {
-	enabled     bool
-	pool        *Pool
-	rotation    string // "roundrobin" | "random"
-	required    bool
-	timeout     time.Duration
-	client      *http.Client // shared client used when proxy routing is disabled
-	localOnce   sync.Once
-	localURL    string
-	localErr    error
-	localServer *http.Server
+	enabled        bool
+	pool           *Pool
+	rotation       string // "roundrobin" | "random"
+	required       bool
+	timeout        time.Duration
+	client         *http.Client // shared client used when proxy routing is disabled
+	mu             sync.Mutex   // guards the loopback listener and closed state
+	closed         bool
+	localOnce      sync.Once
+	localURL       string
+	localErr       error
+	localServer    *http.Server
+	localTransport *http.Transport
 }
 
-var defaultManager *Manager
+var defaultManager atomic.Pointer[Manager]
 
 // Init initializes the package-level Manager from explicit parameters.
 // Call this once at startup (e.g. from main or server init).
@@ -93,33 +97,35 @@ func InitWithPolicy(useProxy, required bool, proxyURL, proxyFile, rotation strin
 		Timeout:   m.timeoutOrDefault(),
 	}
 
-	defaultManager = m
+	if old := defaultManager.Swap(m); old != nil {
+		_ = old.Close()
+	}
 	return nil
 }
 
 // Enabled reports whether proxy routing is active.
 func Enabled() bool {
-	if defaultManager == nil {
-		return false
-	}
-	return defaultManager.enabled
+	m := defaultManager.Load()
+	return m != nil && m.enabled
 }
 
 // Required reports whether the process was initialized in proxy-required mode.
 func Required() bool {
-	return defaultManager != nil && defaultManager.required
+	m := defaultManager.Load()
+	return m != nil && m.required
 }
 
 // GetProxy returns the next proxy according to the configured rotation strategy.
 // Returns nil when proxy routing is disabled or the pool is empty.
 func GetProxy() *Proxy {
-	if defaultManager == nil || !defaultManager.enabled || defaultManager.pool == nil {
+	m := defaultManager.Load()
+	if m == nil || !m.enabled || m.pool == nil {
 		return nil
 	}
-	if defaultManager.rotation == "random" {
-		return defaultManager.pool.Random()
+	if m.rotation == "random" {
+		return m.pool.Random()
 	}
-	return defaultManager.pool.Next()
+	return m.pool.Next()
 }
 
 // GetClient returns an *http.Client ready to use for the next request.
@@ -130,23 +136,37 @@ func GetProxy() *Proxy {
 //   - Build one Transport per proxy entry (cached in the Proxy struct) when
 //     proxying is enabled, so connections to the same proxy are reused.
 func GetClient() (*http.Client, error) {
-	if defaultManager == nil {
+	m := defaultManager.Load()
+	if m == nil {
 		// Callers configured for proxy-required mode must also check their
 		// configuration before using this legacy no-manager fallback.
 		return http.DefaultClient, nil
 	}
-	if !defaultManager.enabled {
-		// Return the pre-built shared client — zero extra allocation.
-		return defaultManager.client, nil
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return nil, fmt.Errorf("proxy manager is closed")
 	}
-	p := GetProxy()
+	if !m.enabled {
+		// Return the pre-built shared client — zero extra allocation.
+		return m.client, nil
+	}
+	var p *Proxy
+	if m.pool != nil {
+		if m.rotation == "random" {
+			p = m.pool.Random()
+		} else {
+			p = m.pool.Next()
+		}
+	}
 	if p == nil {
-		if defaultManager.required {
+		if m.required {
 			return nil, fmt.Errorf("proxy-required mode has no upstream proxy")
 		}
-		return defaultManager.client, nil
+		return m.client, nil
 	}
-	return NewClient(p, defaultManager.timeoutOrDefault())
+	return NewClient(p, m.timeoutOrDefault())
 }
 
 // GetClientFor returns an *http.Client wired to the given proxy string.
@@ -156,7 +176,7 @@ func GetClientFor(rawProxy string) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(p, defaultManager.timeoutOrDefault())
+	return NewClient(p, defaultManager.Load().timeoutOrDefault())
 }
 
 func (m *Manager) timeoutOrDefault() time.Duration {
@@ -172,6 +192,12 @@ func (m *Manager) Close() error {
 	if m == nil {
 		return nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	m.closed = true
 	var firstErr error
 	if m.localServer != nil {
 		if err := m.localServer.Close(); err != nil {
@@ -180,8 +206,12 @@ func (m *Manager) Close() error {
 		m.localServer = nil
 	}
 	m.localURL = ""
-	m.localOnce = sync.Once{}
-	m.localErr = nil
+	// Never reset a sync.Once while LocalURL may still be using it. A closed
+	// manager is terminal; InitWithPolicy constructs a fresh manager instead.
+	if m.localTransport != nil {
+		m.localTransport.CloseIdleConnections()
+		m.localTransport = nil
+	}
 	if m.client != nil {
 		m.client.CloseIdleConnections()
 	}
@@ -190,12 +220,7 @@ func (m *Manager) Close() error {
 
 // Close shuts down the package-level default proxy manager and any background loopback proxy.
 func Close() error {
-	if defaultManager == nil {
-		return nil
-	}
-	err := defaultManager.Close()
-	defaultManager = nil
-	return err
+	return defaultManager.Swap(nil).Close()
 }
 
 // Reset clears the package-level manager.
