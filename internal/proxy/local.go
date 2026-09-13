@@ -92,7 +92,7 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream proxy CONNECT failed", http.StatusBadGateway)
 		return
 	}
-	defer upstreamConn.Close()
+	defer func() { _ = upstreamConn.Close() }()
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "HTTP hijacking unavailable", http.StatusInternalServerError)
@@ -102,7 +102,7 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 	if _, err := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
 	}
@@ -149,17 +149,18 @@ func (h *localHandler) dialThroughUpstream(target string) (net.Conn, io.Reader, 
 	}
 	request.WriteString("\r\n")
 	if _, err := io.WriteString(conn, request.String()); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, err
 	}
 	reader := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, err
 	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("upstream CONNECT returned HTTP %d", resp.StatusCode)
 	}
 	_ = conn.SetDeadline(time.Time{})

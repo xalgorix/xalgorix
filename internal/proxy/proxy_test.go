@@ -117,6 +117,7 @@ func TestPoolNextRotation(t *testing.T) {
 		p := pool.Next()
 		if p == nil {
 			t.Fatal("got nil from non-empty pool")
+			return
 		}
 		seen[p.Host] = true
 	}
