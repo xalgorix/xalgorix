@@ -39,13 +39,41 @@ func LocalURL() (string, error) {
 			return
 		}
 		m.localURL = "http://" + ln.Addr().String()
-		m.localServer = &http.Server{
+		srv := &http.Server{
 			Handler:           &localHandler{upstream: upstream, transport: tr},
 			ReadHeaderTimeout: 10 * time.Second,
 		}
-		go func() { _ = m.localServer.Serve(ln) }()
+		m.localServer = srv
+		go func() { _ = srv.Serve(ln) }()
 	})
 	return m.localURL, m.localErr
+}
+
+// hopByHopHeaders lists headers that must not be forwarded by a proxy (RFC 7230 Section 6.1).
+var hopByHopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Proxy-Connection",
+	"Te",
+	"Trailer",
+	"Trailers",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func removeHopByHopHeaders(h http.Header) {
+	for _, val := range h["Connection"] {
+		for _, token := range strings.Split(val, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				h.Del(token)
+			}
+		}
+	}
+	for _, hdr := range hopByHopHeaders {
+		h.Del(hdr)
+	}
 }
 
 type localHandler struct {
@@ -65,14 +93,14 @@ func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out := r.Clone(r.Context())
 	out.RequestURI = ""
 	out.Header = r.Header.Clone()
-	out.Header.Del("Proxy-Authorization")
-	out.Header.Del("Proxy-Connection")
+	removeHopByHopHeaders(out.Header)
 	resp, err := h.transport.RoundTrip(out)
 	if err != nil {
 		http.Error(w, "upstream proxy request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	removeHopByHopHeaders(resp.Header)
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)

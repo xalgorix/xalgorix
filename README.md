@@ -704,6 +704,7 @@ Some settings require a restart because they affect process startup or server bi
 | `XALGORIX_RATE_RPS`            | `10`         | Sustained outbound request rate.                   |
 | `XALGORIX_RATE_BURST`          | `20`         | Outbound burst size.                               |
 | `XALGORIX_USE_PROXY`           | `false`      | Enable proxy routing.                              |
+| `XALGORIX_PROXY_REQUIRED`      | `false`      | Require one upstream proxy for target HTTP/browser paths without direct fallback. |
 | `XALGORIX_PROXY_URL`           | none         | Single proxy URL. Overrides proxy file.            |
 | `XALGORIX_PROXY_FILE`          | none         | File containing one proxy per line.                |
 | `XALGORIX_PROXY_ROTATION`      | `roundrobin` | Proxy rotation strategy: `roundrobin` or `random`. |

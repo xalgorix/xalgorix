@@ -245,6 +245,7 @@ func main() {
 	if proxy.Enabled() {
 		fmt.Fprintf(os.Stderr, "[proxy] proxy routing active\n")
 	}
+	defer func() { _ = proxy.Close() }()
 
 	// Set web package version from main — single source of truth
 	web.Version = version
@@ -471,9 +472,10 @@ func printUsage() {
 	fmt.Println("  -h, --help                Show help")
 	fmt.Println()
 	fmt.Println("Proxy:")
-	fmt.Println("  XALGORIX_USE_PROXY=true          Enable proxy routing")
-	fmt.Println("  XALGORIX_PROXY_URL=ip:port        Single proxy (HTTP/SOCKS5)")
-	fmt.Println("  XALGORIX_PROXY_FILE=proxies.txt   Proxy list with rotation")
+	fmt.Println("  XALGORIX_USE_PROXY=true             Enable proxy routing")
+	fmt.Println("  XALGORIX_PROXY_REQUIRED=true        Require single upstream proxy for target HTTP/browser traffic")
+	fmt.Println("  XALGORIX_PROXY_URL=ip:port          Single proxy (HTTP/SOCKS5)")
+	fmt.Println("  XALGORIX_PROXY_FILE=proxies.txt     Proxy list with rotation")
 	fmt.Println("  XALGORIX_PROXY_ROTATION=roundrobin  Rotation: roundrobin or random")
 	fmt.Println()
 	fmt.Println("Examples:")

@@ -165,3 +165,40 @@ func (m *Manager) timeoutOrDefault() time.Duration {
 	}
 	return m.timeout
 }
+
+// Close shuts down the manager, releases any background loopback proxy server,
+// and closes idle connections in cached transports.
+func (m *Manager) Close() error {
+	if m == nil {
+		return nil
+	}
+	var firstErr error
+	if m.localServer != nil {
+		if err := m.localServer.Close(); err != nil {
+			firstErr = err
+		}
+		m.localServer = nil
+	}
+	m.localURL = ""
+	m.localOnce = sync.Once{}
+	m.localErr = nil
+	if m.client != nil {
+		m.client.CloseIdleConnections()
+	}
+	return firstErr
+}
+
+// Close shuts down the package-level default proxy manager and any background loopback proxy.
+func Close() error {
+	if defaultManager == nil {
+		return nil
+	}
+	err := defaultManager.Close()
+	defaultManager = nil
+	return err
+}
+
+// Reset clears the package-level manager.
+func Reset() {
+	_ = Close()
+}

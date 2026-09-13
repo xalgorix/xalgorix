@@ -36,6 +36,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/providers"
+	"github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/sandbox"
@@ -1365,6 +1366,7 @@ func (s *Server) Start() error {
 			log.Printf("[SHUTDOWN] HTTP shutdown error: %v", err)
 		}
 
+		_ = proxy.Close()
 		s.rateLimiter.Stop()
 		log.Printf("[SHUTDOWN] Graceful shutdown complete")
 	}()
@@ -1490,6 +1492,7 @@ func (s *Server) restartNow(httpServer *http.Server) {
 			log.Printf("[RESTART] HTTP shutdown error: %v", err)
 		}
 	}
+	_ = proxy.Close()
 
 	// systemd-managed: INVOCATION_ID is set by systemd for service units.
 	// A clean exit triggers Restart=always with a freshly-loaded env file.
