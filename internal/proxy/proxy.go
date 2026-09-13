@@ -44,6 +44,9 @@ type Proxy struct {
 // FIX (ChatGPT P1): preserve the correct scheme for each proxy type
 // so HTTPS proxies are not silently downgraded to http://.
 func (p *Proxy) URL() (*url.URL, error) {
+	if p == nil || p.Host == "" || p.Port == "" {
+		return nil, fmt.Errorf("proxy: missing host or port")
+	}
 	var scheme string
 	switch p.Type {
 	case ProxyTypeSOCKS5:
@@ -54,15 +57,11 @@ func (p *Proxy) URL() (*url.URL, error) {
 		scheme = "http"
 	}
 
-	var raw string
+	u := &url.URL{Scheme: scheme, Host: net.JoinHostPort(p.Host, p.Port)}
 	if p.Username != "" {
-		raw = fmt.Sprintf("%s://%s:%s@%s:%s", scheme,
-			url.QueryEscape(p.Username), url.QueryEscape(p.Password),
-			p.Host, p.Port)
-	} else {
-		raw = fmt.Sprintf("%s://%s:%s", scheme, p.Host, p.Port)
+		u.User = url.UserPassword(p.Username, p.Password)
 	}
-	return url.Parse(raw)
+	return u, nil
 }
 
 // String returns a human-readable representation (password masked).
@@ -110,8 +109,10 @@ func parseURI(raw string) (*Proxy, error) {
 		p.Type = ProxyTypeSOCKS5
 	case "https":
 		p.Type = ProxyTypeHTTPS
-	default:
+	case "http":
 		p.Type = ProxyTypeHTTP
+	default:
+		return nil, fmt.Errorf("proxy: unsupported URI scheme")
 	}
 
 	p.Host = u.Hostname()
@@ -252,7 +253,8 @@ func NewPool(rawList []string) *Pool {
 	for _, raw := range rawList {
 		prx, err := Parse(raw)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[proxy] skipping invalid entry %q: %v\n", raw, err)
+			// Never print raw proxy strings: they may contain credentials.
+			fmt.Fprintln(os.Stderr, "[proxy] skipping invalid proxy entry")
 			continue
 		}
 		p.proxies = append(p.proxies, prx)

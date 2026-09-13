@@ -45,7 +45,7 @@ func initLimiter() {
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
 		Name:        "send_request",
-		Description: "Send an HTTP request through the Caido proxy. Falls back to direct request if Caido is unavailable. Large responses (>10KB) are automatically saved to /tmp/ — use terminal_execute (grep/cat) to search the saved file. Prefer curl via terminal_execute for recon to get full responses directly.",
+		Description: "Send an HTTP request using the configured outbound proxy when enabled. Proxy-required mode never falls back to a direct request. Large responses (>10KB) are saved to a temporary file; use terminal_execute to inspect it.",
 		Parameters: []tools.Parameter{
 			{Name: "method", Description: "HTTP method (GET, POST, PUT, DELETE, etc.)", Required: true},
 			{Name: "url", Description: "Target URL", Required: true},
@@ -66,22 +66,21 @@ func Register(r *tools.Registry) {
 	})
 }
 
-// httpClient returns the best available *http.Client in priority order:
-//  1. The shared proxy-pool client from internal/proxy (honors
-//     XALGORIX_USE_PROXY and all rotation settings from PR #13).
-//  2. A plain direct client as fallback when the proxy pool is disabled
-//     or returns an error.
-//
-// TLSSkipVerify is driven by config instead of being hardcoded to true.
-func httpClient() *http.Client {
+// httpClient returns the configured client. Proxy-required mode never falls
+// back to a direct connection when initialization failed.
+func httpClient() (*http.Client, error) {
 	cfg := config.Get()
-	if cfg.UseProxy {
-		if client, err := proxy.GetClient(); err == nil {
-			return client
-		}
+	if cfg.ProxyRequired && !proxy.Required() {
+		return nil, fmt.Errorf("proxy-required mode is not initialized")
 	}
-	// Fallback: plain client with configurable TLS verification.
-	return proxy.NewDirectClient(cfg.TLSSkipVerify)
+	// A settings edit cannot disable the live required route before restart.
+	if proxy.Required() {
+		return proxy.GetClient()
+	}
+	if cfg.UseProxy {
+		return proxy.GetClient()
+	}
+	return proxy.NewDirectClient(cfg.TLSSkipVerify), nil
 }
 
 func parseHeaders(headersJSON string) (map[string]string, error) {
@@ -139,7 +138,10 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 		}
 	}
 
-	client := httpClient()
+	client, err := httpClient()
+	if err != nil {
+		return tools.Result{}, err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("request failed: %w", err)
@@ -152,8 +154,8 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 	}
 
 	var b strings.Builder
-	cfg := config.Get()
-	if cfg.UseProxy {
+	viaProxy := proxy.Required() || (config.Get().UseProxy && proxy.Enabled())
+	if viaProxy {
 		b.WriteString("[via proxy pool]\n")
 	} else {
 		b.WriteString("[direct request]\n")
@@ -194,7 +196,7 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 	meta := map[string]any{
 		"status_code": resp.StatusCode,
 		"url":         targetURL,
-		"via_proxy":   cfg.UseProxy,
+		"via_proxy":   viaProxy,
 	}
 	if savedPath != "" {
 		meta["saved_to"] = savedPath

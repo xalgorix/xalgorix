@@ -95,7 +95,10 @@ func SendRaw(req RawRequest) (*RawResponse, error) {
 		httpReq.Header.Set("User-Agent", defaultBrowserUA)
 	}
 
-	client := buildClient(timeout, req.FollowRedirects, config.Get().TLSSkipVerify)
+	client, err := buildClient(timeout, req.FollowRedirects, config.Get().TLSSkipVerify)
+	if err != nil {
+		return nil, err
+	}
 
 	start := time.Now()
 	resp, err := client.Do(httpReq)

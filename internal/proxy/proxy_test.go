@@ -92,6 +92,21 @@ func TestProxyURL(t *testing.T) {
 	}
 }
 
+func TestProxyURLPreservesEscapedCredentialsAndIPv6(t *testing.T) {
+	p := &Proxy{Type: ProxyTypeHTTP, Host: "::1", Port: "8080", Username: "user@name", Password: "a b:c@d"}
+	u, err := p.URL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Host != p.Host || parsed.Port != p.Port || parsed.Username != p.Username || parsed.Password != p.Password {
+		t.Fatalf("proxy URL round trip mismatch: host=%q port=%q user=%q", parsed.Host, parsed.Port, parsed.Username)
+	}
+}
+
 func TestPoolNextRotation(t *testing.T) {
 	pool := NewPool([]string{"1.1.1.1:8080", "2.2.2.2:8080", "3.3.3.3:8080"})
 	if pool.Len() != 3 {

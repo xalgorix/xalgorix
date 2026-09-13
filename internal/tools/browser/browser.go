@@ -23,6 +23,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	egressproxy "github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/sandbox"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
@@ -67,6 +68,7 @@ type browserStore struct {
 	mu              sync.Mutex
 	browser         *rod.Browser
 	browserLauncher *launcher.Launcher
+	requiredProxy   bool
 	lease           *resources.ToolLease
 	page            *rod.Page
 	pages           map[string]*rod.Page
@@ -409,9 +411,24 @@ func ensureBrowser(ctxID, proxy string) error {
 	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	requiredProxy := config.Get().ProxyRequired || egressproxy.Required()
 
 	if s.browser != nil {
+		if requiredProxy && !s.requiredProxy {
+			return fmt.Errorf("existing browser was launched without required proxy; close and relaunch it")
+		}
 		return nil
+	}
+	if requiredProxy {
+		// The agent's browser_action proxy argument must not override the
+		// operator's required outbound route. The loopback bridge handles
+		// authenticated upstream proxies without placing credentials in
+		// Chromium's process arguments.
+		localURL, err := egressproxy.LocalURL()
+		if err != nil {
+			return fmt.Errorf("required browser proxy unavailable: %w", err)
+		}
+		proxy = localURL
 	}
 
 	// 1. Get Chromium binary (auto-download if needed)
@@ -460,6 +477,10 @@ func ensureBrowser(ctxID, proxy string) error {
 	} else if proxy != "" && proxy != "none" {
 		ln = ln.Set("proxy-server", proxy).
 			Set("ignore-certificate-errors", "true")
+		if requiredProxy {
+			// Chromium otherwise bypasses proxies for loopback destinations.
+			ln = ln.Set("proxy-bypass-list", "<-loopback>")
+		}
 	}
 
 	// Acquire a Tool_Lease before the first browser context for this scan.
@@ -525,6 +546,7 @@ func ensureBrowser(ctxID, proxy string) error {
 
 	s.browser = br
 	s.browserLauncher = ln
+	s.requiredProxy = requiredProxy
 	if leaseAcquired {
 		// Cache for cleanupBrowserLocked's per-store fallback release
 		// (covers CleanupContext and timeout paths that don't call
@@ -1625,6 +1647,7 @@ func cleanupBrowserLocked(ctxID string, s *browserStore) {
 		s.browserLauncher.Kill()
 	}
 	s.browserLauncher = nil
+	s.requiredProxy = false
 	if s.lease != nil {
 		s.lease.Release()
 		s.lease = nil

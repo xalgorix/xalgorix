@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	egressproxy "github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
@@ -130,7 +131,14 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	// pythonWorkspaceEnv roots HOME, TMPDIR, and XDG_{CACHE,CONFIG,DATA}_HOME
 	// at cmd.Dir, which is now guaranteed to be sc.ScanDir or
 	// cfg.WorkspaceRoot — both Allow_List descendants. That satisfies R8.8.
-	cmd.Env = pythonWorkspaceEnv(cmd.Dir)
+	cmdEnv := pythonWorkspaceEnv(cmd.Dir)
+	if config.Get().ProxyRequired || egressproxy.Required() {
+		cmdEnv, err = egressproxy.Environment(cmdEnv)
+		if err != nil {
+			return tools.Result{}, fmt.Errorf("required proxy unavailable: %w", err)
+		}
+	}
+	cmd.Env = cmdEnv
 	configureProcessGroupKill(cmd)
 
 	stdout := iolimit.New(1 << 20)

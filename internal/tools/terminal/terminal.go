@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	egressproxy "github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
@@ -1404,7 +1405,14 @@ func runShellInternal(contextID string, command string) (string, int) {
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = workDir
-	cmd.Env = commandEnv(homeDir, goPath, workDir, rateRuntime)
+	cmdEnv := commandEnv(homeDir, goPath, workDir, rateRuntime)
+	if config.Get().ProxyRequired || egressproxy.Required() {
+		cmdEnv, err = egressproxy.Environment(cmdEnv)
+		if err != nil {
+			return commandNotice + fmt.Sprintf("[ERROR] required proxy unavailable: %v", err), -1
+		}
+	}
+	cmd.Env = cmdEnv
 
 	// Create new process group for this command so we can kill the
 	// entire tree (bash + children like curl) on timeout.

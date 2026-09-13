@@ -221,15 +221,26 @@ func main() {
 	// When USE_PROXY is false (the default) this is a no-op and all existing
 	// behavior is preserved.
 	// -------------------------------------------------------------------------
-	if err := proxy.Init(
+	if err := proxy.InitWithPolicy(
 		cfg.UseProxy,
+		cfg.ProxyRequired,
 		cfg.ProxyURL,
 		cfg.ProxyFile,
 		cfg.ProxyRotation,
 		30*time.Second,
 	); err != nil {
+		if cfg.ProxyRequired {
+			fmt.Fprintf(os.Stderr, "[proxy] required proxy unavailable: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "[proxy] init warning: %v\n", err)
 		// Non-fatal: continue without proxy rather than crashing.
+	}
+	if cfg.ProxyRequired {
+		if _, err := proxy.LocalURL(); err != nil {
+			fmt.Fprintf(os.Stderr, "[proxy] required local proxy unavailable: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	if proxy.Enabled() {
 		fmt.Fprintf(os.Stderr, "[proxy] proxy routing active\n")

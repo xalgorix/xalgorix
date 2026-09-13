@@ -169,10 +169,11 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_RATE_RPS", Label: "Outbound RPS", Category: "Rate limits", Description: "Sustained per-domain outbound request rate.", DefaultValue: "10", InputType: "number"},
 		{Key: "XALGORIX_RATE_BURST", Label: "Outbound burst", Category: "Rate limits", Description: "Per-domain outbound burst size.", DefaultValue: "20", InputType: "number"},
 
-		{Key: "XALGORIX_USE_PROXY", Label: "Use proxy", Category: "Proxy", Description: "Enable proxy routing for outbound traffic.", DefaultValue: "false", InputType: "boolean"},
-		{Key: "XALGORIX_PROXY_URL", Label: "Proxy URL", Category: "Proxy", Description: "Single proxy URL. Overrides proxy file when set.", Placeholder: "socks5://user:pass@127.0.0.1:1080", InputType: "secret", Sensitive: true},
-		{Key: "XALGORIX_PROXY_FILE", Label: "Proxy file", Category: "Proxy", Description: "Path to a file with one proxy per line.", Placeholder: "/path/to/proxies.txt", InputType: "path"},
-		{Key: "XALGORIX_PROXY_ROTATION", Label: "Proxy rotation", Category: "Proxy", Description: "Proxy rotation strategy.", DefaultValue: "roundrobin", InputType: "select", Options: []string{"roundrobin", "random"}},
+		{Key: "XALGORIX_USE_PROXY", Label: "Use proxy", Category: "Proxy", Description: "Enable proxy routing for outbound traffic. Takes effect after restart.", DefaultValue: "false", InputType: "boolean", RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_REQUIRED", Label: "Require proxy for scan HTTP", Category: "Proxy", Description: "Reject missing proxy configuration; route built-in scan HTTP/browser via the proxy and fail requests if it is down. Shell tools still require network isolation. Takes effect after restart.", DefaultValue: "false", InputType: "boolean", RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_URL", Label: "Proxy URL", Category: "Proxy", Description: "Single proxy URL. Overrides proxy file when set. Takes effect after restart.", Placeholder: "socks5://user:pass@127.0.0.1:1080", InputType: "secret", Sensitive: true, RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_FILE", Label: "Proxy file", Category: "Proxy", Description: "Path to a file with one proxy per line. Takes effect after restart.", Placeholder: "/path/to/proxies.txt", InputType: "path", RequiresRestart: true},
+		{Key: "XALGORIX_PROXY_ROTATION", Label: "Proxy rotation", Category: "Proxy", Description: "Proxy rotation strategy. Takes effect after restart.", DefaultValue: "roundrobin", InputType: "select", Options: []string{"roundrobin", "random"}, RequiresRestart: true},
 		{Key: "XALGORIX_TLS_SKIP_VERIFY", Label: "Skip TLS verification", Category: "Proxy", Description: "Allow insecure TLS verification for proxied/testing traffic.", DefaultValue: "false", InputType: "boolean"},
 
 		{Key: "XALGORIX_WORKSPACE", Label: "Workspace", Category: "Runtime", Description: "Workspace root for scan execution.", InputType: "path", RequiresRestart: true},
@@ -844,6 +845,8 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.AllowAutoInstallSudo = parseBoolSetting(value, false)
 		case "XALGORIX_USE_PROXY":
 			s.cfg.UseProxy = parseBoolSetting(value, false)
+		case "XALGORIX_PROXY_REQUIRED":
+			s.cfg.ProxyRequired = parseBoolSetting(value, false)
 		case "XALGORIX_PROXY_FILE":
 			s.cfg.ProxyFile = value
 		case "XALGORIX_PROXY_ROTATION":
@@ -963,6 +966,8 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.FormatBool(s.cfg.AllowAutoInstallSudo)
 	case "XALGORIX_USE_PROXY":
 		return strconv.FormatBool(s.cfg.UseProxy)
+	case "XALGORIX_PROXY_REQUIRED":
+		return strconv.FormatBool(s.cfg.ProxyRequired)
 	case "XALGORIX_PROXY_FILE":
 		return s.cfg.ProxyFile
 	case "XALGORIX_PROXY_ROTATION":

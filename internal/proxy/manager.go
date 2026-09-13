@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -16,11 +17,16 @@ import (
 // Go's http.Transport to reuse idle TCP connections (Keep-Alive) and avoids
 // socket exhaustion under load.
 type Manager struct {
-	enabled  bool
-	pool     *Pool
-	rotation string // "roundrobin" | "random"
-	timeout  time.Duration
-	client   *http.Client // shared client used when proxy routing is disabled
+	enabled     bool
+	pool        *Pool
+	rotation    string // "roundrobin" | "random"
+	required    bool
+	timeout     time.Duration
+	client      *http.Client // shared client used when proxy routing is disabled
+	localOnce   sync.Once
+	localURL    string
+	localErr    error
+	localServer *http.Server
 }
 
 var defaultManager *Manager
@@ -34,8 +40,20 @@ var defaultManager *Manager
 //	rotation   – "roundrobin" or "random"
 //	timeout    – per-request timeout
 func Init(useProxy bool, proxyURL, proxyFile, rotation string, timeout time.Duration) error {
+	return InitWithPolicy(useProxy, false, proxyURL, proxyFile, rotation, timeout)
+}
+
+// InitWithPolicy enables the optional proxy-required mode. That mode accepts
+// exactly one upstream proxy so a scan cannot switch egress IP mid-session.
+// Proxy-required mode covers Xalgorix's built-in HTTP and browser paths;
+// arbitrary subprocesses additionally need OS-level egress isolation.
+func InitWithPolicy(useProxy, required bool, proxyURL, proxyFile, rotation string, timeout time.Duration) error {
+	if required && (!useProxy || proxyURL == "") {
+		return fmt.Errorf("proxy-required mode needs XALGORIX_USE_PROXY=true and XALGORIX_PROXY_URL")
+	}
 	m := &Manager{
 		enabled:  useProxy,
+		required: required,
 		rotation: rotation,
 		timeout:  timeout,
 	}
@@ -56,9 +74,15 @@ func Init(useProxy bool, proxyURL, proxyFile, rotation string, timeout time.Dura
 		}
 
 		if m.pool != nil && m.pool.Len() == 0 {
+			if required {
+				return fmt.Errorf("proxy-required mode has no valid upstream proxy")
+			}
 			fmt.Fprintf(os.Stderr, "[proxy] proxy list is empty — running without proxy\n")
 			m.enabled = false
 		}
+	}
+	if required && (m.pool == nil || m.pool.Len() != 1) {
+		return fmt.Errorf("proxy-required mode needs exactly one valid upstream proxy")
 	}
 
 	// Pre-build a shared no-proxy client (inherits DefaultTransport).
@@ -79,6 +103,11 @@ func Enabled() bool {
 		return false
 	}
 	return defaultManager.enabled
+}
+
+// Required reports whether the process was initialized in proxy-required mode.
+func Required() bool {
+	return defaultManager != nil && defaultManager.required
 }
 
 // GetProxy returns the next proxy according to the configured rotation strategy.
@@ -102,6 +131,8 @@ func GetProxy() *Proxy {
 //     proxying is enabled, so connections to the same proxy are reused.
 func GetClient() (*http.Client, error) {
 	if defaultManager == nil {
+		// Callers configured for proxy-required mode must also check their
+		// configuration before using this legacy no-manager fallback.
 		return http.DefaultClient, nil
 	}
 	if !defaultManager.enabled {
@@ -110,6 +141,9 @@ func GetClient() (*http.Client, error) {
 	}
 	p := GetProxy()
 	if p == nil {
+		if defaultManager.required {
+			return nil, fmt.Errorf("proxy-required mode has no upstream proxy")
+		}
 		return defaultManager.client, nil
 	}
 	return NewClient(p, defaultManager.timeoutOrDefault())

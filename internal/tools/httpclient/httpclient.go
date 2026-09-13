@@ -161,7 +161,10 @@ func executeWithContext(contextID string, args map[string]string) (tools.Result,
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	}
 
-	client := buildClient(timeout, followRedirects, config.Get().TLSSkipVerify)
+	client, err := buildClient(timeout, followRedirects, config.Get().TLSSkipVerify)
+	if err != nil {
+		return tools.Result{}, err
+	}
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -290,7 +293,7 @@ func isBinaryContentType(ct string) bool {
 // skipped. Set only from tests to avoid mutating the shared global config.
 var testTLSInsecure bool
 
-func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool) *http.Client {
+func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool) (*http.Client, error) {
 	tr, ok := http.DefaultTransport.(*http.Transport)
 	if ok {
 		tr = tr.Clone()
@@ -306,12 +309,23 @@ func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool) *http
 		tr.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec
 	}
 
-	// Apply proxy when enabled.
+	// A proxy-required scan must never inherit DefaultTransport's direct or
+	// environment route when proxy initialization failed.
+	if config.Get().ProxyRequired && !proxy.Required() {
+		return nil, fmt.Errorf("proxy-required mode is not initialized")
+	}
 	if proxy.Enabled() {
-		if p := proxy.GetProxy(); p != nil {
-			if proxyURL, err := p.URL(); err == nil {
-				tr.Proxy = http.ProxyURL(proxyURL)
+		p := proxy.GetProxy()
+		if p == nil {
+			if proxy.Required() {
+				return nil, fmt.Errorf("proxy-required mode has no upstream")
 			}
+		} else {
+			proxyURL, err := p.URL()
+			if err != nil {
+				return nil, fmt.Errorf("invalid configured proxy: %w", err)
+			}
+			tr.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
 
@@ -326,5 +340,5 @@ func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool) *http
 		}
 	}
 
-	return c
+	return c, nil
 }

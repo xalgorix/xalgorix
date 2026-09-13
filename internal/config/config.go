@@ -263,6 +263,7 @@ type Config struct {
 
 	// Proxy settings
 	UseProxy      bool   // XALGORIX_USE_PROXY — enable proxy support
+	ProxyRequired bool   // XALGORIX_PROXY_REQUIRED — require one configured proxy for target-facing HTTP/browser traffic
 	ProxyFile     string // XALGORIX_PROXY_FILE — path to proxies.txt
 	ProxyRotation string // XALGORIX_PROXY_ROTATION — "roundrobin" (default) or "random"
 	ProxyURL      string // XALGORIX_PROXY_URL — single proxy URL (overrides file)
@@ -452,6 +453,7 @@ func load() *Config {
 
 		// Proxy
 		UseProxy:      envOrBool("XALGORIX_USE_PROXY", false),
+		ProxyRequired: envOrBool("XALGORIX_PROXY_REQUIRED", false),
 		ProxyFile:     envOr("XALGORIX_PROXY_FILE", ""),
 		ProxyRotation: envOr("XALGORIX_PROXY_ROTATION", "roundrobin"),
 		ProxyURL:      envOr("XALGORIX_PROXY_URL", ""),
