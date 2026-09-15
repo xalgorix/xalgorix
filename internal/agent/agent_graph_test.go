@@ -253,4 +253,3 @@ func TestDelegatedSubagentInheritsRootLLMClient(t *testing.T) {
 		t.Fatalf("subAgent url = %q, want %q", ep.URL, "https://api.crusoecloud.com/v1/chat/completions")
 	}
 }
-

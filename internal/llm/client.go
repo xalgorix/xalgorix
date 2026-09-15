@@ -348,6 +348,12 @@ type anthropicResponse struct {
 	} `json:"usage,omitempty"`
 }
 
+// ResolveEndpoint returns the Endpoint used for outbound requests.
+// It is useful for testing and verifying provider/model resolution without sending HTTP traffic.
+func (c *Client) ResolveEndpoint(ctx context.Context) (Endpoint, error) {
+	return c.resolveRequestEndpoint(ctx)
+}
+
 // resolveRequestEndpoint returns the Endpoint to use for one
 // outbound chat / stream request. When c.resolver is wired
 // (Wave D / task 4.1) we delegate to it so the catalog +
@@ -357,12 +363,7 @@ type anthropicResponse struct {
 // adopted the resolver yet still produce byte-identical
 // outbound requests.
 //
-// ResolveEndpoint returns the Endpoint used for outbound requests.
-// It is useful for testing and verifying provider/model resolution without sending HTTP traffic.
-func (c *Client) ResolveEndpoint(ctx context.Context) (Endpoint, error) {
-	return c.resolveRequestEndpoint(ctx)
-}
-
+// Validates: Requirements 2.2, 2.3, 11.2.
 func (c *Client) resolveRequestEndpoint(ctx context.Context) (Endpoint, error) {
 	if c.resolver != nil {
 		ep, err := c.resolver.Resolve(ctx)

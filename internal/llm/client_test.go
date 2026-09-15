@@ -527,9 +527,11 @@ func TestClient_Clone(t *testing.T) {
 	clone := client.Clone()
 	if clone == nil {
 		t.Fatal("clone is nil")
+		return
 	}
 	if clone == client {
 		t.Fatal("clone returned same pointer")
+		return
 	}
 	if clone.cfg != client.cfg {
 		t.Fatalf("clone.cfg = %p, want %p", clone.cfg, client.cfg)
