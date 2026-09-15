@@ -292,8 +292,14 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 
 	provider := ""
 	if idx := strings.Index(model, "/"); idx >= 0 {
-		provider = strings.ToLower(model[:idx])
-		model = model[idx+1:]
+		candidate := strings.ToLower(model[:idx])
+		if isKnownProvider(candidate) {
+			provider = candidate
+			model = model[idx+1:]
+		}
+	}
+	if provider == "" && l.cfg != nil && strings.TrimSpace(l.cfg.LLMProvider) != "" {
+		provider = strings.ToLower(strings.TrimSpace(l.cfg.LLMProvider))
 	}
 	if apiBase == "" {
 		if knownBase, ok := legacyProviderBases[provider]; ok {

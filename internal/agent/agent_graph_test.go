@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
@@ -189,3 +190,67 @@ func TestMaybeAutoDelegateSkipsNarrowModes(t *testing.T) {
 		t.Fatalf("narrow modes consumed delegation budget: %d", graph.DelegationCount())
 	}
 }
+
+func TestDelegatedSubagentInheritsRootLLMClient(t *testing.T) {
+	sctx := scanctx.New(t.Name(), t.TempDir())
+	t.Cleanup(sctx.Close)
+	cfg := &config.Config{
+		MaxIterations: 1,
+		SkillsDir:     t.TempDir(),
+		LLM:           "zai-org/GLM-5.3",
+		APIBase:       "https://api.crusoecloud.com/v1",
+	}
+
+	endpoint := llm.Endpoint{
+		URL:         "https://api.crusoecloud.com/v1/chat/completions",
+		Model:       "zai-org/GLM-5.3",
+		HeaderStyle: "openai",
+		Auth:        llm.AuthAPIKey,
+		APIKey:      "secret-key",
+	}
+	rootClient := llm.NewClient(cfg, llm.WithResolver(llm.NewFixedResolver(endpoint)))
+	events := make(chan Event, 16)
+	root := NewAgent(
+		cfg,
+		"root",
+		events,
+		scopeguard.Config{BindAddr: "127.0.0.1"},
+		sctx,
+		WithLLMClient(rootClient),
+	)
+	t.Cleanup(root.Stop)
+
+	if root.client != rootClient {
+		t.Fatalf("root.client = %p, want %p", root.client, rootClient)
+	}
+
+	opts := delegatedAgentOptions(context.Background(), root.agentGraph, root.scanBudget, "sub-test", false)
+	subArgs := []any{sctx}
+	for _, opt := range opts {
+		subArgs = append(subArgs, opt)
+	}
+	if root.client != nil {
+		subArgs = append(subArgs, WithLLMClient(root.client.Clone()))
+	}
+	subAgent := NewAgent(cfg, "sub", make(chan Event, 16), root.localGuard, subArgs...)
+	t.Cleanup(subAgent.Stop)
+
+	if subAgent.client == nil {
+		t.Fatal("subAgent.client is nil")
+	}
+	if subAgent.client == rootClient {
+		t.Fatal("subAgent.client is identical to rootClient pointer, want independent clone")
+	}
+
+	ep, err := subAgent.client.ResolveEndpoint(context.Background())
+	if err != nil {
+		t.Fatalf("subAgent.client.ResolveEndpoint: %v", err)
+	}
+	if ep.Model != "zai-org/GLM-5.3" {
+		t.Fatalf("subAgent model = %q, want %q", ep.Model, "zai-org/GLM-5.3")
+	}
+	if ep.URL != "https://api.crusoecloud.com/v1/chat/completions" {
+		t.Fatalf("subAgent url = %q, want %q", ep.URL, "https://api.crusoecloud.com/v1/chat/completions")
+	}
+}
+

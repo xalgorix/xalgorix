@@ -470,6 +470,9 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 			for _, opt := range delegatedAgentOptions(ctx, a.agentGraph, a.scanBudget, agentID, a.benchmarkIsolated) {
 				subArgs = append(subArgs, opt)
 			}
+			if a.client != nil {
+				subArgs = append(subArgs, WithLLMClient(a.client.Clone()))
+			}
 			subAgent := NewAgent(cfg, subName, subEvents, a.localGuard, subArgs...)
 			subAgent.SetPhaseRestrictions(a.allowedPhases)
 			subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)

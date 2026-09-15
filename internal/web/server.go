@@ -3731,7 +3731,10 @@ func llmProviderKey(model, apiBase string) string {
 		return "vercel"
 	}
 	if idx := strings.Index(model, "/"); idx > 0 {
-		return model[:idx]
+		candidate := model[:idx]
+		if _, ok := providers.LookupBuiltin(candidate); ok {
+			return candidate
+		}
 	}
 	switch {
 	case strings.Contains(apiBase, "minimax"):

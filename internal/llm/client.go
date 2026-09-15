@@ -83,15 +83,66 @@ func (c *Client) GetTokens() (promptTokens, completionTokens, totalTokens int) {
 	return c.totalIn, c.totalOut, c.totalIn + c.totalOut
 }
 
+// Clone returns a shallow copy of the client suitable for use by a subagent.
+// It preserves configuration, HTTP client, provider, model, rate limiter,
+// resolver, and temperature override, while giving the clone an independent
+// context holder and fresh token usage counters.
+func (c *Client) Clone() *Client {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	clone := &Client{
+		cfg:         c.cfg,
+		httpClient:  c.httpClient,
+		apiModel:    c.apiModel,
+		provider:    c.provider,
+		rateLimiter: c.rateLimiter,
+		resolver:    c.resolver,
+	}
+	clone.ctx.Store(ctxHolder{ctx: context.Background()})
+	if v := c.tempOverride.Load(); v != nil {
+		clone.tempOverride.Store(v)
+	}
+	return clone
+}
+
+// isKnownProvider reports whether candidate matches a known provider slug
+// from legacyProviderBases or the built-in catalog.
+func isKnownProvider(candidate string) bool {
+	candidate = strings.ToLower(strings.TrimSpace(candidate))
+	if candidate == "" {
+		return false
+	}
+	if _, ok := legacyProviderBases[candidate]; ok {
+		return true
+	}
+	if _, ok := providers.LookupBuiltin(candidate); ok {
+		return true
+	}
+	return false
+}
+
 // NewClient creates a new LLM client. Optional opts (such as
 // WithResolver) tune the client for catalog-aware resolution; the
 // no-option form preserves the existing legacy resolveEndpoint
 // behavior so existing callers compile unchanged.
 func NewClient(cfg *config.Config, opts ...Option) *Client {
-	apiModel := cfg.ResolveModel()
+	apiModel := ""
+	if cfg != nil {
+		apiModel = cfg.ResolveModel()
+	}
 	provider := ""
 	if idx := strings.Index(apiModel, "/"); idx >= 0 {
-		provider = strings.ToLower(apiModel[:idx])
+		candidate := strings.ToLower(apiModel[:idx])
+		if isKnownProvider(candidate) {
+			provider = candidate
+		}
+	}
+	if provider == "" && cfg != nil && strings.TrimSpace(cfg.LLMProvider) != "" {
+		provider = strings.ToLower(strings.TrimSpace(cfg.LLMProvider))
 	}
 	c := &Client{
 		cfg:        cfg,
@@ -306,7 +357,12 @@ type anthropicResponse struct {
 // adopted the resolver yet still produce byte-identical
 // outbound requests.
 //
-// Validates: Requirements 2.2, 2.3, 11.2.
+// ResolveEndpoint returns the Endpoint used for outbound requests.
+// It is useful for testing and verifying provider/model resolution without sending HTTP traffic.
+func (c *Client) ResolveEndpoint(ctx context.Context) (Endpoint, error) {
+	return c.resolveRequestEndpoint(ctx)
+}
+
 func (c *Client) resolveRequestEndpoint(ctx context.Context) (Endpoint, error) {
 	if c.resolver != nil {
 		ep, err := c.resolver.Resolve(ctx)
@@ -437,32 +493,33 @@ func applyAuthHeaders(req *http.Request, ep Endpoint) {
 // the no-resolver fallback path in resolveRequestEndpoint can
 // reuse it (Requirement 2.3 — preserved endpoint shape).
 func (c *Client) resolveEndpoint() (string, string) {
-	apiBase := c.cfg.APIBase
+	apiBase := ""
+	if c.cfg != nil {
+		apiBase = c.cfg.APIBase
+	}
 	model := c.apiModel
 
-	// Extract provider prefix if present (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6")
+	// Extract provider prefix if present and recognized as a known provider
+	// (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6").
+	// Models with org-scoped names (e.g. "zai-org/GLM-5.3", "meta-llama/Llama-3.1-70B-Instruct")
+	// retain the full model identifier when the prefix is not a known provider.
 	provider := ""
 	if idx := strings.Index(model, "/"); idx >= 0 {
-		provider = strings.ToLower(model[:idx])
-		model = model[idx+1:]
+		candidate := strings.ToLower(model[:idx])
+		if isKnownProvider(candidate) {
+			provider = candidate
+			model = model[idx+1:]
+		}
+	}
+	if provider == "" {
+		if c.cfg != nil && strings.TrimSpace(c.cfg.LLMProvider) != "" {
+			provider = strings.ToLower(strings.TrimSpace(c.cfg.LLMProvider))
+		} else if c.provider != "" {
+			provider = c.provider
+		}
 	}
 
-	// Provider prefix in model name is the source of truth for API base.
-	// However, if a non-empty API base was explicitly set (e.g., from web UI), use it.
-	providerBases := map[string]string{
-		"openai":          "https://api.openai.com/v1",
-		"anthropic":       "https://api.anthropic.com",
-		"minimax":         "https://api.minimax.io/v1",
-		"deepseek":        "https://api.deepseek.com/v1",
-		"groq":            "https://api.groq.com/openai/v1",
-		"ollama":          "http://localhost:11434/v1",
-		"zai":             "https://api.z.ai/api/paas/v4",
-		"zai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
-		// Google's chat endpoint is /v1beta/models/MODEL:generateContent — we
-		// store the bare host here and append the version segment below.
-		"google": "https://generativelanguage.googleapis.com",
-		"gemini": "https://generativelanguage.googleapis.com",
-	}
+	providerBases := legacyProviderBases
 
 	if apiBase == "" {
 		// No explicit API base set — use provider default
