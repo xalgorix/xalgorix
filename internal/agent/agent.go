@@ -180,13 +180,13 @@ type Agent struct {
 	// agentGraph is shared by every agent delegated from this root, but owned
 	// by the root scan only. The graph itself is scan-scoped, so concurrent
 	// scans cannot overwrite runners or consume one another's worker slots.
-	agentGraph        *agentsgraph.Graph
-	ownsAgentGraph    bool
-	delegatedAgentID  string
-	ctfMission        bool
-	benchmarkIsolated bool
-	scanBudget        *scanBudget
-	lastBudgetTokens  int
+	agentGraph         *agentsgraph.Graph
+	ownsAgentGraph     bool
+	delegatedAgentID   string
+	ctfMission         bool
+	benchmarkIsolated  bool
+	scanBudget         *scanBudget
+	lastBudgetTokens   int
 	rateLimitBackoffFn func(int) time.Duration
 }
 
@@ -1213,7 +1213,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 					a.emit(Event{Type: "error", Content: fmt.Sprintf("⏳ Rate limited by LLM provider (attempt %d) — retrying in %s (cumulative wait: %s)", a.state.ConsecutiveRateLimits, backoff, a.state.CumulativeRateLimitWait.Round(time.Second)), TotalTokens: tokenCount()})
 				}
 
-				// Cancellable sleep: bail out immediately if the scan is stopped or cancelled.
+				// Interruptible sleep: bail out immediately if the scan is stopped or canceled.
 				if a.ctx != nil {
 					select {
 					case <-a.ctx.Done():
