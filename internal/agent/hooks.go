@@ -157,6 +157,12 @@ type ScanState struct {
 	// the scan cleanly once the ceiling is reached.
 	CumulativeRateLimitWait time.Duration
 
+	// ConsecutiveRateLimits tracks how many 429/rate-limit episodes have
+	// occurred consecutively from the LLM provider. Used to calculate
+	// incremental retry backoff (e.g. 15s -> 30s -> 60s). Reset by
+	// hookResetOnSuccess on any healthy response.
+	ConsecutiveRateLimits int
+
 	// Reasoning-loop recovery tracking. A "reasoning loop" is the model
 	// emitting think-only responses (or prose) with no tool calls. Recovery is
 	// NUDGE-ONLY — we never compact the context to break a loop (compaction is
@@ -2632,6 +2638,7 @@ func hookReportVulnerabilityTracker(state *ScanState, args map[string]string) Ho
 // Fires on OnHealthyResponse (a non-empty response that contained tool calls).
 func hookResetOnSuccess(state *ScanState, args map[string]string) HookResult {
 	state.ConsecutiveErrors = 0
+	state.ConsecutiveRateLimits = 0
 	state.EmptyResponseCount = 0
 	state.NoToolCount = 0
 	state.RefusalCount = 0

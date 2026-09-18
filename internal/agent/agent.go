@@ -187,6 +187,7 @@ type Agent struct {
 	benchmarkIsolated bool
 	scanBudget        *scanBudget
 	lastBudgetTokens  int
+	rateLimitBackoffFn func(int) time.Duration
 }
 
 // AgentOption configures optional behavior on a *Agent. The
@@ -221,6 +222,29 @@ func WithBenchmarkIsolation() AgentOption {
 	return func(a *Agent) {
 		a.benchmarkIsolated = true
 	}
+}
+
+// withRateLimitBackoff overrides the progressive rate-limit backoff policy.
+// Used by tests to verify retry loops without sleeping real seconds.
+func withRateLimitBackoff(fn func(int) time.Duration) AgentOption {
+	return func(a *Agent) {
+		a.rateLimitBackoffFn = fn
+	}
+}
+
+// rateLimitBackoff calculates the progressive backoff interval for a 429 episode.
+// 15s (attempt 1) -> 30s (attempt 2) -> 60s (attempt 3+).
+func (a *Agent) rateLimitBackoff(consecutive int) time.Duration {
+	if a.rateLimitBackoffFn != nil {
+		return a.rateLimitBackoffFn(consecutive)
+	}
+	if consecutive <= 1 {
+		return 15 * time.Second
+	}
+	if consecutive == 2 {
+		return 30 * time.Second
+	}
+	return 60 * time.Second
 }
 
 // withAgentGraph makes a delegated agent join its root scan's graph. It is
@@ -1138,19 +1162,25 @@ func (a *Agent) Run(targets []string, instruction string) {
 				continue
 			}
 
-			// Rate limit: wait in a bounded interval for a transient provider
-			// recovery. Do not keep a scan alive for the whole provider usage
-			// window: every retry resends the entire conversation and can make
-			// the next window disappear too.
+			// Rate limit: back off in progressive, bounded increments and retry.
+			// Provider rate-limit windows (e.g. RPM/TPM limits) typically clear
+			// in 10s–60s. Retrying after each backoff interval allows the scan
+			// to resume as soon as the provider recovers.
+			//
+			// Total cumulative wait across all 429 episodes is capped by maxWait
+			// (XALGORIX_MAX_RATE_LIMIT_WAIT, default 30m) to ensure a permanently
+			// quota-exhausted provider will eventually terminate cleanly.
 			isRateLimited := strings.Contains(errStr, "rate limited") ||
 				strings.Contains(errStr, "429") ||
 				strings.Contains(errStr, "too many requests") ||
 				strings.Contains(errStr, "Too Many Requests")
 			if isRateLimited {
-				a.state.ConsecutiveErrors-- // undo the increment above
+				a.state.ConsecutiveErrors-- // don't penalize normal error count
 				if a.state.ConsecutiveErrors < 0 {
 					a.state.ConsecutiveErrors = 0
 				}
+				a.state.ConsecutiveRateLimits++
+
 				// Bound the total time the scan may spend parked on provider
 				// rate limits. Once the configured ceiling is reached, fail the
 				// scan cleanly instead of issuing another context-sized request.
@@ -1160,29 +1190,48 @@ func (a *Agent) Run(targets []string, instruction string) {
 					a.emit(Event{Type: "finished", Content: fmt.Sprintf("Agent stopped: provider rate limited for a cumulative %s without recovering.", a.state.CumulativeRateLimitWait), TotalTokens: tokenCount(), Aborted: true, AbortReason: "llm_rate_limited"})
 					return
 				}
-				waitFor := 30 * time.Minute
-				if maxWait > 0 && maxWait-a.state.CumulativeRateLimitWait < waitFor {
-					waitFor = maxWait - a.state.CumulativeRateLimitWait
+
+				// Progressive retry backoff: 15s -> 30s -> 60s max per attempt.
+				// Provider rate limit windows (RPM/TPM) reset within 60s.
+				backoff := a.rateLimitBackoff(a.state.ConsecutiveRateLimits)
+
+				// Cap backoff by remaining cumulative budget
+				if maxWait > 0 {
+					remaining := maxWait - a.state.CumulativeRateLimitWait
+					if remaining <= 0 {
+						a.emit(Event{Type: "finished", Content: "Agent stopped: provider rate-limit wait budget exhausted.", TotalTokens: tokenCount(), Aborted: true, AbortReason: "llm_rate_limited"})
+						return
+					}
+					if remaining < backoff {
+						backoff = remaining
+					}
 				}
-				if waitFor <= 0 {
-					a.emit(Event{Type: "finished", Content: "Agent stopped: provider rate-limit wait budget exhausted.", TotalTokens: tokenCount(), Aborted: true, AbortReason: "llm_rate_limited"})
+
+				if maxWait > 0 {
+					a.emit(Event{Type: "error", Content: fmt.Sprintf("⏳ Rate limited by LLM provider (attempt %d) — retrying in %s (cumulative wait: %s / %s max)", a.state.ConsecutiveRateLimits, backoff, a.state.CumulativeRateLimitWait.Round(time.Second), maxWait), TotalTokens: tokenCount()})
+				} else {
+					a.emit(Event{Type: "error", Content: fmt.Sprintf("⏳ Rate limited by LLM provider (attempt %d) — retrying in %s (cumulative wait: %s)", a.state.ConsecutiveRateLimits, backoff, a.state.CumulativeRateLimitWait.Round(time.Second)), TotalTokens: tokenCount()})
+				}
+
+				// Cancellable sleep: bail out immediately if the scan is stopped or cancelled.
+				if a.ctx != nil {
+					select {
+					case <-a.ctx.Done():
+						a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+						return
+					case <-time.After(backoff):
+					}
+				} else {
+					time.Sleep(backoff)
+				}
+
+				if a.stopped.Load() {
 					return
 				}
-				a.emit(Event{Type: "error", Content: fmt.Sprintf("⏳ Rate limited by LLM provider — waiting up to %s before stopping this scan", waitFor.Round(time.Minute)), TotalTokens: tokenCount()})
-				// Sleep in 1-minute chunks so we can bail out if the agent is stopped.
-				for waited := time.Duration(0); waited < waitFor; {
-					if a.stopped.Load() || (a.ctx != nil && a.ctx.Err() != nil) {
-						break
-					}
-					chunk := time.Minute
-					if waitFor-waited < chunk {
-						chunk = waitFor - waited
-					}
-					time.Sleep(chunk)
-					waited += chunk
-					a.state.CumulativeRateLimitWait += chunk
-				}
-				a.touchActivity() // keep watchdog alive during long wait
+
+				a.state.CumulativeRateLimitWait += backoff
+				a.touchActivity() // keep watchdog alive during rate-limit backoff
+
 				if maxWait > 0 && a.state.CumulativeRateLimitWait >= maxWait {
 					a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent stopped: provider rate-limit wait budget exhausted after %s.", a.state.CumulativeRateLimitWait), TotalTokens: tokenCount()})
 					a.emit(Event{Type: "finished", Content: "Agent stopped: provider rate-limit wait budget exhausted; existing findings were preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: "llm_rate_limited"})
@@ -1203,7 +1252,19 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if backoff > 120*time.Second {
 				backoff = 120 * time.Second
 			}
-			time.Sleep(backoff)
+			if a.ctx != nil {
+				select {
+				case <-a.ctx.Done():
+					a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+					return
+				case <-time.After(backoff):
+				}
+			} else {
+				time.Sleep(backoff)
+			}
+			if a.stopped.Load() {
+				return
+			}
 			continue
 		}
 		// ConsecutiveErrors reset is handled by OnHealthyResponse hook below
