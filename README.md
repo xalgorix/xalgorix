@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.png?v=4.6.78" alt="Xalgorix — AI Autonomous Penetration Testing Platform" width="860" />
+<img src="assets/banner.png?v=4.6.79" alt="Xalgorix — AI Autonomous Penetration Testing Platform" width="860" />
 
 <br />
 
