@@ -654,6 +654,9 @@ func isRateLimitError(errStr string) bool {
 
 func isNonRetryableLLMError(errStr string) bool {
 	errStr = strings.ToLower(errStr)
+	if strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "context deadline exceeded") {
+		return true
+	}
 	if apiErrorHasStatus(errStr, http.StatusBadRequest) ||
 		apiErrorHasStatus(errStr, http.StatusUnauthorized) ||
 		apiErrorHasStatus(errStr, http.StatusForbidden) ||
@@ -894,7 +897,16 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 	var lastErr error
 
 	for attempt := range maxRetries {
+		if ctx := c.loadCtx(); ctx.Err() != nil {
+			return "", fmt.Errorf("LLM request canceled: %w", ctx.Err())
+		}
+
 		if attempt > 0 {
+			if errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) ||
+				strings.Contains(lastErr.Error(), "context canceled") || strings.Contains(lastErr.Error(), "context deadline exceeded") {
+				return "", fmt.Errorf("LLM request canceled: %w", lastErr)
+			}
+
 			// Smart backoff based on error type
 			backoff := time.Duration(attempt*3) * time.Second
 			if lastErr != nil {
@@ -911,7 +923,11 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 				backoff = 60 * time.Second
 			}
 			log.Printf("[llm] Retry %d/%d after %s (last error: %v)", attempt+1, maxRetries, backoff, lastErr)
-			time.Sleep(backoff)
+			select {
+			case <-c.loadCtx().Done():
+				return "", fmt.Errorf("LLM request canceled: %w", c.loadCtx().Err())
+			case <-time.After(backoff):
+			}
 		}
 
 		// Check if context is canceled before retrying
@@ -924,6 +940,11 @@ func (c *Client) chatWithRetry(messages []Message) (string, error) {
 			return result, nil
 		}
 		lastErr = err
+
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			strings.Contains(err.Error(), "context canceled") || strings.Contains(err.Error(), "context deadline exceeded") {
+			return "", fmt.Errorf("LLM request canceled: %w", err)
+		}
 
 		// Configuration errors are deterministic — a missing base
 		// URL, unknown provider, or unset profile will never succeed
