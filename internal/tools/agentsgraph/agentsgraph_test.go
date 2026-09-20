@@ -258,3 +258,124 @@ func TestCompletedResultMustBeCollected(t *testing.T) {
 		t.Fatalf("uncollected count after check = %d, want 0", got)
 	}
 }
+
+func TestSerialSpecialistExecution(t *testing.T) {
+	t.Setenv("XALGORIX_MAX_CONCURRENT_AGENTS", "1")
+	startedOrder := make([]string, 0, 3)
+	var mu sync.Mutex
+	releaseCh := map[string]chan struct{}{
+		"spec1": make(chan struct{}),
+		"spec2": make(chan struct{}),
+		"spec3": make(chan struct{}),
+	}
+	startedCh := map[string]chan struct{}{
+		"spec1": make(chan struct{}),
+		"spec2": make(chan struct{}),
+		"spec3": make(chan struct{}),
+	}
+
+	graph := NewWithLimit(context.Background(), 3, func(_ context.Context, _ string, name string, _ []string, _ string) (string, error) {
+		mu.Lock()
+		startedOrder = append(startedOrder, name)
+		mu.Unlock()
+		close(startedCh[name])
+		<-releaseCh[name]
+		return "done " + name, nil
+	})
+	t.Cleanup(graph.Stop)
+
+	// Spawn all 3 specialists simultaneously (identical to maybeAutoDelegate loop)
+	spawn1, err := graph.spawnAgent(map[string]string{"name": "spec1", "task": "lane 1"})
+	if err != nil || spawn1.Metadata == nil {
+		t.Fatalf("spawn 1 failed: %v", err)
+	}
+	spawn2, err := graph.spawnAgent(map[string]string{"name": "spec2", "task": "lane 2"})
+	if err != nil || spawn2.Metadata == nil {
+		t.Fatalf("spawn 2 failed: %v", err)
+	}
+	spawn3, err := graph.spawnAgent(map[string]string{"name": "spec3", "task": "lane 3"})
+	if err != nil || spawn3.Metadata == nil {
+		t.Fatalf("spawn 3 failed: %v", err)
+	}
+
+	// Spec 1 must start immediately, but Spec 2 and Spec 3 must remain queued
+	<-startedCh["spec1"]
+	select {
+	case <-startedCh["spec2"]:
+		t.Fatal("spec2 should not have started while spec1 is running")
+	case <-startedCh["spec3"]:
+		t.Fatal("spec3 should not have started while spec1 is running")
+	default:
+	}
+
+	// Release spec 1 -> spec 2 should now start
+	close(releaseCh["spec1"])
+	<-startedCh["spec2"]
+	select {
+	case <-startedCh["spec3"]:
+		t.Fatal("spec3 should not have started while spec2 is running")
+	default:
+	}
+
+	// Release spec 2 -> spec 3 should now start
+	close(releaseCh["spec2"])
+	<-startedCh["spec3"]
+	close(releaseCh["spec3"])
+
+	if !graph.WaitStopped(2 * time.Second) {
+		t.Fatal("workers did not stop")
+	}
+
+	mu.Lock()
+	if len(startedOrder) != 3 || startedOrder[0] != "spec1" || startedOrder[1] != "spec2" || startedOrder[2] != "spec3" {
+		t.Fatalf("expected serial execution order [spec1, spec2, spec3], got %v", startedOrder)
+	}
+	mu.Unlock()
+}
+
+func TestStopWithQueuedAgents(t *testing.T) {
+	t.Setenv("XALGORIX_MAX_CONCURRENT_AGENTS", "1")
+	spec1Started := make(chan struct{})
+	spec1Block := make(chan struct{})
+
+	graph := NewWithLimit(context.Background(), 3, func(ctx context.Context, agentID, name string, targets []string, task string) (string, error) {
+		if name == "spec1" {
+			close(spec1Started)
+			<-spec1Block
+		}
+		return "done", nil
+	})
+	t.Cleanup(func() {
+		select {
+		case <-spec1Block:
+		default:
+			close(spec1Block)
+		}
+		graph.Stop()
+	})
+
+	if _, err := graph.spawnAgent(map[string]string{"name": "spec1", "task": "spec1 task"}); err != nil {
+		t.Fatal(err)
+	}
+	<-spec1Started
+
+	// Queue spec2 and spec3
+	if _, err := graph.spawnAgent(map[string]string{"name": "spec2", "task": "spec2 task"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graph.spawnAgent(map[string]string{"name": "spec3", "task": "spec3 task"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stop graph while spec2 and spec3 are queued
+	graph.Stop()
+	close(spec1Block)
+
+	if !graph.WaitStopped(2 * time.Second) {
+		t.Fatal("graph.WaitStopped timed out when stopping with queued agents")
+	}
+
+	if running := graph.RunningCount(); running != 0 {
+		t.Fatalf("expected 0 running agents after stop, got %d", running)
+	}
+}

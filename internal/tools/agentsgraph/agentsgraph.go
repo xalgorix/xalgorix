@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -29,7 +30,7 @@ type subAgentState struct {
 	Name        string
 	Task        string
 	Targets     []string
-	Status      string // running, completed, failed
+	Status      string // queued, running, completed, failed
 	StartedAt   time.Time
 	CompletedAt time.Time
 	Result      string
@@ -45,21 +46,35 @@ type subAgentState struct {
 // other's runner, consume each other's semaphore slots, or clear each other's
 // results during cleanup.
 type Graph struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	runner    AgentRunner
-	maxAgents int
+	ctx           context.Context
+	cancel        context.CancelFunc
+	runner        AgentRunner
+	maxAgents     int
+	maxConcurrent int
 
-	mu      sync.Mutex
-	stopped bool
-	counter uint64
-	// delegated is a lifetime budget, not a concurrency counter. Keeping it
-	// separate from slots prevents a coordinator from launching another wave
-	// after the first specialists finish and consuming the scan deadline.
-	delegated int
-	agents    map[string]*subAgentState
-	slots     chan struct{}
-	wg        sync.WaitGroup
+	mu           sync.Mutex
+	stopped      bool
+	counter      uint64
+	delegated    int
+	activeAgents int
+	queue        []*subAgentState
+	agents       map[string]*subAgentState
+	wg           sync.WaitGroup
+}
+
+// EffectiveMaxConcurrentAgents returns the configured maximum number of subagents
+// executing simultaneously per scan. When XALGORIX_MAX_CONCURRENT_AGENTS is set to 1,
+// specialists run serially one at a time. Defaults to DefaultMaxConcurrentAgents (3).
+func EffectiveMaxConcurrentAgents() int {
+	if raw := strings.TrimSpace(os.Getenv("XALGORIX_MAX_CONCURRENT_AGENTS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			if n > 10 {
+				n = 10
+			}
+			return n
+		}
+	}
+	return DefaultMaxConcurrentAgents
 }
 
 // New creates a scan-scoped graph with the production concurrency limit.
@@ -71,20 +86,31 @@ func New(parent context.Context, runner AgentRunner) *Graph {
 // bounded wave keeps specialists complementary and gives the coordinator time
 // to integrate their evidence before the root scan deadline.
 func NewWithLimit(parent context.Context, maxAgents int, runner AgentRunner) *Graph {
+	return NewWithConfig(parent, maxAgents, EffectiveMaxConcurrentAgents(), runner)
+}
+
+// NewWithConfig creates a graph with explicit lifetime delegation and concurrency caps.
+func NewWithConfig(parent context.Context, maxAgents, maxConcurrent int, runner AgentRunner) *Graph {
 	if parent == nil {
 		parent = context.Background()
 	}
 	if maxAgents <= 0 {
 		maxAgents = DefaultMaxConcurrentAgents
 	}
+	if maxConcurrent <= 0 {
+		maxConcurrent = EffectiveMaxConcurrentAgents()
+	}
+	if maxConcurrent > maxAgents {
+		maxConcurrent = maxAgents
+	}
 	ctx, cancel := context.WithCancel(parent)
 	return &Graph{
-		ctx:       ctx,
-		cancel:    cancel,
-		runner:    runner,
-		maxAgents: maxAgents,
-		agents:    make(map[string]*subAgentState),
-		slots:     make(chan struct{}, maxAgents),
+		ctx:           ctx,
+		cancel:        cancel,
+		runner:        runner,
+		maxAgents:     maxAgents,
+		maxConcurrent: maxConcurrent,
+		agents:        make(map[string]*subAgentState),
 	}
 }
 
@@ -151,23 +177,6 @@ func (g *Graph) validateArgs(args map[string]string) (string, string, []string, 
 	return name, task, targets, nil
 }
 
-func (g *Graph) tryAcquire() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.stopped || g.ctx.Err() != nil || g.delegated >= g.maxAgents {
-		return false
-	}
-	select {
-	case g.slots <- struct{}{}:
-		g.delegated++
-		return true
-	default:
-		return false
-	}
-}
-
-func (g *Graph) release() { <-g.slots }
-
 func (g *Graph) capacityResult(action string) tools.Result {
 	if g.ctx.Err() != nil {
 		return tools.Result{Output: "Cannot " + action + ": the parent scan is stopping."}
@@ -182,14 +191,45 @@ func (g *Graph) capacityResult(action string) tools.Result {
 	if delegated >= g.maxAgents {
 		return tools.Result{Output: fmt.Sprintf("Cannot %s: delegation budget exhausted (%d/%d total agents already created). Integrate the existing specialist evidence and finish the remaining root work directly; do not start another wave.", action, delegated, g.maxAgents)}
 	}
-	return tools.Result{Output: fmt.Sprintf("Cannot %s: %d/%d delegated agents are already running. Collect or wait for one before delegating more.\nRunning agents:\n%s", action, g.RunningCount(), g.maxAgents, g.listRunningAgents())}
+	return tools.Result{Output: fmt.Sprintf("Cannot %s: %d/%d delegated agents are already active. Collect or wait for one before delegating more.\nRunning agents:\n%s", action, g.RunningCount(), g.maxAgents, g.listRunningAgents())}
 }
 
-func (g *Graph) nextID(prefix string) string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func (g *Graph) nextIDLocked(prefix string) string {
 	g.counter++
 	return fmt.Sprintf("%s_%d_%d", prefix, g.counter, time.Now().UnixNano())
+}
+
+func (g *Graph) runAgent(state *subAgentState) {
+	defer g.wg.Done()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("[PANIC] delegated agent %s panicked: %v\n%s", state.ID, recovered, debug.Stack())
+			g.complete(state.ID, "", fmt.Errorf("panic: %v", recovered))
+		}
+		g.onAgentDone()
+	}()
+
+	summary, runErr := g.runner(g.ctx, state.ID, state.Name, state.Targets, state.Task)
+	g.complete(state.ID, summary, runErr)
+}
+
+func (g *Graph) onAgentDone() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped || g.ctx.Err() != nil {
+		g.activeAgents--
+		return
+	}
+	if len(g.queue) > 0 {
+		next := g.queue[0]
+		g.queue = g.queue[1:]
+		next.Status = "running"
+		next.StartedAt = time.Now()
+		g.wg.Add(1)
+		go g.runAgent(next)
+	} else {
+		g.activeAgents--
+	}
 }
 
 func (g *Graph) createAgent(args map[string]string) (tools.Result, error) {
@@ -197,20 +237,58 @@ func (g *Graph) createAgent(args map[string]string) (tools.Result, error) {
 	if err != nil {
 		return tools.Result{}, err
 	}
-	if !g.tryAcquire() {
+
+	g.mu.Lock()
+	if g.stopped || g.ctx.Err() != nil {
+		g.mu.Unlock()
 		return g.capacityResult("create agent"), nil
 	}
-	defer g.release()
+	if g.delegated >= g.maxAgents {
+		g.mu.Unlock()
+		return g.capacityResult("create agent"), nil
+	}
+	g.delegated++
 
-	agentID := g.nextID("sync")
-	start := time.Now()
-	summary, runErr := g.runner(g.ctx, agentID, name, targets, task)
-	elapsed := time.Since(start)
-	if runErr != nil {
+	agentID := g.nextIDLocked("sync")
+	state := &subAgentState{
+		ID:        agentID,
+		Name:      name,
+		Task:      task,
+		Targets:   append([]string(nil), targets...),
+		StartedAt: time.Now(),
+		done:      make(chan struct{}),
+	}
+	g.agents[agentID] = state
+
+	if g.activeAgents < g.maxConcurrent {
+		g.activeAgents++
+		state.Status = "running"
+		g.wg.Add(1)
+		go g.runAgent(state)
+	} else {
+		state.Status = "queued"
+		g.queue = append(g.queue, state)
+	}
+	g.mu.Unlock()
+
+	select {
+	case <-state.done:
+	case <-g.ctx.Done():
+		return tools.Result{Output: "Cannot create agent: the parent scan is stopping."}, nil
+	}
+
+	g.mu.Lock()
+	result := state.Result
+	runErr := state.Error
+	elapsed := state.CompletedAt.Sub(state.StartedAt)
+	state.Observed = true
+	g.mu.Unlock()
+
+	if runErr != "" {
 		return tools.Result{Output: fmt.Sprintf("Sub-agent %q failed after %s: %s", name, elapsed.Round(time.Second), runErr)}, nil
 	}
 	return tools.Result{
-		Output: fmt.Sprintf("Sub-agent %q completed in %s\n%s", name, elapsed.Round(time.Second), summary),
+		Output: fmt.Sprintf("Sub-agent %q completed in %s\n%s", name, elapsed.Round(time.Second), result),
 		Metadata: map[string]any{
 			"agent_id":   agentID,
 			"agent_name": name,
@@ -224,42 +302,39 @@ func (g *Graph) spawnAgent(args map[string]string) (tools.Result, error) {
 	if err != nil {
 		return tools.Result{}, err
 	}
-	if !g.tryAcquire() {
+
+	g.mu.Lock()
+	if g.stopped || g.ctx.Err() != nil {
+		g.mu.Unlock()
 		return g.capacityResult("spawn agent"), nil
 	}
+	if g.delegated >= g.maxAgents {
+		g.mu.Unlock()
+		return g.capacityResult("spawn agent"), nil
+	}
+	g.delegated++
 
-	agentID := g.nextID("sub")
+	agentID := g.nextIDLocked("sub")
 	state := &subAgentState{
 		ID:        agentID,
 		Name:      name,
 		Task:      task,
 		Targets:   append([]string(nil), targets...),
-		Status:    "running",
 		StartedAt: time.Now(),
 		done:      make(chan struct{}),
 	}
-	g.mu.Lock()
-	if g.stopped || g.ctx.Err() != nil {
-		g.mu.Unlock()
-		g.release()
-		return g.capacityResult("spawn agent"), nil
-	}
 	g.agents[agentID] = state
-	g.wg.Add(1)
-	g.mu.Unlock()
 
-	go func() {
-		defer g.wg.Done()
-		defer g.release()
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				log.Printf("[PANIC] delegated agent %s panicked: %v\n%s", agentID, recovered, debug.Stack())
-				g.complete(agentID, "", fmt.Errorf("panic: %v", recovered))
-			}
-		}()
-		summary, runErr := g.runner(g.ctx, agentID, name, targets, task)
-		g.complete(agentID, summary, runErr)
-	}()
+	if g.activeAgents < g.maxConcurrent {
+		g.activeAgents++
+		state.Status = "running"
+		g.wg.Add(1)
+		go g.runAgent(state)
+	} else {
+		state.Status = "queued"
+		g.queue = append(g.queue, state)
+	}
+	g.mu.Unlock()
 
 	target := ""
 	if len(targets) > 0 {
@@ -279,7 +354,7 @@ func (g *Graph) complete(agentID, summary string, runErr error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state, ok := g.agents[agentID]
-	if !ok || state.Status != "running" {
+	if !ok || (state.Status != "running" && state.Status != "queued") {
 		return
 	}
 	state.CompletedAt = time.Now()
@@ -315,7 +390,7 @@ func (g *Graph) snapshot(agentID string, observeCompleted bool) (agentSnapshot, 
 	if !ok {
 		return agentSnapshot{}, false
 	}
-	if observeCompleted && state.Status != "running" {
+	if observeCompleted && state.Status != "running" && state.Status != "queued" {
 		state.Observed = true
 	}
 	return agentSnapshot{
@@ -349,6 +424,8 @@ func renderSnapshot(state agentSnapshot) tools.Result {
 	var b strings.Builder
 	elapsed := time.Since(state.StartedAt).Round(time.Second)
 	switch state.Status {
+	case "queued":
+		fmt.Fprintf(&b, "Agent %q (%s) — QUEUED (waiting for execution slot)\nTask: %s\n", state.Name, state.ID, truncTask(state.Task, 150))
 	case "running":
 		fmt.Fprintf(&b, "Agent %q (%s) — RUNNING for %s\nTask: %s\n", state.Name, state.ID, elapsed, truncTask(state.Task, 150))
 		if len(state.Partial) == 0 {
@@ -395,7 +472,7 @@ func (g *Graph) waitAgent(args map[string]string) (tools.Result, error) {
 	if !ok {
 		return tools.Result{Output: fmt.Sprintf("Agent %q not found.\nAvailable agents:\n%s", agentID, g.listAllAgents())}, nil
 	}
-	if state.Status != "running" {
+	if state.Status != "running" && state.Status != "queued" {
 		state, _ = g.snapshot(agentID, true)
 		return renderSnapshot(state), nil
 	}
@@ -433,7 +510,7 @@ func (g *Graph) waitAgent(args map[string]string) (tools.Result, error) {
 		}, nil
 	case <-g.ctx.Done():
 		state, ok = g.snapshot(agentID, true)
-		if ok && state.Status != "running" {
+		if ok && state.Status != "running" && state.Status != "queued" {
 			return renderSnapshot(state), nil
 		}
 		return tools.Result{Output: fmt.Sprintf("Parent scan stopped while waiting for agent %q.", agentID)}, nil
@@ -468,7 +545,7 @@ func (g *Graph) AddPartialResult(agentID, result string) {
 	}
 }
 
-// RunningCount returns the number of active delegated agents in this scan.
+// RunningCount returns the number of active (running or queued) delegated agents in this scan.
 func (g *Graph) RunningCount() int {
 	if g == nil {
 		return 0
@@ -477,7 +554,7 @@ func (g *Graph) RunningCount() int {
 	defer g.mu.Unlock()
 	count := 0
 	for _, state := range g.agents {
-		if state.Status == "running" {
+		if state.Status == "running" || state.Status == "queued" {
 			count++
 		}
 	}
@@ -494,7 +571,7 @@ func (g *Graph) UncollectedCount() int {
 	defer g.mu.Unlock()
 	count := 0
 	for _, state := range g.agents {
-		if state.Status != "running" && !state.Observed {
+		if state.Status != "running" && state.Status != "queued" && !state.Observed {
 			count++
 		}
 	}
@@ -511,8 +588,8 @@ func (g *Graph) PendingSummary() string {
 	var lines []string
 	for _, state := range g.agents {
 		switch {
-		case state.Status == "running":
-			lines = append(lines, fmt.Sprintf("- %s (%s): running — call wait_agent", state.Name, state.ID))
+		case state.Status == "running" || state.Status == "queued":
+			lines = append(lines, fmt.Sprintf("- %s (%s): %s — call wait_agent", state.Name, state.ID, state.Status))
 		case !state.Observed:
 			lines = append(lines, fmt.Sprintf("- %s (%s): %s, result not collected — call check_agent", state.Name, state.ID, state.Status))
 		}
@@ -535,8 +612,9 @@ func (g *Graph) Stop() {
 	g.stopped = true
 	g.cancel()
 	now := time.Now()
+	g.queue = nil
 	for _, state := range g.agents {
-		if state.Status == "running" {
+		if state.Status == "running" || state.Status == "queued" {
 			state.Status = "failed"
 			state.Error = "parent scan stopped"
 			state.CompletedAt = now
@@ -557,19 +635,16 @@ func (g *Graph) WaitStopped(timeout time.Duration) bool {
 		g.wg.Wait()
 		return true
 	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if len(g.slots) == 0 {
-			return true
-		}
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			return len(g.slots) == 0
-		}
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -578,8 +653,8 @@ func (g *Graph) listRunningAgents() string {
 	defer g.mu.Unlock()
 	var b strings.Builder
 	for _, state := range g.agents {
-		if state.Status == "running" {
-			fmt.Fprintf(&b, "  - %s (%s): %s — %s\n", state.Name, state.ID, truncTask(state.Task, 80), time.Since(state.StartedAt).Round(time.Second))
+		if state.Status == "running" || state.Status == "queued" {
+			fmt.Fprintf(&b, "  - %s (%s, status: %s): %s — %s\n", state.Name, state.ID, state.Status, truncTask(state.Task, 80), time.Since(state.StartedAt).Round(time.Second))
 		}
 	}
 	if b.Len() == 0 {

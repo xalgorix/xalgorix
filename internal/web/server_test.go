@@ -2261,7 +2261,7 @@ func TestEnvironmentSettings_RejectsUnknownAndUpdatesRuntime(t *testing.T) {
 	}
 
 	rr = httptest.NewRecorder()
-	body := strings.NewReader(`{"values":{"XALGORIX_RATE_LIMIT_REQUESTS":"2000","XALGORIX_RATE_LIMIT_WINDOW":"1","XALGORIX_DISCORD_WEBHOOK":"https://discord.example/webhook","XALGORIX_BIND":"0.0.0.0"}}`)
+	body := strings.NewReader(`{"values":{"XALGORIX_RATE_LIMIT_REQUESTS":"2000","XALGORIX_RATE_LIMIT_WINDOW":"1","XALGORIX_DISCORD_WEBHOOK":"https://discord.example/webhook","XALGORIX_BIND":"0.0.0.0","XALGORIX_LLM_MAX_INFLIGHT":"4","XALGORIX_MAX_CONCURRENT_AGENTS":"1"}}`)
 	s.handleEnvironmentSettings(rr, httptest.NewRequest(http.MethodPost, "/api/settings/environment", body))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("environment POST code = %d body=%s", rr.Code, rr.Body.String())
@@ -2292,6 +2292,8 @@ func TestEnvironmentSettings_RejectsUnknownAndUpdatesRuntime(t *testing.T) {
 		"XALGORIX_RATE_LIMIT_WINDOW=10",
 		"XALGORIX_DISCORD_WEBHOOK=https://discord.example/webhook",
 		"XALGORIX_BIND=0.0.0.0",
+		"XALGORIX_LLM_MAX_INFLIGHT=4",
+		"XALGORIX_MAX_CONCURRENT_AGENTS=1",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env file missing %q:\n%s", want, env)

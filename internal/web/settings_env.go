@@ -136,11 +136,13 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_CONTEXT_COMPACT_RATIO", Label: "Context compaction ratio", Category: "LLM", Description: "Fraction of the context window at which to auto-compact (0.5–0.9). Default 0.75 = compact at ~75% full. Compacting earlier discards useful working context and hurts output quality; going higher risks hitting the provider's hard limit first.", DefaultValue: "0.75", InputType: "number"},
 		{Key: "XALGORIX_CONTEXT_COMPACT_TOKENS", Label: "Context compaction budget (tokens, override)", Category: "LLM", Description: "Optional ABSOLUTE override for the compaction trigger. Leave at -1 (auto) to derive the trigger from the context window × ratio above. Set a positive token count to force a fixed budget instead. 0 disables auto-compaction. Default -1 (auto).", DefaultValue: "-1", InputType: "number"},
 		{Key: "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", Label: "Memory compressor timeout", Category: "LLM", Description: "Timeout in seconds for context compression.", DefaultValue: "30", InputType: "number"},
+		{Key: "XALGORIX_LLM_MAX_INFLIGHT", Label: "LLM max in-flight concurrency", Category: "LLM", Description: "Maximum concurrent requests sent to the LLM provider across all scans and subagents. Clamps token velocity to prevent exhausting provider rolling-window rate limits (e.g. MiniMax 5-hour quota). Default is 4 × MaxInstances. Takes effect after restart.", Placeholder: "4", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_ITERATIONS", Label: "Max iterations", Category: "Runtime", Description: "Maximum agent iterations per scan. 0 means unlimited.", DefaultValue: "0", InputType: "number"},
 		{Key: "XALGORIX_MIN_ITERATIONS", Label: "Min iterations (testing floor)", Category: "Runtime", Description: "Minimum testing floor in iterations before the gatekeeper permits finish. Ensures deep probing (OAST, ReDoS, fuzzing) before concluding.", DefaultValue: "50", InputType: "number"},
 		{Key: "XALGORIX_NO_TOOL_ABORT_AT", Label: "No-tool loop limit", Category: "Runtime", Description: "Consecutive assistant responses without a parsed tool call before cleanly stopping. Default 30; 0 disables this safety limit.", DefaultValue: "30", InputType: "number"},
 		{Key: "XALGORIX_MAX_WILDCARD_SUBDOMAINS", Label: "Wildcard subdomain cap", Category: "Runtime", Description: "Optional maximum full LLM sessions expanded from one wildcard target. Default -1 means unlimited; set a positive value only for an explicit emergency resource cap.", DefaultValue: "-1", InputType: "number"},
 		{Key: "XALGORIX_MAX_FINISH_REJECTIONS", Label: "Max finish rejections", Category: "Runtime", Description: "Number of times the agent's finish call will be rejected by the gatekeeper before allowing a deadlock bypass, enforcing deeper testing coverage.", DefaultValue: "15", InputType: "number"},
+		{Key: "XALGORIX_MAX_CONCURRENT_AGENTS", Label: "Max concurrent subagents", Category: "Runtime", Description: "Maximum delegated specialist subagents executing simultaneously per scan. Set to 1 to run specialists serially one at a time. Default 3.", DefaultValue: "3", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_TOOL_CALLS", Label: "Max tool calls (budget)", Category: "Runtime", Description: "Per-scan tool-call cap; the scan stops cleanly when reached (findings preserved). 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_DURATION", Label: "Max duration seconds (budget)", Category: "Runtime", Description: "Per-scan wall-clock cap in seconds; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_TOKENS", Label: "Max LLM tokens (budget)", Category: "Runtime", Description: "Per-scan total-token cap; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
@@ -1062,6 +1064,8 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		return strconv.Itoa(clampInt(parseIntSetting(value, 60), 10, 3600)), nil
 	case "XALGORIX_LLM_MAX_RETRIES":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 5), 0, 20)), nil
+	case "XALGORIX_LLM_MAX_INFLIGHT":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 4), 1, 256)), nil
 	case "XALGORIX_MAX_RATE_LIMIT_WAIT":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 30*60), -1, 7*24*60*60)), nil
 	case "XALGORIX_MAX_OUTPUT_TOKENS":
@@ -1099,6 +1103,8 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		return strconv.Itoa(clampInt(parseIntSetting(value, -1), -1, 1000)), nil
 	case "XALGORIX_MAX_FINISH_REJECTIONS":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 15), 1, 100)), nil
+	case "XALGORIX_MAX_CONCURRENT_AGENTS":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 3), 1, 10)), nil
 	}
 	return value, nil
 }
