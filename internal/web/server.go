@@ -2816,12 +2816,15 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		s.instancesMu.Unlock()
 
 		scanCfg := *s.cfg
-		newID := randomSlug()
-		go s.runMultiScan(req, &scanCfg, newID)
+		targetID := instanceID
+		if r.URL.Query().Get("new_id") == "true" {
+			targetID = randomSlug()
+		}
+		go s.runMultiScan(req, &scanCfg, targetID)
 
 		s.broadcastToInstance(instanceID, WSEvent{Type: "resumed", Content: "Scan resumed"})
 		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "resumed", "instance_id": newID})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "resumed", "instance_id": targetID})
 		return
 	}
 

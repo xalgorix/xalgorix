@@ -398,7 +398,7 @@ func shouldPreserveQueueStateOnExit(status, stopReason string, panicRecovered bo
 	if panicRecovered {
 		return true
 	}
-	if status == "paused" || stopReason == "user_paused" {
+	if status == "paused" || stopReason == "user_paused" || isProviderPauseReason(stopReason) {
 		return true
 	}
 	return strings.HasPrefix(stopReason, "signal_")

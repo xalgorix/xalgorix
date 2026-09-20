@@ -136,7 +136,7 @@ func TestRateLimitRetry_CumulativeBudgetExhausted(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
-				"message": "Quota exceeded permanently.",
+				"message": "Rate limit exceeded. Please retry later.",
 				"type":    "tokens",
 			},
 		})
@@ -185,15 +185,89 @@ func TestRateLimitRetry_CumulativeBudgetExhausted(t *testing.T) {
 		t.Fatalf("expected multiple retry attempts before budget exhaustion, got %d", reqs)
 	}
 
-	var sawAbort bool
+	var sawPaused bool
 	for _, ev := range eventList {
-		if ev.Type == "finished" && ev.Aborted && ev.AbortReason == "llm_rate_limited" {
-			sawAbort = true
+		if ev.Type == "paused" && ev.Aborted && ev.AbortReason == "provider_rate_limited" {
+			sawPaused = true
 			break
 		}
 	}
-	if !sawAbort {
-		t.Errorf("expected finished event with AbortReason=llm_rate_limited")
+	if !sawPaused {
+		t.Errorf("expected paused event with AbortReason=provider_rate_limited")
+	}
+}
+
+func TestRateLimitRetry_QuotaExhaustionImmediatePause(t *testing.T) {
+	var requestCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "You exceeded your current quota, please check your plan and billing details.",
+				"type":    "insufficient_quota",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		LLM:                 "openai/gpt-test",
+		APIBase:             srv.URL,
+		APIKey:              "sk-test",
+		MaxRateLimitWaitSec: 300, // 5 minute ceiling, but quota should pause immediately
+	}
+
+	events := make(chan Event, 64)
+	client := llm.NewClient(cfg)
+	guard := scopeguard.Config{BindAddr: "127.0.0.1", Port: 0}
+
+	ag := NewAgent(
+		cfg,
+		"quota-exhausted-test",
+		events,
+		guard,
+		WithLLMClient(client),
+		withRateLimitBackoff(func(consecutive int) time.Duration {
+			return 10 * time.Second
+		}),
+	)
+
+	done := make(chan struct{})
+	var eventList []Event
+	go func() {
+		defer close(done)
+		for ev := range events {
+			eventList = append(eventList, ev)
+		}
+	}()
+
+	start := time.Now()
+	ag.Run([]string{"example.com"}, "Run security assessment")
+	close(events)
+	<-done
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("quota exhaustion should pause immediately, but took %s", elapsed)
+	}
+
+	reqs := atomic.LoadInt32(&requestCount)
+	if reqs != 1 {
+		t.Fatalf("expected exactly 1 request (no retries for quota exhaustion), got %d", reqs)
+	}
+
+	var sawPaused bool
+	for _, ev := range eventList {
+		if ev.Type == "paused" && ev.Aborted && ev.AbortReason == "provider_quota_exhausted" {
+			sawPaused = true
+			break
+		}
+	}
+	if !sawPaused {
+		t.Errorf("expected paused event with AbortReason=provider_quota_exhausted")
 	}
 }
 
