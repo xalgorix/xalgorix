@@ -257,4 +257,3 @@ func TestProcessEvent_SubAgentProviderPaused_PausesSession(t *testing.T) {
 		t.Fatalf("abortReason = %q, want %q", sess.abortReason, "provider_quota_exhausted")
 	}
 }
-

@@ -1170,21 +1170,23 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if classified.Class == llm.ErrorClassRateLimit ||
 				classified.Class == llm.ErrorClassOverloaded ||
 				classified.Class == llm.ErrorClassQuotaExhausted {
-
 				a.state.ConsecutiveErrors-- // don't penalize normal consecutive error count
 				if a.state.ConsecutiveErrors < 0 {
 					a.state.ConsecutiveErrors = 0
 				}
 				a.state.ConsecutiveRateLimits++
 
-				abortReason := "provider_rate_limited"
-				reasonLabel := "rate-limit"
-				if classified.Class == llm.ErrorClassOverloaded {
+				var abortReason, reasonLabel string
+				switch classified.Class {
+				case llm.ErrorClassOverloaded:
 					abortReason = "provider_overloaded"
 					reasonLabel = "overload"
-				} else if classified.Class == llm.ErrorClassQuotaExhausted {
+				case llm.ErrorClassQuotaExhausted:
 					abortReason = "provider_quota_exhausted"
 					reasonLabel = "quota wait"
+				default:
+					abortReason = "provider_rate_limited"
+					reasonLabel = "rate-limit"
 				}
 
 				// Progressive retry backoff: 15s -> 30s -> 60s max per attempt.
