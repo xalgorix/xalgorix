@@ -145,8 +145,6 @@ func TestProcessEvent_ProviderPausedCapturesReason(t *testing.T) {
 func TestScanSession_ProviderPauseMarksStatusPaused(t *testing.T) {
 	s := newTestServer(t, nil)
 	scanDir := t.TempDir()
-	sctx := scanctx.New("sess-pause", scanDir)
-	defer sctx.Close()
 
 	inst := &ScanInstance{
 		ID:       "inst-pause",
@@ -159,16 +157,10 @@ func TestScanSession_ProviderPauseMarksStatusPaused(t *testing.T) {
 	s.instancesMu.Unlock()
 
 	sess := &scanSession{
-		id:         "sess-pause",
-		target:     "https://example.com",
-		scanDir:    scanDir,
-		record:     &ScanRecord{ID: "sess-pause", Target: "https://example.com", Status: "running", Iterations: 12, ToolCalls: 10},
-		sctx:       sctx,
-		server:     s,
-		instanceID: "inst-pause",
+		scanDir:     scanDir,
+		record:      &ScanRecord{ID: "sess-pause", Target: "https://example.com", Status: "running", Iterations: 12, ToolCalls: 10},
+		abortReason: "provider_rate_limited",
 	}
-
-	sess.abortReason = "provider_rate_limited"
 
 	// Call the 8a block logic
 	if isProviderPauseReason(sess.abortReason) {
@@ -209,4 +201,3 @@ func TestScanSession_ProviderPauseMarksStatusPaused(t *testing.T) {
 		t.Fatalf("persisted rec.Iterations = %d, want 12", rec.Iterations)
 	}
 }
-
