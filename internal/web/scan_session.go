@@ -632,14 +632,24 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		// must be surfaced to the coordinator (the agent graph marks it failed),
 		// but must not poison the root session's final status: the coordinator can
 		// still cover that lane itself or use another specialist.
-		if evt.Aborted && evt.AgentID == "" {
-			sess.abortReason = evt.AbortReason
-			if sess.abortReason == "" {
-				if evt.Type == "paused" {
-					sess.abortReason = "provider_rate_limited"
-				} else {
-					sess.abortReason = "llm_aborted"
+		// However, upstream provider unavailability (rate limits, quota exhaustion,
+		// server overload) impacts the shared provider/account and cannot be bypassed
+		// by switching agents, so provider-level pause reasons pause the root session.
+		isRoot := isRootAgentEvent(sess, evt)
+		isProviderPause := evt.Type == "paused" || isProviderPauseReason(evt.AbortReason)
+		if evt.Aborted && (isRoot || isProviderPause) {
+			if !isProviderPauseReason(sess.abortReason) || isProviderPause {
+				sess.abortReason = evt.AbortReason
+				if sess.abortReason == "" {
+					if evt.Type == "paused" {
+						sess.abortReason = "provider_rate_limited"
+					} else {
+						sess.abortReason = "llm_aborted"
+					}
 				}
+			}
+			if isProviderPause && sess.agent != nil {
+				sess.agent.Stop()
 			}
 		}
 		// Build set of vulns already broadcast in real-time to avoid duplicates
@@ -1032,4 +1042,14 @@ func isProviderPauseReason(reason string) bool {
 		reason == "provider_quota_exhausted" ||
 		reason == "provider_overloaded" ||
 		reason == "llm_rate_limited"
+}
+
+func isRootAgentEvent(sess *scanSession, evt agent.Event) bool {
+	if evt.AgentID == "" {
+		return true
+	}
+	if sess != nil && sess.agent != nil && sess.agent.ID != "" && evt.AgentID == sess.agent.ID {
+		return true
+	}
+	return !strings.HasPrefix(evt.AgentID, "sub_") && !strings.HasPrefix(evt.AgentID, "sync_")
 }

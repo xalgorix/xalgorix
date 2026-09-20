@@ -201,3 +201,60 @@ func TestScanSession_ProviderPauseMarksStatusPaused(t *testing.T) {
 		t.Fatalf("persisted rec.Iterations = %d, want 12", rec.Iterations)
 	}
 }
+
+func TestProcessEvent_RootAgentWithID_CapturesAbortReason(t *testing.T) {
+	s := newTestServer(t, nil)
+	sctx := scanctx.New("root-id-abort", t.TempDir())
+	defer sctx.Close()
+
+	sess := &scanSession{
+		id:      "root-id-abort",
+		target:  "https://example.com",
+		scanDir: t.TempDir(),
+		record:  &ScanRecord{ID: "root-id-abort", Target: "https://example.com", Status: "running"},
+		sctx:    sctx,
+		server:  s,
+	}
+
+	// Root agent emits with its runtime agent ID (e.g. agent_12345)
+	s.processEvent(agent.Event{
+		Type:        "finished",
+		Content:     "stopped",
+		AgentID:     "agent_1789895157586103542",
+		Aborted:     true,
+		AbortReason: "llm_aborted",
+	}, sess)
+
+	if sess.abortReason != "llm_aborted" {
+		t.Fatalf("abortReason = %q, want %q", sess.abortReason, "llm_aborted")
+	}
+}
+
+func TestProcessEvent_SubAgentProviderPaused_PausesSession(t *testing.T) {
+	s := newTestServer(t, nil)
+	sctx := scanctx.New("sub-provider-paused", t.TempDir())
+	defer sctx.Close()
+
+	sess := &scanSession{
+		id:      "sub-provider-paused",
+		target:  "https://example.com",
+		scanDir: t.TempDir(),
+		record:  &ScanRecord{ID: "sub-provider-paused", Target: "https://example.com", Status: "running"},
+		sctx:    sctx,
+		server:  s,
+	}
+
+	// Subagent emits paused event due to provider quota exhaustion
+	s.processEvent(agent.Event{
+		Type:        "paused",
+		Content:     "Scan paused: upstream provider temporarily unavailable",
+		AgentID:     "sub_1_authz",
+		Aborted:     true,
+		AbortReason: "provider_quota_exhausted",
+	}, sess)
+
+	if sess.abortReason != "provider_quota_exhausted" {
+		t.Fatalf("abortReason = %q, want %q", sess.abortReason, "provider_quota_exhausted")
+	}
+}
+

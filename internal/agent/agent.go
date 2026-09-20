@@ -66,11 +66,10 @@ func init() {
 const defaultToolHardTimeout = 15 * time.Minute
 
 // maxCumulativeRateLimitWait is the safe fallback when a caller constructs a
-// Config literal instead of loading the environment-backed configuration. A
-// provider usage-window exhaustion is not a normal transient tool failure;
-// waiting for hours while replaying the same context can consume the next
-// window without making progress.
-const maxCumulativeRateLimitWait = 30 * time.Minute
+// Config literal instead of loading the environment-backed configuration.
+// Set to 6 hours by default so rolling 5-hour provider quota windows (e.g. MiniMax)
+// can refresh and allow scans to resume without premature termination.
+const maxCumulativeRateLimitWait = 6 * time.Hour
 
 // maxRateLimitWait returns the per-scan ceiling for provider rate-limit waits.
 // A negative configured value disables the ceiling for operators who
@@ -1158,53 +1157,55 @@ func (a *Agent) Run(targets []string, instruction string) {
 				continue
 			}
 
-			if classified.Class == llm.ErrorClassQuotaExhausted {
-				// Permanent quota / balance exhaustion: do not sleep for 30 minutes!
-				// Pause immediately so the scan preserves state and worker slots are freed.
-				a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent paused: %s. Scan paused; existing findings preserved.", classified.Message), TotalTokens: tokenCount()})
-				a.emit(Event{Type: "paused", Content: fmt.Sprintf("Agent paused: %s; existing findings preserved.", classified.Message), TotalTokens: tokenCount(), Aborted: true, AbortReason: "provider_quota_exhausted"})
-				return
-			}
-
-			// Rate limit / Overloaded: back off in progressive, bounded increments and retry.
-			// Provider rate-limit windows (e.g. RPM/TPM limits) typically clear
-			// in 10s–60s. Retrying after each backoff interval allows the scan
-			// to resume as soon as the provider recovers.
+			// Rate limit / Overloaded / Quota exhausted: back off in progressive increments
+			// and keep retrying until the upstream provider recovers or the window refreshes.
 			//
-			// Total cumulative wait across all rate-limit episodes is capped by maxWait
-			// (XALGORIX_MAX_RATE_LIMIT_WAIT, default 30m) to ensure a prolonged outage
-			// will gracefully pause the scan for later resumption instead of hanging.
-			if classified.Class == llm.ErrorClassRateLimit || classified.Class == llm.ErrorClassOverloaded {
-				a.state.ConsecutiveErrors-- // don't penalize normal error count
+			// CRITICAL:
+			// 1. DO NOT terminate the scan on rate limits or quota resets. Keep the agent alive
+			//    in memory so that when the provider window refreshes (e.g. MiniMax rolling 5h quota,
+			//    RPM/TPM resets), the scan resumes seamlessly without interruption.
+			// 2. DO NOT emit provider rate-limit or quota error messages to the frontend/user.
+			//    All upstream provider wait messages are logged strictly to backend server logs
+			//    (log.Printf) so the SaaS user never sees scary billing or provider notices.
+			if classified.Class == llm.ErrorClassRateLimit ||
+				classified.Class == llm.ErrorClassOverloaded ||
+				classified.Class == llm.ErrorClassQuotaExhausted {
+
+				a.state.ConsecutiveErrors-- // don't penalize normal consecutive error count
 				if a.state.ConsecutiveErrors < 0 {
 					a.state.ConsecutiveErrors = 0
 				}
 				a.state.ConsecutiveRateLimits++
 
 				abortReason := "provider_rate_limited"
-				reasonLabel := "provider rate-limit"
+				reasonLabel := "rate-limit"
 				if classified.Class == llm.ErrorClassOverloaded {
 					abortReason = "provider_overloaded"
-					reasonLabel = "provider overload"
+					reasonLabel = "overload"
+				} else if classified.Class == llm.ErrorClassQuotaExhausted {
+					abortReason = "provider_quota_exhausted"
+					reasonLabel = "quota wait"
+				}
+
+				// Progressive retry backoff: 15s -> 30s -> 60s max per attempt.
+				backoff := a.rateLimitBackoff(a.state.ConsecutiveRateLimits)
+				if classified.Class == llm.ErrorClassQuotaExhausted && a.rateLimitBackoffFn == nil && backoff < 30*time.Second {
+					backoff = 30 * time.Second
 				}
 
 				maxWait := a.maxRateLimitWait()
 				if maxWait > 0 && a.state.CumulativeRateLimitWait >= maxWait {
-					a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent paused: LLM %s wait budget exhausted after %s.", reasonLabel, a.state.CumulativeRateLimitWait), TotalTokens: tokenCount()})
-					a.emit(Event{Type: "paused", Content: fmt.Sprintf("Agent paused: %s wait budget exhausted; existing findings preserved.", reasonLabel), TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
+					log.Printf("[agent:%s] LLM %s wait budget exhausted after %s", a.ID, reasonLabel, a.state.CumulativeRateLimitWait)
+					a.emit(Event{Type: "paused", Content: "Scan paused: upstream provider temporarily unavailable; existing findings preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
 					return
 				}
-
-				// Progressive retry backoff: 15s -> 30s -> 60s max per attempt.
-				// Provider rate limit windows (RPM/TPM) reset within 60s.
-				backoff := a.rateLimitBackoff(a.state.ConsecutiveRateLimits)
 
 				// Cap backoff by remaining cumulative budget
 				if maxWait > 0 {
 					remaining := maxWait - a.state.CumulativeRateLimitWait
 					if remaining <= 0 {
-						a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent paused: LLM %s wait budget exhausted.", reasonLabel), TotalTokens: tokenCount()})
-						a.emit(Event{Type: "paused", Content: fmt.Sprintf("Agent paused: %s wait budget exhausted; existing findings preserved.", reasonLabel), TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
+						log.Printf("[agent:%s] LLM %s wait budget exhausted", a.ID, reasonLabel)
+						a.emit(Event{Type: "paused", Content: "Scan paused: upstream provider temporarily unavailable; existing findings preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
 						return
 					}
 					if remaining < backoff {
@@ -1212,13 +1213,11 @@ func (a *Agent) Run(targets []string, instruction string) {
 					}
 				}
 
-				if maxWait > 0 {
-					a.emit(Event{Type: "error", Content: fmt.Sprintf("⏳ %s (attempt %d) — retrying in %s (cumulative wait: %s / %s max)", classified.Message, a.state.ConsecutiveRateLimits, backoff, a.state.CumulativeRateLimitWait.Round(time.Second), maxWait), TotalTokens: tokenCount()})
-				} else {
-					a.emit(Event{Type: "error", Content: fmt.Sprintf("⏳ %s (attempt %d) — retrying in %s (cumulative wait: %s)", classified.Message, a.state.ConsecutiveRateLimits, backoff, a.state.CumulativeRateLimitWait.Round(time.Second)), TotalTokens: tokenCount()})
-				}
+				// Log strictly to backend server logs for operator visibility (silent on user frontend)
+				log.Printf("[agent:%s] Upstream LLM %s encountered (%s). Waiting %s before retry (attempt %d, cumulative wait: %s)...",
+					a.ID, reasonLabel, classified.Class, backoff, a.state.ConsecutiveRateLimits, a.state.CumulativeRateLimitWait.Round(time.Second))
 
-				// Interruptible sleep: bail out immediately if the scan is stopped or canceled.
+				// Interruptible sleep: bail out immediately if the scan is stopped or canceled by operator.
 				if a.ctx != nil {
 					select {
 					case <-a.ctx.Done():
@@ -1235,11 +1234,11 @@ func (a *Agent) Run(targets []string, instruction string) {
 				}
 
 				a.state.CumulativeRateLimitWait += backoff
-				a.touchActivity() // keep watchdog alive during rate-limit backoff
+				a.touchActivity() // keep watchdog alive during rate-limit/quota backoff
 
 				if maxWait > 0 && a.state.CumulativeRateLimitWait >= maxWait {
-					a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Agent paused: %s wait budget exhausted after %s.", reasonLabel, a.state.CumulativeRateLimitWait), TotalTokens: tokenCount()})
-					a.emit(Event{Type: "paused", Content: fmt.Sprintf("Agent paused: %s wait budget exhausted; existing findings preserved.", reasonLabel), TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
+					log.Printf("[agent:%s] LLM %s wait budget exhausted after %s", a.ID, reasonLabel, a.state.CumulativeRateLimitWait)
+					a.emit(Event{Type: "paused", Content: "Scan paused: upstream provider temporarily unavailable; existing findings preserved.", TotalTokens: tokenCount(), Aborted: true, AbortReason: abortReason})
 					return
 				}
 				continue
