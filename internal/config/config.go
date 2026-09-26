@@ -391,7 +391,7 @@ func load() *Config {
 		APIBase:                 envOr("XALGORIX_API_BASE", ""),
 		APIKey:                  envOr("XALGORIX_API_KEY", ""),
 		APIKeys:                 ParseAPIKeyList(envOr("XALGORIX_API_KEYS", "")),
-		DisableAutoDelegate:     envOrBool("XALGORIX_DISABLE_AUTO_DELEGATE", false),
+		DisableAutoDelegate:     envOrBool("XALGORIX_DISABLE_AUTO_DELEGATE", true),
 		LLMProfile:              envOr("XALGORIX_LLM_PROFILE", ""),
 		ReasoningEffort:         envOr("XALGORIX_REASONING_EFFORT", "high"),
 		Language:                NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),

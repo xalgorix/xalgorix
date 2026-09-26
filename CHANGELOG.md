@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- **`XALGORIX_DISABLE_AUTO_DELEGATE` now defaults to `true`** — the specialist delegation wave is opt-in rather than opt-out. In production, the specialist wave was producing shallower scans (4-5 findings in 43 minutes vs 20-32 findings in multiple hours for the same target when the root agent works alone). Operators who prefer the faster specialist-parallel behavior can set `XALGORIX_DISABLE_AUTO_DELEGATE=false` or toggle it in the dashboard's Environment settings.
+
 ### Fixed
 - **Malformed tool-output recovery is now far more resilient.** The abort threshold is raised from 5 to 10 consecutive protocol-corrupt responses, and at 5 consecutive failures the agent receives a complete protocol reset prompt — a fundamentally different framing that tells it to STOP all work, make one simple add_note call, and resume from a clean state. Previously, the same recovery prompt was repeated into the same corrupted context 5 times, and when the model couldn't break the loop the scan terminated with credits consumed and endpoint coverage unfinished. The reset prompt changes the model's task entirely, which reliably breaks the corrupted-output loop that MiniMax and some other providers fall into when context is poisoned by provider control-token leaks.
 
