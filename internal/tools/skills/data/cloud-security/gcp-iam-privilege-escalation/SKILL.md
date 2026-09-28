@@ -1,6 +1,6 @@
 ---
 name: gcp-iam-privilege-escalation
-description: GCP IAM privilege escalation — service account actAs, getAccessToken, signBlob and signJwt, serviceAccountKeys, setIamPolicy at project/folder/org levels, custom role manipulation, Cloud Build and Compute with stronger SAs, Functions and Cloud Run deployment abuse with inherited-role awareness
+description: GCP IAM privilege escalation - gcp service account impersonation primitives (actAs, getAccessToken, signBlob, signJwt), serviceAccountKeys, setIamPolicy at project/folder/org levels, custom role manipulation, — service account actAs, getAccessToken, signBlob and signJwt, serviceAccountKeys, setIamPolicy at project/folder/org levels, custom role manipulation, Cloud Build and Compute with stronger SAs, Functions and Cloud Run deployment abuse with inherited-role awareness
 intent: offensive
 assessment_mode: credentialed
 provider:
@@ -10,7 +10,7 @@ provider:
 # GCP IAM Privilege Escalation
 
 ## Purpose
-Prove GCP escalation from a starting principal to a higher-privilege identity or effective permission — typically service-account impersonation or policy modification — with the previously unavailable action demonstrated. A broad role detected is never equivalent to successful escalation.
+Prove GCP escalation from a starting principal to a higher-privilege identity or effective permission — typically service account impersonation (actAs / token mint / signBlob) or policy modification — with the previously unavailable action demonstrated. A broad role detected is never equivalent to successful escalation.
 
 ## Entry Conditions
 - Validated GCP credential with an effective-permission map (`gcp-cloud-pentesting` steps 1–2)

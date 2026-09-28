@@ -212,6 +212,7 @@ var defensiveQuerySignals = []string{
 	"secure coding", "best practice", "best practices", "configure",
 	"configuration guide", "deploy", "rollout", "detection rule",
 	"monitoring", "posture management", "how to build",
+	"anomaly detection", "threat detection",
 }
 
 // queryWantsDefensive reports whether the search query explicitly asks for
@@ -277,7 +278,11 @@ func makeSearchSkills(fsys fs.FS) func(args map[string]string) (tools.Result, er
 				}
 			}
 			if strings.Contains(m.haystack, query) {
-				score += 2 // exact full-phrase bonus
+				// Exact full-phrase bonus: the whole query appearing verbatim in
+				// the skill is stronger evidence than generic single-token name
+				// matches (e.g. "s3 public access" ranks storage testing above
+				// any skill whose *name* merely contains "access").
+				score += 3
 			}
 			if score > 0 {
 				// Intent-aware ranking: autonomous pentest agents search

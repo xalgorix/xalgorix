@@ -1,6 +1,6 @@
 ---
 name: cloud-storage-exposure-testing
-description: Offensive storage exposure testing across AWS S3, Azure Blob/ADLS, and GCP Cloud Storage — existence, listing, read, write, overwrite, delete, ACL/policy modification, and signed-URL behavior with effective-access evidence
+description: Offensive storage exposure testing across AWS S3, Azure Blob/ADLS, and GCP Cloud Storage - resolves s3 public access state (Block Public Access, ACLs, signed URLs) before declaring exposure - covers — existence, listing, read, write, overwrite, delete, ACL/policy modification, and signed-URL behavior with effective-access evidence
 intent: offensive
 assessment_mode:
   - blackbox
@@ -55,7 +55,7 @@ aws s3 ls s3://<bucket> --no-sign-request                                       
 ```
 
 ### Step 2: Effective Access (not policy text)
-A policy containing `"Principal": "*"` is only a CANDIDATE. Effective access can still be denied by:
+Before declaring exposure, resolve the actual s3 public access state (Block Public Access, access points, object ACLs) end to end. A policy containing `"Principal": "*"` is only a CANDIDATE. Effective access can still be denied by:
 - Block Public Access (account and bucket level)
 - policy conditions (`aws:SourceIp`, `s3:authType-*`)
 - access point policies

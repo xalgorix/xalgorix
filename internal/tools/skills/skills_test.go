@@ -978,3 +978,54 @@ func TestApplicationSecuritySkillMetadata(t *testing.T) {
 		t.Errorf("source-assisted-analysis: missing black-box-first positioning")
 	}
 }
+
+// TestSearchSkills_CloudRetrievalPrecision verifies the representative
+// cloud retrieval behaviors: offensive provider queries rank the matching
+// offensive skill first, and detection/implementation queries still find
+// the defensive skills in their new homes.
+func TestSearchSkills_CloudRetrievalPrecision(t *testing.T) {
+	subFS, err := fs.Sub(embeddedSkills, "data")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	search := makeSearchSkills(subFS)
+	first := func(q string) string {
+		res, err := search(map[string]string{"query": q})
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		for _, l := range strings.Split(res.Output, "\n") {
+			if strings.HasPrefix(l, "• ") {
+				return strings.TrimSpace(strings.TrimPrefix(l, "• "))
+			}
+		}
+		return ""
+	}
+	cases := []struct{ query, wantFirst string }{
+		{"aws privilege escalation", "aws-iam-privilege-escalation"},
+		{"azure managed identity attack", "azure-"},
+		{"gcp service account impersonation", "gcp-iam-privilege-escalation"},
+		{"s3 public access", "cloud-storage-exposure-testing"},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			if got := first(c.query); !strings.HasPrefix(got, c.wantFirst) {
+				t.Fatalf("query %q: first result %q, want prefix %q", c.query, got, c.wantFirst)
+			}
+		})
+	}
+	for _, c := range []struct{ query, want string }{
+		{"cloudtrail anomaly detection", "detecting-aws-cloudtrail-anomalies"},
+		{"AWS Security Hub setup", "implementing-aws-security-hub"},
+	} {
+		t.Run(c.query, func(t *testing.T) {
+			res, err := search(map[string]string{"query": c.query})
+			if err != nil {
+				t.Fatalf("search %q: %v", c.query, err)
+			}
+			if !strings.Contains(res.Output, c.want) {
+				t.Fatalf("query %q: expected %q in results, got:\n%s", c.query, c.want, res.Output)
+			}
+		})
+	}
+}
