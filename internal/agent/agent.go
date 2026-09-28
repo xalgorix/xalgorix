@@ -2056,6 +2056,18 @@ func (a *Agent) Run(targets []string, instruction string) {
 			}
 			resultArgs["output"] = result.Output
 			resultArgs["error"] = result.Error
+			// Propagate tool-emitted identity metadata (e.g. read_skill tags
+			// its result with the canonical skill name and duplicate flag) so
+			// result hooks can count successful canonical loads instead of
+			// guessing from the raw request args.
+			if result.Metadata != nil {
+				if v, ok := result.Metadata["skill_name"].(string); ok && v != "" {
+					resultArgs["skill_name"] = v
+				}
+				if v, ok := result.Metadata["skill_duplicate"].(bool); ok && v {
+					resultArgs["skill_duplicate"] = "true"
+				}
+			}
 			toolResultHook := a.hooks.Fire(OnToolResult, a.state, resultArgs)
 			if toolResultHook.EmitMessage != "" {
 				a.emit(Event{Type: "message", Content: toolResultHook.EmitMessage, TotalTokens: tokenCount()})

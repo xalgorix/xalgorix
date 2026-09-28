@@ -9,6 +9,16 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
+// fireDirectives composes one hook's result exactly as HookRegistry.Fire does,
+// so direct hook-call tests observe the merged nudge the model would actually
+// receive, and OnDelivered side effects run as in production.
+func fireDirectives(t *testing.T, state *ScanState, hook HookFn) HookResult {
+	t.Helper()
+	reg := NewHookRegistry()
+	reg.Register(OnIterationStart, hook)
+	return reg.Fire(OnIterationStart, state, nil)
+}
+
 // ── extractEndpointFromCmd tests ─────────────────────────────────────────────
 
 func TestExtractEndpointFromCmd(t *testing.T) {
@@ -1593,7 +1603,7 @@ func TestDelegationCoordinatorNudgesOnceAfterRecon(t *testing.T) {
 	state.PlanBuilt = true
 	state.LedgerSeeded = true
 
-	result := hookDelegationCoordinator(state, nil)
+	result := fireDirectives(t, state, hookDelegationCoordinator)
 	// The nudge is now ledger-driven and built from the deterministic specialist
 	// profiles, while still carrying the recon context (detected stack + surface).
 	if result.Nudge == "" ||
@@ -1603,7 +1613,7 @@ func TestDelegationCoordinatorNudgesOnceAfterRecon(t *testing.T) {
 		!strings.Contains(result.Nudge, "/graphql") {
 		t.Fatalf("unexpected delegation nudge: %q", result.Nudge)
 	}
-	if second := hookDelegationCoordinator(state, nil); second.Nudge != "" {
+	if second := fireDirectives(t, state, hookDelegationCoordinator); second.Nudge != "" {
 		t.Fatalf("delegation nudge repeated: %q", second.Nudge)
 	}
 }
@@ -1613,7 +1623,7 @@ func TestDelegationCoordinatorSkipsDiscoveryAndExistingDelegation(t *testing.T) 
 	state.Iteration = 8
 	state.ReconDone = true
 	state.DiscoveryMode = true
-	if result := hookDelegationCoordinator(state, nil); result.Nudge != "" {
+	if result := fireDirectives(t, state, hookDelegationCoordinator); result.Nudge != "" {
 		t.Fatalf("discovery scan received delegation nudge: %q", result.Nudge)
 	}
 
@@ -1622,7 +1632,7 @@ func TestDelegationCoordinatorSkipsDiscoveryAndExistingDelegation(t *testing.T) 
 	if !state.DelegationAttempted {
 		t.Fatal("spawn_agent call did not mark delegation attempted")
 	}
-	if result := hookDelegationCoordinator(state, nil); result.Nudge != "" {
+	if result := fireDirectives(t, state, hookDelegationCoordinator); result.Nudge != "" {
 		t.Fatalf("coordinator with an existing delegation was nudged again: %q", result.Nudge)
 	}
 }
@@ -1636,7 +1646,7 @@ func TestDelegationCoordinatorRetriesMalformedSpawnWithoutLooping(t *testing.T) 
 	state.PlanBuilt = true
 	state.LedgerSeeded = true
 
-	if first := hookDelegationCoordinator(state, nil); first.Nudge == "" {
+	if first := fireDirectives(t, state, hookDelegationCoordinator); first.Nudge == "" {
 		t.Fatal("expected initial delegation nudge")
 	}
 	// Missing task is the exact malformed call observed in the real run.
@@ -1646,19 +1656,19 @@ func TestDelegationCoordinatorRetriesMalformedSpawnWithoutLooping(t *testing.T) 
 	}
 
 	state.Iteration = 6
-	if early := hookDelegationCoordinator(state, nil); early.Nudge != "" {
+	if early := fireDirectives(t, state, hookDelegationCoordinator); early.Nudge != "" {
 		t.Fatalf("one-turn ledger-reading grace period should be quiet: %q", early.Nudge)
 	}
 	state.Iteration = 7
-	if reminder := hookDelegationCoordinator(state, nil); !strings.Contains(reminder.Nudge, "BOTH required parameters") {
+	if reminder := fireDirectives(t, state, hookDelegationCoordinator); !strings.Contains(reminder.Nudge, "BOTH required parameters") {
 		t.Fatalf("expected schema-explicit delegation reminder, got %q", reminder.Nudge)
 	}
 	state.Iteration = 9
-	if reminder := hookDelegationCoordinator(state, nil); reminder.Nudge == "" {
+	if reminder := fireDirectives(t, state, hookDelegationCoordinator); reminder.Nudge == "" {
 		t.Fatal("expected the second bounded reminder")
 	}
 	state.Iteration = 11
-	if extra := hookDelegationCoordinator(state, nil); extra.Nudge != "" {
+	if extra := fireDirectives(t, state, hookDelegationCoordinator); extra.Nudge != "" {
 		t.Fatalf("delegation reminders must be bounded, got %q", extra.Nudge)
 	}
 }

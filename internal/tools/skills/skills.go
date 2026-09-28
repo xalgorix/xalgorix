@@ -1613,7 +1613,12 @@ func makeReadSkillWithState(fsys fs.FS, r *tools.Registry, state *agentSkillStat
 		if exists && existing.contentHash == contentHash && r.HasActiveContent(existing.fullContent) {
 			state.mu.Unlock()
 			suppressedMsg := fmt.Sprintf("Skill already loaded in the current active context: %s. The complete methodology remains available earlier in this conversation.", canonicalName)
-			return tools.Result{Output: suppressedMsg}, nil
+			// Tag the result so runtime accounting can distinguish a
+			// suppressed duplicate from a genuinely new canonical load.
+			return tools.Result{Output: suppressedMsg, Metadata: map[string]any{
+				"skill_name":     canonicalName,
+				"skill_duplicate": true,
+			}}, nil
 		}
 
 		// First load, content changed, or pruned from active context.
@@ -1624,8 +1629,88 @@ func makeReadSkillWithState(fsys fs.FS, r *tools.Registry, state *agentSkillStat
 		}
 		state.mu.Unlock()
 
-		return tools.Result{Output: fullOutput}, nil
+		// Tag the canonical name so runtime skill accounting counts successful
+		// canonical loads (never failed lookups or duplicates) — the
+		// first-class signal for skill-usage telemetry and recommendations.
+		return tools.Result{Output: fullOutput, Metadata: map[string]any{
+			"skill_name": canonicalName,
+		}}, nil
 	}
+}
+
+// ResolveSkillName resolves a concept query or shorthand alias to one
+// canonical skill name, using the alias map first and the lexical search
+// index second. It is the small deterministic skill-resolution layer the
+// runtime (planner/specialist lanes) consults to attach methodology to
+// planned work — no embeddings, no external service. The second return is
+// false when nothing scores strongly enough to be a confident resolution.
+func ResolveSkillName(query string) (string, bool) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return "", false
+	}
+	// Alias-first: exact shorthand hits are the strongest possible resolution.
+	if slug := sanitizeSlug(q); slug != "" {
+		if alias := resolveAlias(slug); alias != slug && alias != "" {
+			return alias, true
+		}
+	}
+	subFS, err := fs.Sub(embeddedSkills, "data")
+	if err != nil {
+		subFS = embeddedSkills
+	}
+	return bestSkillMatch(subFS, q)
+}
+
+// bestSkillMatch runs the same lexical + intent scoring as search_skills and
+// returns the single best canonical name when its score clears the resolution
+// threshold.
+func bestSkillMatch(fsys fs.FS, query string) (string, bool) {
+	tokens := strings.FieldsFunc(query, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t' || r == '\n' || r == '/'
+	})
+	terms := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		if len(t) >= 2 {
+			terms = append(terms, t)
+		}
+	}
+	if len(terms) == 0 {
+		terms = []string{query}
+	}
+	best, bestScore := "", 0
+	for _, m := range buildSkillIndex(fsys) {
+		score := 0
+		for _, term := range terms {
+			if strings.Contains(strings.ToLower(m.name), term) {
+				score += 3
+			}
+			if strings.Contains(m.haystack, term) {
+				score += 1
+			}
+		}
+		if strings.Contains(m.haystack, query) {
+			score += 3
+		}
+		if score > 0 {
+			switch {
+			case queryWantsDefensive(query) && m.intent == "defensive":
+				score += 6
+			case m.intent == "offensive":
+				score += 4
+			}
+		}
+		if score > bestScore || (score == bestScore && best != "" && m.name < best) {
+			best, bestScore = m.name, score
+		}
+	}
+	// Threshold 4: a name-token match from an offensive skill (3+4), or a
+	// name + frontmatter match (4), resolves; single weak haystack hits (1)
+	// or defensive hits on offensive queries do not.
+	if bestScore < 4 || best == "" {
+		return "", false
+	}
+	return best, true
 }
 
 // lookupSkill resolves <name>/SKILL.md, preferring the supplied category and

@@ -255,10 +255,22 @@ type ScanState struct {
 	DiscoveredEndpoints []string
 
 	// New enrichment hooks
-	WAFDetected                 bool
-	RedirectDetected            bool
-	DetectedTechs               map[string]bool // e.g. "php", "nodejs", "java"
-	SkillSuggestionFired        bool            // prevents hookAutoSkillSuggester from firing more than once
+	WAFDetected          bool
+	RedirectDetected     bool
+	DetectedTechs        map[string]bool // e.g. "php", "nodejs", "java"
+	SkillSuggestionFired bool            // first skill recommendation was delivered (advisory history; no longer a global off-switch)
+	// LoadedSkills records every SUCCESSFULLY loaded canonical skill with the
+	// request context, replacing the old blind SkillsLoaded counter (which
+	// incremented on every read_skill call — failures and duplicates
+	// included). SkillsLoaded is now derived: len(LoadedSkills).
+	LoadedSkills map[string]*LoadedSkillInfo
+	// FailedSkillLoads counts read_skill lookups that errored (unknown
+	// skill names) — a quality signal, never coverage.
+	FailedSkillLoads int
+	// SkillSuggestionsSent dedupes recommendations PER SKILL, not per scan:
+	// loading the SQLi skill must never suppress a later GraphQL or JWT
+	// recommendation for a different detected technology.
+	SkillSuggestionsSent        map[string]bool
 	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
 	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
 	DelegationDeferReason       string          // last specialist-wave defer reason, for change-triggered diagnostics
@@ -294,6 +306,8 @@ func NewScanState() *ScanState {
 		AdvisoryLeadsNudged:       make(map[string]bool),
 		OASTVerificationNudged:    make(map[string]bool),
 		OASTVerificationReminders: make(map[string]int),
+		LoadedSkills:              make(map[string]*LoadedSkillInfo),
+		SkillSuggestionsSent:      make(map[string]bool),
 	}
 }
 
@@ -314,6 +328,14 @@ type HookResult struct {
 	// Used when the conversation itself is the cause of the failure — a text
 	// nudge into a poisoned context just gets corrupted again.
 	PruneContext bool
+
+	// Directives is the structured multi-hook guidance channel. Unlike Nudge
+	// (first-non-empty-wins), every returned directive is composed centrally
+	// by Fire so no hook's "delivered" state mutation can outrun what the
+	// model actually received. Hooks migrate to Directives for iteration-
+	// start guidance; legacy Nudge still works and is appended after the
+	// directives. See directives.go.
+	Directives []Directive
 }
 
 // ── Hook Registry ────────────────────────────────────────────────────────────
@@ -345,13 +367,20 @@ func (r *HookRegistry) Register(event string, fn HookFn) {
 
 // Fire dispatches all hooks for the given event and merges results.
 // First non-empty string fields win. Bool fields use OR logic.
+//
+// Directives are the exception: every hook's directives are composed together
+// (see composeDirectives) so guidance from multiple hooks cannot silently
+// disappear while the producing hook has already marked it delivered. Only the
+// directives that verifiably reach the composed message run OnDelivered.
 func (r *HookRegistry) Fire(event string, state *ScanState, args map[string]string) HookResult {
 	merged := HookResult{}
+	var directives []Directive
 	for _, fn := range r.hooks[event] {
 		result := fn(state, args)
 		if merged.Nudge == "" && result.Nudge != "" {
 			merged.Nudge = result.Nudge
 		}
+		directives = append(directives, result.Directives...)
 		if result.Block {
 			merged.Block = true
 			if merged.BlockReason == "" {
@@ -366,6 +395,15 @@ func (r *HookRegistry) Fire(event string, state *ScanState, args map[string]stri
 		}
 		if result.CleanupBrowser {
 			merged.CleanupBrowser = true
+		}
+	}
+	if len(directives) > 0 {
+		composed, delivered := composeDirectives(directives, merged.Nudge)
+		merged.Nudge = composed
+		for _, d := range delivered {
+			if d.OnDelivered != nil {
+				d.OnDelivered(state)
+			}
 		}
 	}
 	return merged
@@ -479,6 +517,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolCall, hookCurlPreference)
 	reg.Register(OnToolExecute, hookWorkTracker)
 	reg.Register(OnStuckCheck, hookStuckNudge)
+	reg.Register(OnToolResult, hookSkillLoadTracker)
 	reg.Register(OnToolResult, hookWAFDetector)
 	reg.Register(OnToolResult, hookRedirectDetector)
 	reg.Register(OnToolResult, hookTargetHealthDetector)
@@ -972,10 +1011,6 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 			markEndpointClassCoverage(state, endpoint, "idor")
 		}
 		recordVerifierCoverage(state, endpoint, toolName, args)
-	}
-
-	if toolName == "read_skill" {
-		state.SkillsLoaded++
 	}
 
 	// Track endpoint inventory saved (mandatory recon checklist step 5)
@@ -2891,70 +2926,74 @@ func hookDelegationCoordinator(state *ScanState, args map[string]string) HookRes
 		if state.Iteration < state.DelegationNudgeAt+2 || state.DelegationReminders >= 2 {
 			return HookResult{}
 		}
-		state.DelegationReminders++
-		return HookResult{Nudge: "⛔ DELEGATION STILL PENDING: no valid specialist was launched. Call spawn_agent NOW with BOTH required parameters: name and task. Launch one bounded, non-overlapping wave (2–3 specialists total); do not continue serial whole-target testing first."}
+		return HookResult{Directives: []Directive{{
+			Priority:  DirectivePriorityCritical,
+			Category:  "delegation",
+			DedupeKey: "delegation-reminder",
+			Content:   "⛔ DELEGATION STILL PENDING: no valid specialist was launched. Call spawn_agent NOW with BOTH required parameters: name and task. Launch one bounded, non-overlapping wave (2–3 specialists total); do not continue serial whole-target testing first.",
+			OnDelivered: func(s *ScanState) {
+				s.DelegationReminders++
+			},
+		}}}
 	}
 
-	state.DelegationNudgeFired = true
-	state.DelegationNudgeAt = state.Iteration
 	// The nudge is built from the deterministic specialist profiles and the
 	// shared ledger's schedulable hypotheses (see ledger_hooks.go), so the
 	// coordinator assigns disjoint, contract-bound work instead of three generic
-	// scans.
-	return HookResult{Nudge: buildDelegationNudge(state)}
+	// scans. The one-shot reservation now happens ONLY on delivery — a lost
+	// nudge no longer burns the coordinator's only decomposition prompt.
+	return HookResult{Directives: []Directive{{
+		Priority:  DirectivePriorityCritical,
+		Category:  "delegation",
+		DedupeKey: "delegation-initial",
+		Content:   buildDelegationNudge(state),
+		OnDelivered: func(s *ScanState) {
+			s.DelegationNudgeFired = true
+			s.DelegationNudgeAt = s.Iteration
+		},
+	}}}
 }
 
 // ── hookAutoSkillSuggester ───────────────────────────────────────────────────
-// On iteration start, suggests loading skills if techs have been detected
-// but no skills have been loaded yet. Only fires once, at iteration 15.
+// On iteration start, recommends loading methodology skills for DETECTED
+// technologies whose skill has neither been loaded nor previously recommended.
+// Suggestions are PER SKILL, driven by uncovered work: loading the SQLi skill
+// no longer suppresses a later GraphQL or prototype-pollution recommendation
+// (the old global SkillsLoaded>0 bail was a one-skill-disables-all off-switch).
+// Re-evaluated every iteration from 15 on, so technologies detected later in
+// the scan still get their recommendation; already-delivered suggestions are
+// deduplicated per skill name, keeping the loop bounded.
 func hookAutoSkillSuggester(state *ScanState, args map[string]string) HookResult {
-	if state.ReconOnlyMode {
+	if state == nil || state.ReconOnlyMode || state.DelegatedAgent {
 		return HookResult{}
 	}
-
-	// Fire once at iteration >= 15 — early enough to help, late enough to have tech data
-	if state.Iteration < 15 || state.SkillSuggestionFired {
+	// From iteration 15 — early enough to help, late enough to have tech data.
+	if state.Iteration < 15 {
 		return HookResult{}
 	}
-
-	if state.SkillsLoaded > 0 {
-		return HookResult{} // already loading skills
-	}
-
-	if len(state.DetectedTechs) == 0 && !state.WAFDetected {
-		return HookResult{} // no tech data to suggest from
-	}
-
-	suggestions := []string{}
-	techSkillMap := map[string]string{
-		"php":    "sql-injection",
-		"nodejs": "prototype-pollution",
-		"java":   "ssti",
-		"python": "ssti",
-		"aspnet": "sql-injection",
-	}
-
-	for tech := range state.DetectedTechs {
-		if skill, ok := techSkillMap[tech]; ok {
-			suggestions = append(suggestions, fmt.Sprintf("read_skill(name=%q) for %s targets", skill, tech))
-		}
-	}
-
-	if state.WAFDetected {
-		suggestions = append(suggestions, `read_skill(name="xss") and read_skill(name="sql-injection") for WAF bypass payloads`)
-	}
-
-	if len(suggestions) == 0 {
+	pending := recommendedSkillsForState(state)
+	if len(pending) == 0 {
 		return HookResult{}
 	}
-
-	state.SkillSuggestionFired = true
-	return HookResult{
-		Nudge: fmt.Sprintf(`💡 SKILL RECOMMENDATION: You have detected technologies but haven't loaded any deep knowledge skills yet. Consider:
-%s
-
-Skills contain expert-level payloads, WAF bypass techniques, and technology-specific attack chains that significantly improve testing depth.`, strings.Join(suggestions, "\n")),
+	lines := make([]string, 0, len(pending))
+	for _, rec := range pending {
+		lines = append(lines, fmt.Sprintf("read_skill(name=%q) — %s", rec.Skill, rec.Reason))
 	}
+	content := fmt.Sprintf("💡 SKILL RECOMMENDATION: methodology for technologies you have detected but not loaded yet:\n%s\n\nSkills contain expert-level payloads, WAF bypass techniques, and technology-specific attack chains that significantly improve testing depth. Load the ones relevant to your current lane before deep work.", strings.Join(lines, "\n"))
+	return HookResult{Directives: []Directive{{
+		Priority:  DirectivePriorityAdvisory,
+		Category:  "skill",
+		DedupeKey: "skill-suggestion",
+		Content:   content,
+		// Mark suggested only when the recommendation verifiably reached the
+		// model. A dropped directive leaves every suggestion eligible again.
+		OnDelivered: func(s *ScanState) {
+			s.SkillSuggestionFired = true
+			for _, rec := range pending {
+				s.SkillSuggestionsSent[rec.Skill] = true
+			}
+		},
+	}}}
 }
 
 // ── hookPlanner ──────────────────────────────────────────────────────────────
@@ -2984,7 +3023,12 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// were mapped, repeatedly missing known bugs. Wait for an inventory note.
 	if !state.EndpointInventorySaved && state.Plan == nil && state.ReconDone {
 		if state.Iteration >= 5 && state.Iteration%5 == 0 {
-			return HookResult{Nudge: "Save an Endpoint Inventory note now: list only LIVE, observed routes from responses, links, forms, and first-party JavaScript, including dynamic path segments and file-serving directories. Then prioritize concrete hypotheses and build the assessment plan. Do not invent paths to satisfy this gate."}
+			return HookResult{Directives: []Directive{{
+				Priority:  DirectivePriorityCritical,
+				Category:  "planner",
+				DedupeKey: "endpoint-inventory",
+				Content:   "Save an Endpoint Inventory note now: list only LIVE, observed routes from responses, links, forms, and first-party JavaScript, including dynamic path segments and file-serving directories. Then prioritize concrete hypotheses and build the assessment plan. Do not invent paths to satisfy this gate.",
+			}}}
 		}
 		return HookResult{}
 	}
@@ -3024,8 +3068,19 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 			if brief == state.LastPlanBrief {
 				return HookResult{}
 			}
-			state.LastPlanBrief = brief
-			return HookResult{Nudge: brief}
+			// LastPlanBrief is recorded ONLY on delivery. The old code set it
+			// before knowing whether the nudge survived Fire's merge, which
+			// permanently suppressed the plan brief whenever another hook's
+			// nudge won the first-non-empty race.
+			return HookResult{Directives: []Directive{{
+				Priority:  DirectivePriorityPlanner,
+				Category:  "planner",
+				DedupeKey: "planner-brief",
+				Content:   brief,
+				OnDelivered: func(s *ScanState) {
+					s.LastPlanBrief = brief
+				},
+			}}}
 		}
 	}
 	return HookResult{}

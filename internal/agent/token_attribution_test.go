@@ -154,7 +154,7 @@ func TestAccidentalDuplicateSuppression(t *testing.T) {
 		state.DiscoveredEndpoints = []string{"/api/login", "/api/user"}
 
 		// First iteration: must produce plan brief
-		res1 := hookPlanner(state, nil)
+		res1 := fireDirectives(t, state, hookPlanner)
 		if res1.Nudge == "" {
 			t.Fatalf("first iteration must produce plan brief")
 		}
@@ -163,7 +163,7 @@ func TestAccidentalDuplicateSuppression(t *testing.T) {
 		}
 
 		// Second iteration without state change: MUST suppress duplicate
-		res2 := hookPlanner(state, nil)
+		res2 := fireDirectives(t, state, hookPlanner)
 		if res2.Nudge != "" {
 			t.Fatalf("consecutive unchanged plan must be suppressed, got: %s", res2.Nudge)
 		}
@@ -174,7 +174,7 @@ func TestAccidentalDuplicateSuppression(t *testing.T) {
 		state.AccessControlEndpoints = map[string]bool{"/api/login": true, "/api/user": true}
 
 		// Third iteration with changed state: MUST produce updated plan brief
-		res3 := hookPlanner(state, nil)
+		res3 := fireDirectives(t, state, hookPlanner)
 		if res3.Nudge == "" {
 			t.Fatalf("plan with updated task status must produce updated brief")
 		}
@@ -186,7 +186,7 @@ func TestAccidentalDuplicateSuppression(t *testing.T) {
 		}
 
 		// Fourth iteration after prune: MUST re-inject plan brief fresh
-		res4 := hookPlanner(state, nil)
+		res4 := fireDirectives(t, state, hookPlanner)
 		if res4.Nudge == "" {
 			t.Fatalf("iteration after context prune must re-inject plan brief")
 		}

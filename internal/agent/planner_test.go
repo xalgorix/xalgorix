@@ -238,7 +238,7 @@ func TestHookPlannerDoesNotExpandDelegatedAgentIntoFullScan(t *testing.T) {
 	state.DiscoveredEndpoints = []string{"/assigned"}
 	state.DetectedTechs["java"] = true
 
-	if got := hookPlanner(state, nil); got.Nudge != "" {
+	if got := fireDirectives(t, state, hookPlanner); got.Nudge != "" {
 		t.Fatalf("delegated specialist without a lane-local plan should not receive a root plan nudge: %s", got.Nudge)
 	}
 	if state.Plan != nil || state.PlanBuilt {
@@ -451,7 +451,7 @@ func TestHookPlannerWaitsForEndpointInventory(t *testing.T) {
 	state.EndpointsTested["example.test/api/health"] = true
 	state.EndpointsTested["example.test/login"] = true
 
-	result := hookPlanner(state, nil)
+	result := fireDirectives(t, state, hookPlanner)
 	if state.Plan != nil || state.PlanBuilt || len(state.DiscoveredEndpoints) != 0 {
 		t.Fatal("two observed requests must not become a complete attack-surface plan")
 	}

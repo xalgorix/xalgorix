@@ -432,7 +432,7 @@ func TestHookDelegationCoordinatorFiresOnceWithLedger(t *testing.T) {
 	state.LedgerSeeded = true
 	ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "idor", Endpoint: "/api/orders", Confidence: 0.7})
 
-	r := hookDelegationCoordinator(state, nil)
+	r := fireDirectives(t, state, hookDelegationCoordinator)
 	if r.Nudge == "" {
 		t.Fatal("expected a delegation nudge once recon is mature")
 	}
@@ -443,7 +443,7 @@ func TestHookDelegationCoordinatorFiresOnceWithLedger(t *testing.T) {
 		t.Fatal("expected DelegationNudgeFired to be set")
 	}
 	// One-time: subsequent calls are silent.
-	if hookDelegationCoordinator(state, nil).Nudge != "" {
+	if fireDirectives(t, state, hookDelegationCoordinator).Nudge != "" {
 		t.Fatal("expected the delegation nudge to fire only once")
 	}
 }
@@ -453,20 +453,20 @@ func TestHookDelegationCoordinatorWaitsForPlanAndLedger(t *testing.T) {
 	state.ReconDone = true
 	state.Iteration = 6
 
-	if got := hookDelegationCoordinator(state, nil); got.Nudge != "" || state.DelegationNudgeFired {
+	if got := fireDirectives(t, state, hookDelegationCoordinator); got.Nudge != "" || state.DelegationNudgeFired {
 		t.Fatal("delegation must wait until a plan and its ledger hypotheses exist")
 	}
 	state.Plan = AutoPlan([]string{"/api/orders"}, nil)
 	state.PlanBuilt = true
-	if got := hookDelegationCoordinator(state, nil); got.Nudge != "" || state.DelegationNudgeFired {
+	if got := fireDirectives(t, state, hookDelegationCoordinator); got.Nudge != "" || state.DelegationNudgeFired {
 		t.Fatal("delegation must wait until the plan has been seeded into the ledger")
 	}
 	state.LedgerSeeded = true
-	if got := hookDelegationCoordinator(state, nil); got.Nudge != "" || state.DelegationNudgeFired {
+	if got := fireDirectives(t, state, hookDelegationCoordinator); got.Nudge != "" || state.DelegationNudgeFired {
 		t.Fatal("delegation must wait for a real endpoint inventory")
 	}
 	state.EndpointInventorySaved = true
-	if got := hookDelegationCoordinator(state, nil); got.Nudge == "" || !state.DelegationNudgeFired {
+	if got := fireDirectives(t, state, hookDelegationCoordinator); got.Nudge == "" || !state.DelegationNudgeFired {
 		t.Fatal("expected delegation after plan, ledger, and inventory initialization")
 	}
 
