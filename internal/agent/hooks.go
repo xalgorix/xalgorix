@@ -254,6 +254,17 @@ type ScanState struct {
 	// from the seeded surface and the "Endpoint Inventory" note.
 	DiscoveredEndpoints []string
 
+	// ── Structured attack-surface observation ──
+	// Typed per-endpoint evidence the applicability layer (surface.go)
+	// consumes: observed HTTP methods and content types from real requests,
+	// plus artifact-seeded endpoints (OpenAPI/HAR/Postman, which carry
+	// methods and parameters). The "Endpoint Inventory" note remains the
+	// human/model-facing mirror; these are the machine-readable source of
+	// truth for what testing applies where.
+	ObservedEndpointMethods map[string]string
+	EndpointContentTypes    map[string]string
+	SeededSurface           []SeededSurfaceEndpoint
+
 	// New enrichment hooks
 	WAFDetected          bool
 	RedirectDetected     bool
@@ -308,6 +319,8 @@ func NewScanState() *ScanState {
 		OASTVerificationReminders: make(map[string]int),
 		LoadedSkills:              make(map[string]*LoadedSkillInfo),
 		SkillSuggestionsSent:      make(map[string]bool),
+		ObservedEndpointMethods:   make(map[string]string),
+		EndpointContentTypes:      make(map[string]string),
 	}
 }
 
@@ -836,6 +849,17 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
 		}
+		// Structured-surface evidence: the method and content type of this
+		// concrete request drive the applicability layer (state-changing
+		// routes owe business-logic/race obligations, XML owes XXE, ...).
+		if endpoint != "" {
+			if m := methodFromCurlCmd(rawCmd); m != "" {
+				recordEndpointMethod(state, endpoint, m)
+			}
+			if ct := contentTypeFromCmd(rawCmd); ct != "" {
+				recordEndpointContentType(state, endpoint, ct)
+			}
+		}
 
 		// Detect recon commands
 		if strings.Contains(cmd, "nmap") || strings.Contains(cmd, "whatweb") ||
@@ -1003,6 +1027,12 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		endpoint := endpointFromToolArgs(args)
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
+			if m := strings.ToUpper(strings.TrimSpace(args["method"])); m != "" {
+				recordEndpointMethod(state, endpoint, m)
+			}
+			if ct := strings.TrimSpace(args["content_type"]); ct != "" {
+				recordEndpointContentType(state, endpoint, ct)
+			}
 		}
 		requestText := joinedToolArgs(args)
 		recordDetectedClassCoverage(state, endpoint, requestText)
@@ -3046,11 +3076,7 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// which case PlanBuilt is true and we leave its plan alone.
 	if !state.PlanBuilt && state.Plan == nil && state.ReconDone &&
 		(len(state.DiscoveredEndpoints) > 0 || len(state.DetectedTechs) > 0) {
-		if state.AuthContextKnown {
-			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
-		} else {
-			state.Plan = AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
-		}
+		state.Plan = AutoPlanFromState(state)
 		state.PlanBuilt = true
 	}
 

@@ -1616,7 +1616,7 @@ func makeReadSkillWithState(fsys fs.FS, r *tools.Registry, state *agentSkillStat
 			// Tag the result so runtime accounting can distinguish a
 			// suppressed duplicate from a genuinely new canonical load.
 			return tools.Result{Output: suppressedMsg, Metadata: map[string]any{
-				"skill_name":     canonicalName,
+				"skill_name":      canonicalName,
 				"skill_duplicate": true,
 			}}, nil
 		}

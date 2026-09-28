@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -847,7 +848,7 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 	// same fully mapped endpoint set instead of whatever a one-minute
 	// inventory happened to contain. An LLM-authored plan is never clobbered.
 	if planIsEngineAuthored(a.state.Plan) && len(a.state.DiscoveredEndpoints) > 0 {
-		a.state.Plan = AutoPlan(a.state.DiscoveredEndpoints, a.state.DetectedTechs)
+		a.state.Plan = AutoPlanFromState(a.state)
 		a.state.PlanBuilt = true
 		reconcilePlan(a.state)
 	}
@@ -911,7 +912,7 @@ Assigned vulnerability classes: %s.
 Start with read_ledger(filter=schedulable), then claim_next_hypothesis separately for every assigned class. Do not repeat root reconnaissance or work outside this lane.
 Local workspace: create and use tmp/%s/ for every scanner-side artifact. Never use host /tmp and never read or overwrite another lane's scratch files.
 Required proof: %s.
-Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule)
+Stopping rule: %s.%s`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule, a.specialistLaneBrief(profile))
 	args := map[string]string{
 		"name": profile.Role,
 		"task": task,
@@ -930,6 +931,90 @@ Stopping rule: %s.`, profile.Role, target, strings.Join(profile.VulnClasses, ", 
 	}
 	id, _ := result.Metadata["agent_id"].(string)
 	return id
+}
+
+// specialistLaneBrief grounds a specialist's spawn task in CONCRETE schedulable
+// work: the live ledger's queued hypotheses for its assigned classes, plus the
+// resolved methodology skills for those classes. "Test business logic
+// everywhere" becomes "H-18 business-logic POST /api/checkout", and the class
+// knowledge loads deterministically instead of hoping the child remembers the
+// catalog.
+func (a *Agent) specialistLaneBrief(profile specialistProfile) string {
+	var b strings.Builder
+	l := a.ledger()
+
+	// Concrete hypotheses per assigned class (bounded).
+	var lines []string
+	if l != nil {
+		for _, class := range profile.VulnClasses {
+			count := 0
+			for _, h := range l.All() {
+				if count >= 3 {
+					break
+				}
+				if h.Status != scanctx.HypothesisQueued && h.Status != scanctx.HypothesisBlocked {
+					continue
+				}
+				if !vulnClassMatches(h.VulnClass, class) {
+					continue
+				}
+				loc := strings.TrimSpace(h.VulnClass + " " + h.Endpoint)
+				if h.Parameter != "" {
+					loc += " [" + h.Parameter + "]"
+				}
+				lines = append(lines, fmt.Sprintf("  • %s: %s", h.ID, loc))
+				count++
+			}
+		}
+	}
+	if len(lines) > 0 {
+		sort.Strings(lines)
+		b.WriteString("\nAssigned concrete hypotheses (claim these FIRST, one per class, until the lane is exhausted):\n")
+		b.WriteString(strings.Join(lines, "\n"))
+	}
+
+	// Resolved lane methodology (1-3 skills).
+	var skills []string
+	for _, class := range profile.VulnClasses {
+		if name, ok := VulnClassSkill(class); ok && name != "" {
+			dup := false
+			for _, s := range skills {
+				if s == name {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				skills = append(skills, name)
+			}
+		}
+		if len(skills) >= 3 {
+			break
+		}
+	}
+	if len(skills) > 0 {
+		quoted := make([]string, 0, len(skills))
+		for _, s := range skills {
+			quoted = append(quoted, strconv.Quote(s))
+		}
+		b.WriteString("\nLane methodology: load read_skill(name=" + strings.Join(quoted, "), then read_skill(name=") + ") before your first probe.")
+	}
+	return b.String()
+}
+
+// vulnClassMatches compares a ledger hypothesis class with a lane class,
+// normalizing both through the canonical registry so "bola" matches "idor" and
+// "race-condition" matches "race-conditions".
+func vulnClassMatches(have, want string) bool {
+	have, want = strings.TrimSpace(have), strings.TrimSpace(want)
+	if have == "" || want == "" {
+		return false
+	}
+	if strings.EqualFold(have, want) {
+		return true
+	}
+	hc, wc := CanonicalVulnClassID(have), CanonicalVulnClassID(want)
+	return hc != "" && hc == wc
 }
 
 // specialistDisabled reports whether the named specialist lane is turned off
@@ -2532,6 +2617,28 @@ func (a *Agent) prepareScanEnvironment() {
 			// the text briefing. Idempotent (the ledger dedups), so sub-agents
 			// that also parse the context add nothing new.
 			seeded := a.seedLedgerFromSurface(res)
+			// Retain the typed endpoint metadata (methods, parameters) for
+			// the structured applicability layer — the notes briefing stays
+			// the prose mirror, but the planner consumes this typed form.
+			for _, e := range res.Endpoints {
+				host, epath := splitSurfaceEndpoint(e.Path, res.BaseURLs)
+				if epath == "" {
+					continue
+				}
+				record := SeededSurfaceEndpoint{
+					Path:   epath,
+					Method: strings.ToUpper(strings.TrimSpace(e.Method)),
+					Source: "context",
+				}
+				if e.Source != "" {
+					record.Source = "context:" + e.Source
+				}
+				record.Params = append(record.Params, e.Params...)
+				if host != "" {
+					recordEndpointMethod(a.state, host+epath, record.Method)
+				}
+				a.state.SeededSurface = append(a.state.SeededSurface, record)
+			}
 			if a.scanContextBriefing != "" {
 				msg := fmt.Sprintf("🗺️ Attack surface seeded from context (%d endpoints", len(res.Endpoints))
 				if seeded > 0 {

@@ -89,10 +89,24 @@ var defaultSpecialistProfiles = []specialistProfile{
 	},
 	{
 		Role:             "authz-logic",
-		Focus:            "Authorization, access control, and business-logic abuse",
-		VulnClasses:      []string{"idor", "bola", "bfla", "privilege-escalation", "auth-bypass", "business-logic", "race-conditions"},
+		Focus:            "Authorization and access control across identity boundaries",
+		VulnClasses:      []string{"idor", "bola", "bfla", "privilege-escalation", "auth-bypass"},
 		EvidenceContract: "only enter this lane when live reconnaissance provides the required account/session roles or an operator-supplied credential path; use a baseline request as the legitimate role AND the same request as another/lower-privileged role, showing a concrete cross-role difference (cross-user/cross-tenant data or a state-changing action) — the authz_matrix tool produces this differential automatically across role A / role B / anonymous. For EVERY user-scoped state-changing endpoint, test ownership AND uniqueness enforcement with two distinct identities (act as user A on user B\u2019s object or repeat user A\u2019s submission as user B — cross-user bookings/reservations/records must fail). For authentication flows, test token identity (two different users logging in must NOT receive identical or interchangeable tokens) and expiry enforcement (an expired token must be rejected), plus a bounded failed-login burst to check authentication rate limiting (stop early once the counter proves unlimited attempts; do not lock out real accounts). Do not substitute default-password spraying, account creation on a disabled signup flow, or offline hash cracking for missing role prerequisites",
 		StoppingRule:     "do not stop after the first finding; exhaust every assigned object/action and role boundary, report each distinct proven failure, reject each safe hypothesis with its baseline, and finish only when no assigned queued/testing hypothesis remains",
+	},
+	{
+		// Business/workflow lane: deliberately SEPARATE from authz-logic so a
+		// single-identity (or anonymous) target keeps workflow abuse testing.
+		// Business-logic, race-condition and mass-assignment probes do not
+		// need a second account: double-submit, coupon abuse, price
+		// manipulation, replay, state-machine bypass and concurrent-request
+		// races are all provable with one identity against the workflow's
+		// own invariants.
+		Role:             "business-logic",
+		Focus:            "Business logic, workflow abuse, and race conditions",
+		VulnClasses:      []string{"business-logic", "race-conditions", "mass-assignment"},
+		EvidenceContract: "for every state-changing workflow endpoint (checkout, coupon, booking, order, transfer, vote, refund, subscription), test the business invariants: replay/double-submit the same action and prove a duplicate effect; manipulate price/quantity/discount/limit values in both directions (negative quantity, zero cost, over-limit) and prove the server accepts or misprices; abuse the state machine (skip steps, revisit completed steps, submit out of order); for race-prone actions fire 5-20 concurrent identical requests (single identity is sufficient) and prove an invariant break such as a multi-use coupon, overdrawn balance, or duplicate booking. For writable-object endpoints (PUT/PATCH with JSON), test mass assignment of privileged properties (role, is_admin, price, owner_id) with one identity. A proven differential (baseline request vs. manipulated request) is required for each claim; a refused manipulation is a rejected hypothesis with its control",
+		StoppingRule:     "do not stop after the first finding; exhaust every assigned workflow endpoint and invariant, report each distinct proven failure, reject each safe hypothesis with its baseline, and finish only when no assigned queued/testing hypothesis remains",
 	},
 	{
 		Role:             "injection-serverside",
@@ -217,9 +231,40 @@ func seedLedgerFromPlan(state *ScanState, l *scanctx.LedgerStore) int {
 		if l.Len() > before {
 			seeded++
 		}
+		// Surface × class seeding: every APPLICABLE (class, endpoint) pair
+		// becomes a concrete, claimable hypothesis — bounded per class. This
+		// is what guarantees a specialist calling
+		// claim_next_hypothesis(vuln_class="business-logic") finds real work
+		// instead of "No queued hypotheses" while the application has
+		// untested checkout/coupon workflows. Idempotent via ledger dedup on
+		// (vuln_class, endpoint, parameter, role).
+		eps := ApplicableEndpointsForClass(state, t.VulnClass)
+		for i, ep := range eps {
+			if i >= maxSurfaceClassSeed {
+				break
+			}
+			before := l.Len()
+			l.Upsert(scanctx.Hypothesis{
+				Title:      "Test " + t.VulnClass + " on " + ep,
+				VulnClass:  t.VulnClass,
+				Endpoint:   ep,
+				Status:     scanctx.HypothesisQueued,
+				Confidence: 0.5,
+				Origin:     "auto-plan-surface",
+				NextAction: "Probe " + ep + " for " + t.VulnClass + " with a benign control first, then the class-specific technique; record the differential as evidence.",
+			})
+			if l.Len() > before {
+				seeded++
+			}
+		}
 	}
 	return seeded
 }
+
+// maxSurfaceClassSeed bounds endpoint-level hypotheses seeded per class so a
+// large surface cannot flood the ledger; the class-level hypothesis plus the
+// plan task notes still describe the remainder.
+const maxSurfaceClassSeed = 6
 
 // hookAdvisoryLeadCommitment turns an exact advisory lookup into durable work
 // instead of disposable prose. The lookup remains a lead, never proof: this

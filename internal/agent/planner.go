@@ -33,6 +33,7 @@ package agent
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -260,6 +261,12 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 	sort.Strings(discoveredEndpoints)
 	for _, ep := range discoveredEndpoints {
 		for _, class := range classes {
+			// Applicability filter: only (class, endpoint) pairs the observed
+			// surface makes testable are coverage obligations. /robots.txt
+			// owes no XXE/SSTI/CSRF probe; an XML route always owes XXE.
+			if !classAppliesToEndpoint(state, ep, class) {
+				continue
+			}
 			if !endpointTestedForClass(state, ep, class) {
 				gaps = append(gaps, CoverageGap{
 					VulnClass: class,
@@ -270,6 +277,58 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 		}
 	}
 	return gaps
+}
+
+// applicabilityExtraClasses are the canonical classes outside the fixed
+// baseline floor that become REAL plan tasks only when the observed surface
+// carries applicable endpoints (workflow routes owe business-logic and
+// race-condition work; upload routes owe file-upload testing; GraphQL and
+// WebSocket surfaces owe their dedicated lanes). This is how the planner
+// stops being a small fixed class floor without exploding into a Cartesian
+// endpoint × class matrix.
+var applicabilityExtraClasses = []string{
+	"business-logic",
+	"race-conditions",
+	"mass-assignment",
+	"file-upload",
+	"websocket",
+	"graphql",
+	"nosqli",
+	"deserialization",
+	"open-redirect",
+	"cors",
+	"secret-exposure",
+	"dom-xss",
+	"privilege-escalation",
+	"auth-bypass",
+}
+
+// AutoPlanFromState builds the engine plan with the applicability layer
+// applied: the baseline floor from AutoPlan plus one task per extra class
+// that has at least one applicable endpoint, with the concrete endpoint list
+// in the task notes. Bounded and deterministic; classes with no applicable
+// endpoint are NOT scheduled (that is the point).
+func AutoPlanFromState(state *ScanState) *Plan {
+	if state == nil {
+		return NewPlan()
+	}
+	p := AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
+	for _, class := range applicabilityExtraClasses {
+		eps := ApplicableEndpointsForClass(state, class)
+		if len(eps) == 0 {
+			continue
+		}
+		t := newCoverageTask(class, eps)
+		t.DependsOn = []string{"recon", "dirbust"}
+		if p.Get(t.ID) != nil {
+			t.ID += "-coverage"
+		}
+		if skill, ok := VulnClassSkill(class); ok {
+			t.Notes += " Load the methodology first: read_skill(name=" + strconv.Quote(skill) + ")."
+		}
+		p.add(t)
+	}
+	return p
 }
 
 // endpointTestedForClass reports whether this exact endpoint has coverage
@@ -389,6 +448,13 @@ func taskCoverageComplete(state *ScanState, task *Task) bool {
 		return state.VulnClassesTested[task.VulnClass]
 	}
 	for _, endpoint := range state.DiscoveredEndpoints {
+		// Non-applicable pairs are not obligations: a class completes when
+		// every APPLICABLE endpoint is covered, so /robots.txt can never
+		// hold an injection lane open and an unrelated signal can never
+		// complete a class either.
+		if !classAppliesToEndpoint(state, endpoint, task.VulnClass) {
+			continue
+		}
 		if !endpointTestedForClass(state, endpoint, task.VulnClass) {
 			return false
 		}
