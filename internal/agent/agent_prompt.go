@@ -1736,10 +1736,10 @@ The delegated task is your complete mission. Do not widen into the root's full m
 		skillHints = append(skillHints, "read_skill(name=\"authentication-jwt\")", "read_skill(name=\"oauth2-attacks\")", "read_skill(name=\"2fa-mfa-bypass\")")
 	}
 	if strings.Contains(lower, "api testing") || strings.Contains(lower, "api test") || strings.Contains(lower, "api security") || strings.Contains(lower, "rest api") {
-		skillHints = append(skillHints, "read_skill(name=\"idor\")", "read_skill(name=\"broken-function-level-authorization\")", "read_skill(name=\"nosql-injection\")")
+		skillHints = append(skillHints, "read_skill(name=\"api-bola\")", "read_skill(name=\"api-bfla\")", "read_skill(name=\"nosql-injection\")")
 	}
 	if strings.Contains(lower, "privilege escalation") || strings.Contains(lower, "privesc") || strings.Contains(lower, "vertical escalation") || strings.Contains(lower, "horizontal escalation") {
-		skillHints = append(skillHints, "read_skill(name=\"idor\")", "read_skill(name=\"broken-function-level-authorization\")")
+		skillHints = append(skillHints, "read_skill(name=\"idor\")", "read_skill(name=\"api-bfla\")")
 	}
 	if strings.Contains(lower, "clobbering") && !strings.Contains(lower, "dom") {
 		skillHints = append(skillHints, "read_skill(name=\"dom-xss\")")

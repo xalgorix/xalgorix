@@ -86,46 +86,62 @@ type skillMeta struct {
 	category    string
 	name        string
 	description string
+	intent      string
 	haystack    string
 }
 
 var (
-	skillIndexOnce sync.Once
-	skillIndex     []skillMeta
+	skillIndexMu    sync.Mutex
+	skillIndexCache = map[fs.FS][]skillMeta{}
 )
 
-// buildSkillIndex walks the embedded skill tree once and parses each
-// SKILL.md's YAML frontmatter (name/description/tags) into a searchable
-// record. Cached for the process lifetime; the embedded FS is immutable.
+// buildSkillIndex walks the skill tree of the given filesystem and parses
+// each SKILL.md's YAML frontmatter (name/description/tags/intent) into a
+// searchable record. Indexes are cached per fs.FS for the process lifetime;
+// the embedded FS in production and the on-disk FS in tests are each
+// immutable within a process, so a per-filesystem cache is safe and keeps
+// test fixtures isolated from the embedded index.
 func buildSkillIndex(fsys fs.FS) []skillMeta {
-	skillIndexOnce.Do(func() {
-		cats := listCategories(fsys)
-		for _, cat := range cats {
-			entries, err := fs.ReadDir(fsys, cat)
+	skillIndexMu.Lock()
+	defer skillIndexMu.Unlock()
+	if idx, ok := skillIndexCache[fsys]; ok {
+		return idx
+	}
+	idx := buildSkillIndexFor(fsys)
+	skillIndexCache[fsys] = idx
+	return idx
+}
+
+// buildSkillIndexFor performs the actual tree walk for buildSkillIndex.
+func buildSkillIndexFor(fsys fs.FS) []skillMeta {
+	var idx []skillMeta
+	cats := listCategories(fsys)
+	for _, cat := range cats {
+		entries, err := fs.ReadDir(fsys, cat)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			data, err := fs.ReadFile(fsys, cat+"/"+name+"/SKILL.md")
 			if err != nil {
 				continue
 			}
-			for _, e := range entries {
-				if !e.IsDir() {
-					continue
-				}
-				name := e.Name()
-				data, err := fs.ReadFile(fsys, cat+"/"+name+"/SKILL.md")
-				if err != nil {
-					continue
-				}
-				desc, fm := parseSkillFrontmatter(string(data))
-				hay := strings.ToLower(name + " " + cat + " " + fm)
-				skillIndex = append(skillIndex, skillMeta{
-					category:    cat,
-					name:        name,
-					description: desc,
-					haystack:    hay,
-				})
-			}
+			desc, fm := parseSkillFrontmatter(string(data))
+			hay := strings.ToLower(name + " " + cat + " " + fm)
+			idx = append(idx, skillMeta{
+				category:    cat,
+				name:        name,
+				description: desc,
+				intent:      parseSkillIntent(fm),
+				haystack:    hay,
+			})
 		}
-	})
-	return skillIndex
+	}
+	return idx
 }
 
 // parseSkillFrontmatter extracts the description value and the raw frontmatter
@@ -167,6 +183,46 @@ func parseSkillFrontmatter(content string) (string, string) {
 		desc = desc[:297] + "..."
 	}
 	return desc, strings.Join(fm, "\n")
+}
+
+// parseSkillIntent extracts the optional `intent:` frontmatter tag
+// (offensive/defensive) used for intent-aware search ranking. Returns an
+// empty string when the skill carries no intent metadata.
+func parseSkillIntent(frontmatter string) string {
+	for _, line := range strings.Split(frontmatter, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "intent:") {
+			continue
+		}
+		v := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "intent:")))
+		v = strings.Trim(v, `"'`)
+		if v == "offensive" || v == "defensive" {
+			return v
+		}
+		return ""
+	}
+	return ""
+}
+
+// defensiveQuerySignals are terms that indicate the caller explicitly wants
+// implementation/hardening guidance rather than attack methodology.
+var defensiveQuerySignals = []string{
+	"implement", "implementation", "harden", "hardening", "mitigate",
+	"mitigation", "prevent", "prevention", "defend", "defensive",
+	"secure coding", "best practice", "best practices", "configure",
+	"configuration guide", "deploy", "rollout", "detection rule",
+	"monitoring", "posture management", "how to build",
+}
+
+// queryWantsDefensive reports whether the search query explicitly asks for
+// defensive/implementation content.
+func queryWantsDefensive(query string) bool {
+	for _, s := range defensiveQuerySignals {
+		if strings.Contains(query, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func makeSearchSkills(fsys fs.FS) func(args map[string]string) (tools.Result, error) {
@@ -224,6 +280,22 @@ func makeSearchSkills(fsys fs.FS) func(args map[string]string) (tools.Result, er
 				score += 2 // exact full-phrase bonus
 			}
 			if score > 0 {
+				// Intent-aware ranking: autonomous pentest agents search
+				// for attack/testing methodology, so offensive skills rank
+				// above implementation/hardening guidance unless the query
+				// explicitly asks for defensive content. The intent bonus
+				// only reorders lexical matches — it never makes a
+				// non-matching skill appear.
+				switch {
+				case queryWantsDefensive(query) && m.intent == "defensive":
+					score += 6
+				case queryWantsDefensive(query) && m.intent == "offensive":
+					// no boost: still listed, below defensive matches
+				case m.intent == "offensive":
+					score += 4
+				case m.intent == "defensive":
+					score -= 3
+				}
 				results = append(results, scored{m: m, score: score})
 			}
 		}
@@ -390,7 +462,7 @@ var skillAliases = map[string]string{
 	"race-condition":          "exploiting-race-condition-vulnerabilities",
 	"race-conditions":         "exploiting-race-condition-vulnerabilities",
 	"mass-assignment":         "exploiting-mass-assignment-in-rest-apis",
-	"api-injection":           "exploiting-api-injection-vulnerabilities",
+	"api-injection":           "api-injection",
 
 	// ── Path traversal / LFI / RFI ───────────────────────────────────
 	// The directory-traversal skill is the canonical LFI/path-traversal
@@ -421,9 +493,9 @@ var skillAliases = map[string]string{
 	"modbus-command-injection": "detecting-modbus-command-injection-attacks",
 
 	// ── Authentication & authorization ───────────────────────────────
-	"jwt":                "exploiting-jwt-algorithm-confusion-attack",
-	"jwt-attack":         "exploiting-jwt-algorithm-confusion-attack",
-	"authentication-jwt": "exploiting-jwt-algorithm-confusion-attack",
+	"jwt":                "jwt-security-testing",
+	"jwt-attack":         "jwt-security-testing",
+	"authentication-jwt": "jwt-security-testing",
 	"jwt-signing":        "implementing-jwt-signing-and-verification",
 	"oauth":              "exploiting-oauth-misconfiguration",
 	"oauth-misconfig":    "exploiting-oauth-misconfiguration",
@@ -443,19 +515,27 @@ var skillAliases = map[string]string{
 	"subfinder":         "performing-subdomain-enumeration-with-subfinder",
 	"nmap":              "scanning-network-with-nmap-advanced",
 	"network-scan":      "scanning-network-with-nmap-advanced",
-	"api-enumeration":   "detecting-api-enumeration-attacks",
-	"shadow-api":        "detecting-shadow-api-endpoints",
+	"api-enumeration":   "api-bola",
+	"shadow-api":        "api-discovery",
 	"cert-transparency": "analyzing-certificate-transparency-for-phishing",
 
 	// ── API security ─────────────────────────────────────────────────
-	"api-security":      "conducting-api-security-testing",
-	"api-gateway":       "implementing-api-gateway-security-controls",
-	"api-rate-limiting": "implementing-api-rate-limiting-and-throttling",
-	"api-schema":        "implementing-api-schema-validation-security",
-	"api-keys":          "implementing-api-key-security-controls",
-	"api-abuse":         "implementing-api-abuse-detection-with-rate-limiting",
-	"api-posture":       "implementing-api-security-posture-management",
-	"data-exposure":     "exploiting-excessive-data-exposure-in-api",
+	"api-security":       "conducting-api-security-testing",
+	"api-gateway":        "api-security-misconfiguration",
+	"api-rate-limiting":  "api-resource-consumption",
+	"api-schema":         "api-security-misconfiguration",
+	"api-keys":           "api-authentication-session",
+	"api-abuse":          "api-business-flow-abuse",
+	"api-posture":        "api-security-misconfiguration",
+	"data-exposure":      "api-bopla",
+	"bola":               "api-bola",
+	"bfla":               "api-bfla",
+	"bopla":              "api-bopla",
+	"json-rpc":           "rpc-api-security",
+	"jsonrpc":            "rpc-api-security",
+	"business-flow":      "api-business-flow-abuse",
+	"unsafe-consumption": "api-unsafe-third-party-consumption",
+	"api-webhooks":       "api-unsafe-third-party-consumption",
 
 	// ── Active Directory ─────────────────────────────────────────────
 	"ad-pentest":       "performing-active-directory-penetration-test",
@@ -887,7 +967,7 @@ var skillAliases = map[string]string{
 	"azure-storage-account-misconfigurations":             "detecting-azure-storage-account-misconfigurations",
 	"beaconing-patterns-with-zeek":                        "detecting-beaconing-patterns-with-zeek",
 	"bluetooth-low-energy-attacks":                        "detecting-bluetooth-low-energy-attacks",
-	"broken-object-property-level-authorization":          "detecting-broken-object-property-level-authorization",
+	"broken-object-property-level-authorization":          "api-bopla",
 	"business-email-compromise":                           "detecting-business-email-compromise",
 	"business-email-compromise-with-ai":                   "detecting-business-email-compromise-with-ai",
 	"cloud-threats-with-guardduty":                        "detecting-cloud-threats-with-guardduty",
@@ -952,7 +1032,7 @@ var skillAliases = map[string]string{
 	"ertep":                                               "executing-red-team-engagement-planning",
 	"erte":                                                "executing-red-team-exercise",
 	"bgp-hijacking-vulnerabilities":                       "exploiting-bgp-hijacking-vulnerabilities",
-	"broken-function-level-authorization":                 "exploiting-broken-function-level-authorization",
+	"broken-function-level-authorization":                 "api-bfla",
 	"constrained-delegation-abuse":                        "exploiting-constrained-delegation-abuse",
 	"deeplink-vulnerabilities":                            "exploiting-deeplink-vulnerabilities",
 	"insecure-data-storage-in-mobile":                     "exploiting-insecure-data-storage-in-mobile",
@@ -1011,8 +1091,8 @@ var skillAliases = map[string]string{
 	"alert-fatigue-reduction":                             "implementing-alert-fatigue-reduction",
 	"anti-phishing-training-program":                      "implementing-anti-phishing-training-program",
 	"anti-ransomware-group-policy":                        "implementing-anti-ransomware-group-policy",
-	"api-security-testing-with-42crunch":                  "implementing-api-security-testing-with-42crunch",
-	"api-threat-protection-with-apigee":                   "implementing-api-threat-protection-with-apigee",
+	"api-security-testing-with-42crunch":                  "api-fuzzing-restler",
+	"api-threat-protection-with-apigee":                   "api-security-misconfiguration",
 	"application-whitelisting-with-applocker":             "implementing-application-whitelisting-with-applocker",
 	"aqua-security-for-container-scanning":                "implementing-aqua-security-for-container-scanning",
 	"attack-path-analysis-with-xm-cyber":                  "implementing-attack-path-analysis-with-xm-cyber",
@@ -1186,10 +1266,10 @@ var skillAliases = map[string]string{
 	"ai-driven-osint-correlation":                         "performing-ai-driven-osint-correlation",
 	"alert-triage-with-elastic-siem":                      "performing-alert-triage-with-elastic-siem",
 	"android-app-static-analysis-with-mobsf":              "performing-android-app-static-analysis-with-mobsf",
-	"api-fuzzing-with-restler":                            "performing-api-fuzzing-with-restler",
-	"api-inventory-and-discovery":                         "performing-api-inventory-and-discovery",
-	"api-rate-limiting-bypass":                            "performing-api-rate-limiting-bypass",
-	"api-security-testing-with-postman":                   "performing-api-security-testing-with-postman",
+	"api-fuzzing-with-restler":                            "api-fuzzing-restler",
+	"api-inventory-and-discovery":                         "api-discovery",
+	"api-rate-limiting-bypass":                            "api-resource-consumption",
+	"api-security-testing-with-postman":                   "conducting-api-security-testing",
 	"arp-spoofing-attack-simulation":                      "performing-arp-spoofing-attack-simulation",
 	"asset-criticality-scoring-for-vulns":                 "performing-asset-criticality-scoring-for-vulns",
 	"authenticated-scan-with-openvas":                     "performing-authenticated-scan-with-openvas",
@@ -1235,8 +1315,8 @@ var skillAliases = map[string]string{
 	"fuzzing-with-aflplusplus":                            "performing-fuzzing-with-aflplusplus",
 	"gcp-penetration-testing-with-gcpbucketbrute":         "performing-gcp-penetration-testing-with-gcpbucketbrute",
 	"gcp-security-assessment-with-forseti":                "performing-gcp-security-assessment-with-forseti",
-	"graphql-depth-limit-attack":                          "performing-graphql-depth-limit-attack",
-	"graphql-introspection-attack":                        "performing-graphql-introspection-attack",
+	"graphql-depth-limit-attack":                          "graphql-api-security",
+	"graphql-introspection-attack":                        "graphql-api-security",
 	"hardware-security-module-integration":                "performing-hardware-security-module-integration",
 	"hash-cracking-with-hashcat":                          "performing-hash-cracking-with-hashcat",
 	"ics-asset-discovery-with-claroty":                    "performing-ics-asset-discovery-with-claroty",
@@ -1248,7 +1328,7 @@ var skillAliases = map[string]string{
 	"ios-app-security-assessment":                         "performing-ios-app-security-assessment",
 	"iot-security-assessment":                             "performing-iot-security-assessment",
 	"ip-reputation-analysis-with-shodan":                  "performing-ip-reputation-analysis-with-shodan",
-	"jwt-none-algorithm-attack":                           "performing-jwt-none-algorithm-attack",
+	"jwt-none-algorithm-attack":                           "jwt-security-testing",
 	"kerberoasting-attack":                                "performing-kerberoasting-attack",
 	"kubernetes-cis-benchmark-with-kube-bench":            "performing-kubernetes-cis-benchmark-with-kube-bench",
 	"kubernetes-etcd-security-assessment":                 "performing-kubernetes-etcd-security-assessment",
@@ -1303,7 +1383,7 @@ var skillAliases = map[string]string{
 	"serverless-function-security-review":                 "performing-serverless-function-security-review",
 	"service-account-audit":                               "performing-service-account-audit",
 	"service-account-credential-rotation":                 "performing-service-account-credential-rotation",
-	"soap-web-service-security-testing":                   "performing-soap-web-service-security-testing",
+	"soap-web-service-security-testing":                   "soap-api-security",
 	"soc-tabletop-exercise":                               "performing-soc-tabletop-exercise",
 	"soc2-type2-audit-preparation":                        "performing-soc2-type2-audit-preparation",
 	"sqlite-database-forensics":                           "performing-sqlite-database-forensics",
@@ -1364,16 +1444,16 @@ var skillAliases = map[string]string{
 	"serverless-functions":                      "securing-serverless-functions",
 	"subs":                                      "subdomain-enumeration",
 	"android-intents-for-vulnerabilities":       "testing-android-intents-for-vulnerabilities",
-	"api-authentication-weaknesses":             "testing-api-authentication-weaknesses",
-	"api-for-broken-object-level-authorization": "testing-api-for-broken-object-level-authorization",
-	"api-for-mass-assignment-vulnerability":     "testing-api-for-mass-assignment-vulnerability",
+	"api-authentication-weaknesses":             "api-authentication-session",
+	"api-for-broken-object-level-authorization": "api-bola",
+	"api-for-mass-assignment-vulnerability":     "api-bopla",
 	"api-security-with-owasp-top-10":            "testing-api-security-with-owasp-top-10",
 	"for-json-web-token-vulnerabilities":        "testing-for-json-web-token-vulnerabilities",
 	"jwt-token-security":                        "testing-jwt-token-security",
 	"mobile-api-authentication":                 "testing-mobile-api-authentication",
-	"oauth2-implementation-flaws":               "testing-oauth2-implementation-flaws",
+	"oauth2-implementation-flaws":               "oauth-oidc-security",
 	"ransomware-recovery-procedures":            "testing-ransomware-recovery-procedures",
-	"websocket-api-security":                    "testing-websocket-api-security",
+	"websocket-api-security":                    "websocket-api-security",
 	"threat-actor-infrastructure":               "tracking-threat-actor-infrastructure",
 	"security-alerts-in-splunk":                 "triaging-security-alerts-in-splunk",
 	"security-incident":                         "triaging-security-incident",

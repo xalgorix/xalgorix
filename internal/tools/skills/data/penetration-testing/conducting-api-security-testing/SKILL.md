@@ -1,4 +1,5 @@
 ---
+intent: offensive
 name: conducting-api-security-testing
 description: 'Conducts security testing of REST, GraphQL, and gRPC APIs to identify vulnerabilities in authentication, authorization,
   rate limiting, input validation, and business logic. The tester uses the OWASP API Security Top 10 as the testing framework,
