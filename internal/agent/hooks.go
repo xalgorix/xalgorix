@@ -2792,7 +2792,8 @@ The conversation context has been RESET to a clean state. Do NOT reference, retr
 Your ONLY next action: make exactly ONE tool call in perfect XML format:
 
 <function=add_note>
-<parameter=content>Protocol reset after %d malformed responses. Resuming scan from clean state.</parameter>
+<parameter=key>protocol_reset</parameter>
+<parameter=value>Protocol reset after %d malformed responses. Resuming scan from clean state.</parameter>
 </function>
 
 After that note succeeds, resume your scan plan from the first uncompleted task. Use clean, minimal, properly-closed XML for every subsequent call.`,

@@ -30,6 +30,23 @@ var (
 	invokeOpen   = regexp.MustCompile(`<invoke\s+name=["']([^"']+)["']>`)
 	funcCallsTag = regexp.MustCompile(`</?function_calls>`)
 
+	// Space-attribute function form: <function name="X">...</function>. The
+	// body is well-formed but fnRegex requires "<function=", so these turns
+	// were previously classified as unparsable "unparsed_tool_call" output
+	// and pushed scans into the malformed-recovery ladder. Normalizing the
+	// open tag executes the call normally instead.
+	funcNameAttrRe = regexp.MustCompile(`(?s)<function\s+name=["']([^"']+)["']\s*>`)
+	// Tool-call variant family: <tool_call name="X">...`, often
+	// batched inside a bare <tool_calls> wrapper. Same story: a real,
+	// well-formed body in the wrong vocabulary. Named opens rewrite to
+	// <function=X>; the singular close rewrites to </function>; the bare
+	// plural wrapper (a batch delimiter, not a call) is stripped LAST so a
+	// singular close is never mistaken for its own wrapper. A bare unnamed
+	// `tool call marker carries no recoverable name and deliberately stays
+	// on the malformed path.
+	toolCallOpenRe = regexp.MustCompile(`(?s)<tool_calls?\s+name=["']([^"']+)["']\s*>`)
+	toolCallsTagRe = regexp.MustCompile(`(?is)</?tool_calls>`)
+
 	// Recover malformed tool-call OPEN tags. Some models intermittently mangle
 	// the opening tag while still emitting a well-formed body and "</function>".
 	// Observed variants (all counted as "no tool call" by the strict fnRegex):
@@ -243,6 +260,13 @@ func normalizeFormat(content string) string {
 		content = invokeOpen.ReplaceAllString(content, "<function=$1>")
 		content = strings.ReplaceAll(content, "</invoke>", "</function>")
 	}
+
+	// Space-attribute and tool_call vocabularies, before the generic repairs
+	// (which all require "=" and would not fire on these shapes).
+	content = funcNameAttrRe.ReplaceAllString(content, "<function=${1}>")
+	content = toolCallOpenRe.ReplaceAllString(content, "<function=${1}>")
+	content = strings.ReplaceAll(content, "</tool_call>", "</function>")
+	content = toolCallsTagRe.ReplaceAllString(content, "")
 
 	// Repair malformed function-open tags (missing leading "<" / "<function").
 	// ${1} is the leading boundary char (re-emitted so we don't eat punctuation).

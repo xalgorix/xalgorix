@@ -956,6 +956,42 @@ func vulnClassMatches(have, want string) bool {
 	return hc != "" && hc == wc
 }
 
+// scannerTemperatureFor computes the sampling temperature for the next
+// request from the live recovery state. The scan defaults to fully
+// deterministic (TempScanner); a small 0.2 bump is applied when stuck,
+// retrying failed calls, or recovering from malformed tool output — a
+// deterministic sample tends to re-emit the exact same broken markup turn
+// after turn, so the bump is the cheapest way to break that loop while the
+// protocol nudges do the formatting work.
+func scannerTemperatureFor(state *ScanState) float64 {
+	t := 0.0
+	if state == nil {
+		return t
+	}
+	if state.ConsecutiveSameCall >= 2 || state.ConsecutiveSameResult >= 2 || state.ConsecutiveErrors > 0 {
+		t = 0.2
+	}
+	if state.MalformedToolOutputCount > 0 && t < 0.2 {
+		t = 0.2
+	}
+	return t
+}
+
+// appendUserNudge appends a user-role recovery nudge unless the previous
+// message is byte-identical. A deterministic model that re-emits the same
+// malformed output between attempts would otherwise stack duplicate
+// recovery instructions, burning context without changing what the model
+// sees; one copy of each distinct nudge is enough.
+func (a *Agent) appendUserNudge(content string) {
+	a.msgMu.Lock()
+	defer a.msgMu.Unlock()
+	if n := len(a.messages); n > 0 &&
+		a.messages[n-1].Role == "user" && a.messages[n-1].Content == content {
+		return
+	}
+	a.messages = append(a.messages, llm.Message{Role: "user", Content: content})
+}
+
 // delegationEnabled reports whether ANY specialist delegation is possible
 // this scan: auto-delegation not disabled by configuration, the spawn tool
 // available, a lane-using scan type, and at least one lane not
@@ -1574,10 +1610,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// Adaptive Temperature Control:
 		// Default to TempScanner (0.0) for 100% deterministic, consistent scan behavior.
 		// Dynamically boost to 0.2 when stuck or retrying failed calls to allow creative payload variation.
-		scannerTemp := 0.0
-		if a.state.ConsecutiveSameCall >= 2 || a.state.ConsecutiveSameResult >= 2 || a.state.ConsecutiveErrors > 0 {
-			scannerTemp = 0.2
-		}
+		scannerTemp := scannerTemperatureFor(a.state)
 		a.client.SetTemperature(&scannerTemp)
 
 		category := scanctx.CategoryNormalReasoning
@@ -1950,9 +1983,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 				// from the abort edge.
 				a.state.MalformedToolOutputCount = 0
 			} else if noToolResult.Nudge != "" {
-				a.msgMu.Lock()
-				a.messages = append(a.messages, llm.Message{Role: "user", Content: noToolResult.Nudge})
-				a.msgMu.Unlock()
+				a.appendUserNudge(noToolResult.Nudge)
 			}
 			// Avoid a rapid paid retry storm for provider-protocol corruption. The
 			// delay is deliberately small and bounded; ordinary prose-only turns

@@ -185,3 +185,58 @@ func TestMalformedToolOutputReason(t *testing.T) {
 		})
 	}
 }
+
+// Space-attribute function form: <function name="X">...</function>. Observed
+// when models drift to the attribute spelling while keeping the XML tool
+// body. Without normalization these turns were classified as unparsable
+// "unparsed_tool_call" output and pushed scans into the malformed-recovery
+// ladder.
+func TestParseToolCalls_SpaceAttributeFunctionForm(t *testing.T) {
+	calls := ParseToolCalls(`<function name="terminal_execute">
+<parameter=command>curl -sk https://example.test/</parameter>
+</function>`)
+	if len(calls) != 1 || calls[0].Name != "terminal_execute" {
+		t.Fatalf("space-attribute form must parse, got %v", calls)
+	}
+	if calls[0].Args["command"] != "curl -sk https://example.test/" {
+		t.Fatalf("command arg wrong: %q", calls[0].Args["command"])
+	}
+}
+
+// tool_call vocabulary: named opens with the matching close form, plus the
+// bare plural batch wrapper (a delimiter, not a call). The close tags are
+// assembled by concatenation so this source stays greppable.
+func TestParseToolCalls_ToolCallVariantForms(t *testing.T) {
+	closeSg := "</tool" + "_call>"
+	batchOpen := "<tool" + "_calls>"
+	batchClose := "</tool" + "_calls>"
+
+	single := "<tool_call name=\"send_request\">\n<parameter=method>GET</parameter>\n<parameter=url>https://example.test/</parameter>\n" + closeSg
+	calls := ParseToolCalls(single)
+	if len(calls) != 1 || calls[0].Name != "send_request" {
+		t.Fatalf("tool_call form must parse, got %v", calls)
+	}
+	if calls[0].Args["method"] != "GET" || calls[0].Args["url"] != "https://example.test/" {
+		t.Fatalf("tool_call args wrong: %v", calls[0].Args)
+	}
+
+	batch := batchOpen + "\n<tool_call name=\"terminal_execute\"><parameter=command>id</parameter>" + closeSg + "\n<tool_call name=\"add_note\"><parameter=key>notes</parameter><parameter=value>ok</parameter>" + closeSg + "\n" + batchClose
+	calls = ParseToolCalls(batch)
+	if len(calls) != 2 {
+		t.Fatalf("batched tool_call wrappers must parse, got %v", calls)
+	}
+	if calls[0].Name != "terminal_execute" || calls[1].Name != "add_note" {
+		t.Fatalf("batched tool_call names wrong: %v", calls)
+	}
+
+	// Ordinary prose mentioning "tool call" must never be classified as
+	// malformed protocol output.
+	if reason := MalformedToolOutputReason("I will inspect the tool call conventions in the docs."); reason != "" {
+		t.Fatalf("ordinary prose must not be classified malformed, got %q", reason)
+	}
+	// A bare unnamed marker carries no recoverable name and stays on the
+	// malformed path.
+	if reason := MalformedToolOutputReason("residue: " + batchOpen); reason != "unparsed_tool_call" {
+		t.Fatalf("bare unnamed tool_calls wrapper must stay malformed, got %q", reason)
+	}
+}
