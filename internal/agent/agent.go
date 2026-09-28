@@ -688,10 +688,30 @@ func (a *Agent) reconPhaseComplete() bool {
 	}
 
 	// Content discovery: at least one host received a real wordlist pass.
-	// Per-host coverage is tracked but not fully enforced yet — a single
-	// pass on the primary host satisfies this dimension for now, matching
-	// the existing step-by-step chain.
 	if len(rc.ContentDiscoveredHosts) == 0 && !rc.NAMarked["content_discovery"] {
+		return false
+	}
+	// Per-application coverage: every distinct host the inventory surfaced
+	// (bounded to the first maxReconHostRequirement) must have been
+	// content-discovered OR carry a typed disposition (not_applicable,
+	// blocked, covered-by-equivalent-app). One pass on app.example.com no
+	// longer silently satisfies api/admin/files.example.com.
+	for _, host := range distinctApplicationHosts(s) {
+		if rc.ContentDiscoveredHosts[host] || reconHostDispositioned(s, host) {
+			continue
+		}
+		return false
+	}
+	// Applicability-informed required dimensions (N/A dispositions honored):
+	// API signals require API-surface discovery; an auth surface requires
+	// auth mapping; input-bearing surface requires parameter discovery.
+	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !rc.NAMarked["api_surface"] {
+		return false
+	}
+	if authSurfaceExists(s) && rc.AuthMapped == "" && !rc.NAMarked["auth_mapping"] {
+		return false
+	}
+	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
 		return false
 	}
 
@@ -763,9 +783,21 @@ func (a *Agent) reconIncompleteReasons() []string {
 		if !rc.ServicesProbed && !rc.NAMarked["service_discovery"] {
 			missing = append(missing, "service/port enumeration (nmap/naabu on the target)")
 		}
-		if !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
-			missing = append(missing, "parameter/input discovery (arjun/x8, forms, query parameters)")
+	}
+	for _, host := range distinctApplicationHosts(s) {
+		if rc.ContentDiscoveredHosts[host] || reconHostDispositioned(s, host) {
+			continue
 		}
+		missing = append(missing, "content discovery on "+host+" (or a typed disposition via update_plan: host "+host+": blocked/na/covered_by_equivalent)")
+	}
+	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !rc.NAMarked["api_surface"] {
+		missing = append(missing, "API-surface discovery (OpenAPI/GraphQL/route enumeration)")
+	}
+	if authSurfaceExists(s) && rc.AuthMapped == "" && !rc.NAMarked["auth_mapping"] {
+		missing = append(missing, "auth mapping (login flows, session capture)")
+	}
+	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
+		missing = append(missing, "parameter/input discovery (arjun/x8, forms, query parameters)")
 	}
 	return missing
 }
@@ -909,12 +941,13 @@ func (a *Agent) spawnSpecialistProfile(profile specialistProfile, targets []stri
 	if len(targets) > 0 {
 		target = strings.TrimSpace(targets[0])
 	}
+	brief, laneHypothesisIDs := a.specialistLaneBrief(profile)
 	task := fmt.Sprintf(`Own ONLY the %q lane against %s.
 Assigned vulnerability classes: %s.
 Start with read_ledger(filter=schedulable), then claim_next_hypothesis separately for every assigned class. Do not repeat root reconnaissance or work outside this lane.
 Local workspace: create and use tmp/%s/ for every scanner-side artifact. Never use host /tmp and never read or overwrite another lane's scratch files.
 Required proof: %s.
-Stopping rule: %s.%s`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule, a.specialistLaneBrief(profile))
+Stopping rule: %s.%s`, profile.Role, target, strings.Join(profile.VulnClasses, ", "), profile.Role, profile.EvidenceContract, profile.StoppingRule, brief)
 	args := map[string]string{
 		"name": profile.Role,
 		"task": task,
@@ -932,6 +965,17 @@ Stopping rule: %s.%s`, profile.Role, target, strings.Join(profile.VulnClasses, "
 		return ""
 	}
 	id, _ := result.Metadata["agent_id"].(string)
+	if id != "" && len(laneHypothesisIDs) > 0 {
+		if l := a.ledger(); l != nil {
+			for _, h := range laneHypothesisIDs {
+				// Soft lane ownership: the hypotheses stay queued and
+				// claimable, but the child's finish gate can now see
+				// assigned-but-never-claimed work instead of an empty lane
+				// looking exhausted.
+				l.MarkAssigned(h, id)
+			}
+		}
+	}
 	return id
 }
 
@@ -941,12 +985,13 @@ Stopping rule: %s.%s`, profile.Role, target, strings.Join(profile.VulnClasses, "
 // everywhere" becomes "H-18 business-logic POST /api/checkout", and the class
 // knowledge loads deterministically instead of hoping the child remembers the
 // catalog.
-func (a *Agent) specialistLaneBrief(profile specialistProfile) string {
+func (a *Agent) specialistLaneBrief(profile specialistProfile) (string, []string) {
 	var b strings.Builder
 	l := a.ledger()
 
 	// Concrete hypotheses per assigned class (bounded).
 	var lines []string
+	var ids []string
 	if l != nil {
 		for _, class := range profile.VulnClasses {
 			count := 0
@@ -960,11 +1005,15 @@ func (a *Agent) specialistLaneBrief(profile specialistProfile) string {
 				if !vulnClassMatches(h.VulnClass, class) {
 					continue
 				}
+				if strings.TrimSpace(h.AssignedTo) != "" {
+					continue // already owned by another lane
+				}
 				loc := strings.TrimSpace(h.VulnClass + " " + h.Endpoint)
 				if h.Parameter != "" {
 					loc += " [" + h.Parameter + "]"
 				}
 				lines = append(lines, fmt.Sprintf("  • %s: %s", h.ID, loc))
+				ids = append(ids, h.ID)
 				count++
 			}
 		}
@@ -1001,7 +1050,7 @@ func (a *Agent) specialistLaneBrief(profile specialistProfile) string {
 		}
 		b.WriteString("\nLane methodology: load read_skill(name=" + strings.Join(quoted, "), then read_skill(name=") + ") before your first probe.")
 	}
-	return b.String()
+	return b.String(), ids
 }
 
 // vulnClassMatches compares a ledger hypothesis class with a lane class,
@@ -2194,6 +2243,20 @@ func (a *Agent) Run(targets []string, instruction string) {
 						count = len(reporting.GetVulnerabilitiesForContext(a.scanCtx.ID))
 					}
 					content = authoritativeFinishSummary(content, count)
+					// ── Honest completion assessment ──
+					// The gates release a finish after the bounded rejection
+					// ceiling; that must never read as "full assessment
+					// completed". Compute the explicit terminal state, make it
+					// visible in the final summary, and emit one compact
+					// telemetry block for post-scan debugging.
+					status, reasons := scanCompletionAssessment(a.state)
+					a.state.CompletionStatus = status
+					if status != CompletionStatusCompleted {
+						content += "\n\n" + formatIncompleteSummary(status, reasons)
+					}
+					if summary := scanTelemetrySummary(a.state, status, reasons); summary != "" {
+						a.emit(Event{Type: "message", Content: summary, TotalTokens: tokenCount()})
+					}
 				}
 				a.emit(Event{Type: "finished", Content: content, TotalTokens: tokenCount()})
 				return

@@ -59,15 +59,16 @@ func (a *Agent) registerPlanTools(reg *tools.Registry) {
 
 	reg.Register(&tools.Tool{
 		Name: "update_plan",
-		Description: "Mark a planned task as active, completed, or skipped so the engine tracks " +
+		Description: "Mark a planned task as active, completed, or dispositioned so the engine tracks " +
 			"progress. Call this when you start a task and when it's done (covered, or ruled out " +
-			"as not-applicable → skipped). The engine also auto-marks tasks done from coverage " +
+			"with a TYPED disposition). The engine also auto-marks tasks done from coverage " +
 			"evidence, so you only need this for tasks it can't infer (e.g. ruling a class " +
-			"not-applicable).",
+			"not-applicable). Typed dispositions are auditable; vague prose is rejected for " +
+			"engine-owned coverage tasks.",
 		Parameters: []tools.Parameter{
 			{Name: "task_id", Description: "The task id from build_plan. If omitted, the single currently-active task is updated (or, when marking one active, the next pending task).", Required: false},
-			{Name: "status", Description: "One of: active, completed, skipped (default: active).", Required: false},
-			{Name: "notes", Description: "Optional rationale / finding reference", Required: false},
+			{Name: "status", Description: "One of: active, completed, skipped, or a typed disposition: not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded. Typed dispositions require a concrete reason note and are validated against the observed surface.", Required: false},
+			{Name: "notes", Description: "Concrete rationale / finding reference. For typed dispositions state the surface fact (e.g. 'no XML input surface exists', 'horizontal proof requires a second account that was not supplied'). For the recon task, N/A dimensions use lines like 'service_discovery: raw IP target, no port surface beyond HTTP'.", Required: false},
 		},
 		Execute: a.updatePlanTool,
 	})
@@ -227,6 +228,7 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: fmt.Sprintf("unknown task id %q — current task ids: %s", id, planIDList(plan))}, nil
 	}
 	var st TaskStatus
+	disposition := ""
 	switch status {
 	case "active", "in_progress", "in-progress", "inprogress", "started", "start", "working", "doing":
 		st = TaskActive
@@ -234,32 +236,78 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		st = TaskCompleted
 	case "skipped", "skip", "n/a", "na", "not-applicable", "not_applicable", "notapplicable":
 		st = TaskSkipped
+		disposition = DispositionNotApplicable
+	case "blocked_missing_auth", "blocked_missing_second_identity", "blocked_unreachable", "blocked_policy", "exhausted", "superseded":
+		st = TaskSkipped
+		disposition = status
 	default:
-		return tools.Result{Error: "status must be one of: active, completed, skipped (got " + args["status"] + ")"}, nil
+		return tools.Result{Error: "status must be one of: active, completed, skipped, or a typed disposition (not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded) — got " + args["status"]}, nil
 	}
 	// Engine coverage-floor tasks (Origin "auto" with a vulnerability class)
 	// cannot be hand-completed: a single update_plan call must not substitute
 	// for actually testing the discovered surface. reconcilePlan closes them
 	// automatically once the endpoint x class coverage matrix is complete, so
 	// a rejection here always means the class is not yet covered.
-	if st == TaskCompleted && t.Origin == "auto" && t.VulnClass != "" && a.state != nil &&
+	// The auth-session task completes on its dimension contract, not on the
+	// endpoint x class matrix (auth dimensions are tracked separately).
+	authLaneSettled := t.VulnClass == "auth" && authTaskComplete(a.state)
+	if st == TaskCompleted && t.Origin == "auto" && t.VulnClass != "" && !authLaneSettled && a.state != nil &&
 		!taskCoverageComplete(a.state, t) {
 		return tools.Result{Error: fmt.Sprintf(
 			"task %q (%s) needs coverage evidence before completion: every discovered endpoint must be tested for %s (engine-verified). Continue testing the class, or mark status 'skipped' with a concrete justification if it is genuinely not applicable to this target.",
 			id, t.VulnClass, t.VulnClass)}, nil
 	}
-	// A coverage-floor task may only be skipped with a concrete justification.
-	// A bare no-note skip is the cheapest end-run around the coverage
-	// contract: a scan was observed issuing ten simultaneous no-note skips to
-	// satisfy the finish gate without class coverage. The finish gate only
-	// rejects shortcut-excuse notes, so the requirement is enforced at the
-	// transition itself.
-	if st == TaskSkipped && t.Origin == "auto" && t.VulnClass != "" && notes == "" {
-		return tools.Result{Error: fmt.Sprintf(
-			"task %q (%s) cannot be skipped without a justification note. If the class genuinely does not apply to this target, state the concrete reason (for example: 'no XML input surface exists'); otherwise test it.",
-			id, t.VulnClass)}, nil
+	// ── Typed disposition validation for engine-owned coverage work ──
+	// A coverage-floor task may only be skipped with a TYPED, concrete
+	// justification. A bare no-note skip is the cheapest end-run around the
+	// coverage contract (a scan was observed issuing ten simultaneous no-note
+	// skips to satisfy the finish gate), and vague prose ("probably not
+	// applicable") launders exactly the same shortcut, so both are rejected
+	// at the transition itself. The engine independently verifies
+	// not_applicable claims against the observed surface when it can.
+	if st == TaskSkipped && t.Origin == "auto" && t.VulnClass != "" {
+		if notes == "" {
+			return tools.Result{Error: fmt.Sprintf(
+				"task %q (%s) cannot be skipped without a justification note. Use a typed status (not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded) and state the concrete surface fact (for example: 'no XML input surface exists'); otherwise test it.",
+				id, t.VulnClass)}, nil
+		}
+		if isVagueDispositionReason(notes) {
+			return tools.Result{Error: fmt.Sprintf(
+				"task %q (%s): %q is a shortcut rationale, not a disposition. State the concrete surface fact (what input/protocol/auth surface is absent or blocked), or use a typed blocked_* status with the specific blocker.",
+				id, t.VulnClass, notes)}, nil
+		}
+		if disposition == DispositionNotApplicable {
+			// Engine-verifiable N/A: when the observed surface carries no
+			// applicable endpoint for the class, the N/A is confirmed. When
+			// applicable endpoints DO exist, the note must at least name the
+			// blocking/absent surface element explicitly, and the
+			// applicability disagreement is recorded for the audit trail.
+			applicable := ApplicableEndpointsForClass(a.state, t.VulnClass)
+			if len(applicable) > 0 && len(notes) < 25 {
+				return tools.Result{Error: fmt.Sprintf(
+					"task %q (%s): the observed surface has %d endpoint(s) where %s applies (%s). not_applicable needs a concrete reason naming the absent surface element, or test the class.",
+					id, t.VulnClass, len(applicable), t.VulnClass, truncList(applicable, 3))}, nil
+			}
+		}
+	}
+	// Auth-task notes carry per-dimension typed dispositions
+	// (token_identity: blocked_missing_second_identity — ...).
+	if st == TaskSkipped && t.VulnClass == "auth" && notes != "" {
+		if extras := applyAuthDispositions(a.state, notes); len(extras) > 0 {
+			notes = notes + "\n[engine recorded] " + strings.Join(extras, "; ")
+		}
+	}
+	// Recon-task typed N/A also wires the ReconCoverage dimension dispositions
+	// (the only real mutation path for NAMarked) and per-host discovery
+	// dispositions: notes lines like "service_discovery: reason" or
+	// "host api.example.com: blocked".
+	if st == TaskSkipped && t.VulnClass == "" && notes != "" {
+		if extras := applyReconDispositions(a.state, notes); len(extras) > 0 {
+			notes = notes + "\n[engine recorded] " + strings.Join(extras, "; ")
+		}
 	}
 	t.Status = st
+	t.Disposition = disposition
 	if notes != "" {
 		if t.Notes != "" {
 			t.Notes += " | " + notes
@@ -268,7 +316,11 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		}
 	}
 	pending, active, completed, skipped := plan.Counts()
-	return tools.Result{Output: fmt.Sprintf("Task %q → %s. Plan: %d pending, %d active, %d completed, %d skipped (%d%% executed; skips are not executed coverage).", id, st, pending, active, completed, skipped, plan.ProgressPct())}, nil
+	label := string(st)
+	if disposition != "" {
+		label += " (" + disposition + ")"
+	}
+	return tools.Result{Output: fmt.Sprintf("Task %q → %s. Plan: %d pending, %d active, %d completed, %d skipped (%d%% executed; skips are not executed coverage).", id, label, pending, active, completed, skipped, plan.ProgressPct())}, nil
 }
 
 // inferPlanTaskID picks the task an update_plan call with no task_id most likely

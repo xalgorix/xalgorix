@@ -61,6 +61,51 @@ type Task struct {
 	DependsOn []string   `json:"depends_on"`       // task IDs that must complete first
 	Notes     string     `json:"notes,omitempty"`  // free-form rationale / finding refs
 	Origin    string     `json:"origin,omitempty"` // "auto" (engine-generated) or "llm" (model-built)
+	// Disposition is the TYPED terminal reason when a task does not complete:
+	// not_applicable, blocked_missing_auth, blocked_missing_second_identity,
+	// blocked_unreachable, blocked_policy, exhausted, superseded — or "" when
+	// the task completed (or was skipped legacy-style before typed
+	// dispositions existed). Skipped-without-disposition remains readable for
+	// old persisted plans.
+	Disposition string `json:"disposition,omitempty"`
+}
+
+// Typed disposition values (Part 13). All map onto TaskSkipped for plan
+// counting — they are terminal "not executed" states, never completed
+// coverage — but each carries an explicit, auditable reason category so vague
+// prose cannot launder work away.
+const (
+	DispositionNotApplicable          = "not_applicable"
+	DispositionBlockedMissingAuth     = "blocked_missing_auth"
+	DispositionBlockedMissingSecondID = "blocked_missing_second_identity"
+	DispositionBlockedUnreachable     = "blocked_unreachable"
+	DispositionBlockedPolicy          = "blocked_policy"
+	DispositionExhausted              = "exhausted"
+	DispositionSuperseded             = "superseded"
+)
+
+// vagueDispositionReasons are the shortcut rationalizations that cannot clear
+// an engine-owned coverage task. The model must state a concrete surface fact
+// or a typed blocked reason instead.
+var vagueDispositionReasons = []string{
+	"likely not vulnerable",
+	"probably not applicable",
+	"probably not relevant",
+	"nothing interesting",
+	"nothing found",
+	"no obvious",
+	"already found another bug",
+	"one finding is enough",
+	"already achieved",
+	"not worth",
+	"low value",
+	"low priority",
+	"out of time",
+	"no time to",
+	"moving on",
+	"skipping for now",
+	"seems fine",
+	"looks safe",
 }
 
 // Plan is the ordered task graph for one scan.
@@ -357,6 +402,19 @@ func endpointTestedForClass(state *ScanState, endpoint, class string) bool {
 			}
 		}
 	}
+	// Verifier-attributed scan-level evidence (Part 20): a deterministic
+	// verifier that actually executed this (endpoint, class) pair — from ANY
+	// agent, root or specialist — is trustworthy coverage. The coordinator
+	// is not forced to repeat the probe; at the same time, raw request-level
+	// child probes remain invisible here, so one shallow request still
+	// cannot close a class.
+	if shared := sharedCoverageForState(state); shared != nil {
+		for _, alias := range aliases {
+			if shared.HasVerified(alias, class) {
+				return true
+			}
+		}
+	}
 	if hasEndpointMatrixEvidence {
 		return false
 	}
@@ -643,6 +701,23 @@ func defaultVulnClasses(detectedTechs map[string]bool) []string {
 	return classes
 }
 
+// isVagueDispositionReason reports whether a skip/disposition note is a
+// shortcut rationalization rather than a concrete surface fact. Used by both
+// the update_plan transition guard and the finish gate so the model cannot
+// clear engine-owned work with prose like "probably not applicable".
+func isVagueDispositionReason(note string) bool {
+	note = strings.ToLower(strings.TrimSpace(note))
+	if note == "" {
+		return true
+	}
+	for _, vague := range vagueDispositionReasons {
+		if strings.Contains(note, vague) {
+			return true
+		}
+	}
+	return false
+}
+
 // classPhase maps a vuln class to its methodology phase.
 func classPhase(class string) int {
 	switch class {
@@ -677,6 +752,18 @@ func truncList(items []string, n int) string {
 	return strings.Join(items[:n], ", ") + fmt.Sprintf(" … +%d more", len(items)-n)
 }
 
+// planBriefSkillsState is the optional state FormatPlan consults to avoid
+// recommending an already-loaded skill. agent.go sets it once; nil disables
+// the loaded-skill check (recommendations then always show).
+var planBriefSkillsState *ScanState
+
+// FormatPlanState is FormatPlan with the ScanState for skill-aware hints.
+func FormatPlanState(state *ScanState, p *Plan, gaps []CoverageGap) string {
+	planBriefSkillsState = state
+	defer func() { planBriefSkillsState = nil }()
+	return FormatPlan(p, gaps)
+}
+
 // FormatPlan renders the plan as a compact, model-facing brief: progress,
 // the next ready tasks, and any coverage gaps. Used as the per-iteration
 // "what to work on now" injection.
@@ -699,6 +786,16 @@ func FormatPlan(p *Plan, gaps []CoverageGap) string {
 			}
 			if t.Notes != "" {
 				sb.WriteString(fmt.Sprintf("      %s\n", t.Notes))
+			}
+			// Task activation loads its methodology (Part 18): when the
+			// next ready task's class resolves to a skill that has not been
+			// loaded yet, the brief names it — the model no longer has to
+			// remember the catalog, and never loads more than the current
+			// lane's 1-3 skills.
+			if t.VulnClass != "" {
+				if skill, ok := VulnClassSkill(t.VulnClass); ok && skill != "" && !skillCovered(planBriefSkillsState, skill) {
+					sb.WriteString(fmt.Sprintf("      methodology: read_skill(name=%q) before testing %s\n", skill, t.VulnClass))
+				}
 			}
 		}
 	} else if p.RemainingCount() == 0 {

@@ -323,6 +323,29 @@ func (ls *LedgerStore) SetStatus(hypID string, status HypothesisStatus, nextActi
 	return true
 }
 
+// MarkAssigned records lane ownership WITHOUT claiming: the hypothesis stays
+// queued (still schedulable by anyone) but carries the assigned lane so a
+// specialist's finish gate can see assigned-but-never-claimed work, and the
+// coordinator can audit lane coverage. Used by the engine's specialist-wave
+// lane seeding; the owning agent still claims via Claim/Assign when it starts
+// the work. Returns false if the hypothesis does not exist.
+func (ls *LedgerStore) MarkAssigned(hypID, agentID string) bool {
+	now := time.Now().UTC()
+	ls.mu.Lock()
+	h := ls.hyps[hypID]
+	if h == nil {
+		ls.mu.Unlock()
+		return false
+	}
+	h.AssignedTo = truncate(strings.TrimSpace(agentID), maxHypothesisFieldLen)
+	h.UpdatedAt = now
+	data, path := ls.marshalLocked()
+	ls.mu.Unlock()
+
+	ls.writeFile(data, path)
+	return true
+}
+
 // Assign records the owning agent/delegation ID and moves a queued hypothesis
 // into "testing". Returns false if the hypothesis does not exist.
 func (ls *LedgerStore) Assign(hypID, agentID string) bool {

@@ -156,9 +156,21 @@ func TestWorkTracker_AccessControlEndpoints(t *testing.T) {
 		t.Errorf("Expected 1 access control endpoint, got %d", len(state.AccessControlEndpoints))
 	}
 
+	// Part 17: a bare GET of /admin with an X-Forwarded-For header is a
+	// normal request, not authorization coverage — it must NOT count.
 	hookWorkTracker(state, map[string]string{
 		"tool_name": "terminal_execute",
 		"command":   `curl -H "x-forwarded-for: 127.0.0.1" https://target.com/admin/dashboard`,
+	})
+	if len(state.AccessControlEndpoints) != 1 {
+		t.Errorf("URL-only admin request must not count as access-control coverage, got %d", len(state.AccessControlEndpoints))
+	}
+
+	// A genuine boundary-crossing probe (method swap on the admin surface)
+	// does count.
+	hookWorkTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   `curl -X PUT -d "role=admin" https://target.com/admin/dashboard`,
 	})
 	if len(state.AccessControlEndpoints) != 2 {
 		t.Errorf("Expected 2 access control endpoints, got %d", len(state.AccessControlEndpoints))

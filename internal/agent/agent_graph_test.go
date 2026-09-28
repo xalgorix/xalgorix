@@ -126,6 +126,9 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 	state.ReconCoverage.TechFingerprinted = true
 	state.ReconCoverage.Crawled = true
 	state.ReconCoverage.ContentDiscoveredHosts["example.test"] = true
+	// Applicability-informed dimension: the /api/ inventory means the wave
+	// waits for API-surface discovery evidence (or a typed N/A disposition).
+	state.ReconCoverage.APISurfaceDiscovered = true
 	state.Plan = AutoPlan([]string{"/api/users"}, nil) // stale: built from the seeded surface only
 	state.DiscoveredEndpoints = []string{"/api/users", "/admin/export", "/search"}
 	state.PlanBuilt = true

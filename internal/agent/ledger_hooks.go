@@ -644,7 +644,11 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 	}
 	unreported := provenUnreportedHypothesesForOwner(l, owner)
 	inProgress := testingHypothesesForOwner(l, owner)
-	if len(unreported) == 0 && len(inProgress) == 0 {
+	// Lane completion (Part 15): a specialist's lane is exhausted only when
+	// its ASSIGNED work is settled too. Pre-assigned hypotheses still queued
+	// mean the lane was never worked, not that it is empty.
+	unclaimed := assignedUnclaimedHypothesesForOwner(l, owner)
+	if len(unreported) == 0 && len(inProgress) == 0 && len(unclaimed) == 0 {
 		return HookResult{}
 	}
 	var reasons []string
@@ -654,11 +658,32 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 	if len(inProgress) > 0 {
 		reasons = append(reasons, "claimed but not closed: "+strings.Join(inProgress, ", "))
 	}
+	if len(unclaimed) > 0 {
+		reasons = append(reasons, "lane-assigned but never claimed: "+strings.Join(unclaimed, ", "))
+	}
 	return HookResult{
 		Block: true,
 		BlockReason: "⚠️ LEDGER WORK INCOMPLETE — " + strings.Join(reasons, "; ") +
-			". File and link every proven finding; close every testing hypothesis as proven or rejected with evidence. Then continue through the remaining assigned lane rather than stopping after the first bug.",
+			". File and link every proven finding; close every testing hypothesis as proven or rejected with evidence; claim and settle every lane-assigned hypothesis (or hand it back with update_hypothesis). Then continue through the remaining assigned lane rather than stopping after the first bug.",
 	}
+}
+
+// assignedUnclaimedHypothesesForOwner returns queued hypotheses soft-assigned
+// to an agent's lane that it never claimed. An empty owner (root coordinator)
+// matches nothing: the root is responsible for the whole ledger, not a lane.
+func assignedUnclaimedHypothesesForOwner(l *scanctx.LedgerStore, owner string) []string {
+	owner = strings.TrimSpace(owner)
+	if l == nil || owner == "" {
+		return nil
+	}
+	var out []string
+	for _, h := range l.All() {
+		if h.Status == scanctx.HypothesisQueued && strings.TrimSpace(h.AssignedTo) == owner {
+			out = append(out, h.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // testingHypothesesForOwner returns claimed hypotheses that an agent has not

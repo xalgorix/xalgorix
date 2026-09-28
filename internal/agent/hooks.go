@@ -83,7 +83,8 @@ type ReconCoverage struct {
 	// HistoricalChecked: historical URLs examined (wayback/gau/archive).
 	HistoricalChecked bool
 	// NAMarked: dimensions the model has justified as not applicable via
-	// update_plan skip notes or recon N/A markers.
+	// update_plan typed dispositions (the real mutation path is
+	// MarkReconDimensionNA / applyReconDispositions in recon_coverage.go).
 	NAMarked map[string]bool
 }
 
@@ -133,6 +134,11 @@ type ScanState struct {
 	// misread as "not deep" and silently disabled deep-mode requirements for
 	// exactly the scans that ran every phase.
 	ScanDepth string
+	// CompletionStatus is the honest terminal state computed when the finish
+	// gate finally allows the scan to end: "completed",
+	// "completed_with_blocked_work", or "incomplete". Finish-gate exhaustion
+	// can no longer masquerade as a successful assessment.
+	CompletionStatus string
 
 	// Coverage counters — track UNIQUE endpoints per test category.
 	// These replace the old boolean flags (InjectionTested, etc.) which
@@ -272,6 +278,15 @@ type ScanState struct {
 	ObservedEndpointMethods map[string]string
 	EndpointContentTypes    map[string]string
 	SeededSurface           []SeededSurfaceEndpoint
+	ReconHostDispositions   map[string]string
+	// ── Auth coverage dimensions (auth_coverage.go) ──
+	// AuthCoverage maps each applicable auth dimension to its state:
+	// "" (pending), "complete" (engine-detected evidence), "not_applicable",
+	// or "blocked" (typed dispositions). Bearer/CookieAuthObserved activate
+	// the token/session dimension families.
+	AuthCoverage       map[string]string
+	BearerAuthObserved bool
+	CookieAuthObserved bool
 
 	// New enrichment hooks
 	WAFDetected          bool
@@ -329,6 +344,8 @@ func NewScanState() *ScanState {
 		SkillSuggestionsSent:      make(map[string]bool),
 		ObservedEndpointMethods:   make(map[string]string),
 		EndpointContentTypes:      make(map[string]string),
+		ReconHostDispositions:     make(map[string]string),
+		AuthCoverage:              make(map[string]string),
 	}
 }
 
@@ -539,6 +556,8 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolExecute, hookWorkTracker)
 	reg.Register(OnStuckCheck, hookStuckNudge)
 	reg.Register(OnToolResult, hookSkillLoadTracker)
+	reg.Register(OnToolResult, hookAuthCoverageTracker)
+	reg.Register(OnToolResult, hookVerifierEvidenceBridge)
 	reg.Register(OnToolResult, hookWAFDetector)
 	reg.Register(OnToolResult, hookRedirectDetector)
 	reg.Register(OnToolResult, hookTargetHealthDetector)
@@ -1180,7 +1199,10 @@ func detectedVulnClasses(text string) []string {
 	if containsSSRFIndicator(text) {
 		classes = append(classes, "ssrf")
 	}
-	if strings.Contains(text, "<!doctype") || strings.Contains(text, "<!entity") ||
+	// XXE requires an actual entity/doctype-injection attempt: a harmless
+	// XML request carrying a plain DOCTYPE is not XXE coverage.
+	if strings.Contains(text, "<!entity") ||
+		strings.Contains(text, "<!doctype test [") ||
 		strings.Contains(text, "xxe") {
 		classes = append(classes, "xxe")
 	}
@@ -1213,14 +1235,28 @@ func containsSSRFIndicator(text string) bool {
 
 func containsAccessControlIndicator(text string) bool {
 	text = strings.ToLower(text)
-	return strings.Contains(text, "/user/1") || strings.Contains(text, "/user/2") ||
+	// URL-only tokens ("/admin" in a normal GET) and parameter names alone
+	// ("role=" in a request) are NOT access-control coverage — visiting an
+	// admin URL proves nothing about authorization. Coverage needs a
+	// boundary-crossing signal: a method override, a rewrite header, a
+	// state-changing method swap, or the classic cross-object probes
+	// (/user/1 vs /user/2, id substitution).
+	if strings.Contains(text, "/user/1") || strings.Contains(text, "/user/2") ||
 		strings.Contains(text, "id=1") || strings.Contains(text, "id=2") ||
-		strings.Contains(text, "role=admin") || strings.Contains(text, "isadmin") ||
-		strings.Contains(text, "x-forwarded-for") || strings.Contains(text, "x-original-url") ||
+		strings.Contains(text, "x-original-url") ||
 		strings.Contains(text, "x-http-method-override") || strings.Contains(text, "x-rewrite-url") ||
 		strings.Contains(text, "-x options") || strings.Contains(text, "-x put") ||
-		strings.Contains(text, "-x patch") || strings.Contains(text, "-x delete") ||
-		strings.Contains(text, "/admin")
+		strings.Contains(text, "-x patch") || strings.Contains(text, "-x delete") {
+		return true
+	}
+	// role-parameter TAMPERING (sending role=admin/isadmin=true as input) is
+	// a genuine attempt; merely naming the role in a normal request is not.
+	for _, marker := range []string{"role=admin", "isadmin=true", "is_admin=true", "admin=true", "role=user", "privilege=admin"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // markEndpointClassCoverage updates both the exact matrix and the existing
@@ -1394,6 +1430,71 @@ func recordVerifierCoverage(state *ScanState, endpoint, toolName string, args ma
 		class = normalizeCoverageClass(args["vuln_class"])
 	}
 	markEndpointClassCoverage(state, endpoint, class)
+}
+
+// verifierClassForTool maps a deterministic verifier tool to its canonical
+// class using the same routing as recordVerifierCoverage.
+func verifierClassForTool(toolName string, args map[string]string) string {
+	switch toolName {
+	case "verify_sqli":
+		return "sqli"
+	case "verify_ssti":
+		return "ssti"
+	case "verify_path_traversal":
+		return "path_traversal"
+	case "verify_xss":
+		return "xss"
+	case "verify_xxe":
+		return "xxe"
+	case "verify_csrf":
+		return "csrf"
+	case "authz_matrix":
+		return "idor"
+	case "verify_oob":
+		if c := normalizeCoverageClass(args["vuln_class"]); c != "" {
+			return c
+		}
+		return normalizeCoverageClass(args["class"])
+	case "verify_timing":
+		return normalizeCoverageClass(args["vuln_class"])
+	}
+	return ""
+}
+
+// hookVerifierEvidenceBridge is the specialist-to-global coverage channel
+// (Part 20). When a deterministic verifier actually EXECUTES against an
+// endpoint — no error, real output — the (endpoint, class) pair is recorded
+// in the shared verifier-attributed tier, whichever agent ran it. The
+// coordinator can then rely on that pair without re-running the probe
+// itself (no duplicated negative work), while raw request-level child probes
+// still never cross agents: one shallow probe cannot close a class.
+func hookVerifierEvidenceBridge(state *ScanState, args map[string]string) HookResult {
+	if state == nil || state.ScanContextID == "" {
+		return HookResult{}
+	}
+	toolName := args["tool_name"]
+	class := verifierClassForTool(toolName, args)
+	if class == "" {
+		return HookResult{}
+	}
+	if args["error"] != "" || strings.TrimSpace(args["output"]) == "" {
+		return HookResult{} // failed/tool-errored verification is not evidence
+	}
+	endpoint := endpointFromToolArgs(args)
+	if endpoint == "" {
+		endpoint = extractEndpointFromCmd(joinedToolArgs(args))
+	}
+	if endpoint == "" {
+		return HookResult{}
+	}
+	shared := sharedCoverageForState(state)
+	if shared == nil {
+		return HookResult{}
+	}
+	for _, alias := range endpointCoverageAliases(endpoint) {
+		shared.MarkVerified(alias, class)
+	}
+	return HookResult{}
 }
 
 func normalizeCoverageClass(class string) string {
@@ -3097,7 +3198,7 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// gate) to avoid spamming the context after completion.
 	if state.Plan != nil && state.Plan.RemainingCount() > 0 {
 		gaps := CoverageGaps(state, state.DiscoveredEndpoints)
-		brief := FormatPlan(state.Plan, gaps)
+		brief := FormatPlanState(state, state.Plan, gaps)
 		if brief != "" {
 			if brief == state.LastPlanBrief {
 				return HookResult{}
@@ -3165,9 +3266,24 @@ func reconcilePlan(state *ScanState) {
 				t.Status = TaskCompleted
 			}
 		case "auth-session":
-			// Auth testing is hard to detect precisely; treat as done once the
-			// agent has exercised any auth/access-control endpoint.
-			if state.AccessControlTested && len(state.AccessControlEndpoints) > 0 {
+			// Auth/session completion is DIMENSION-DRIVEN (auth_coverage.go):
+			// generic access-control activity (a request to /admin, an
+			// X-Original-URL probe) must never complete authentication work.
+			// A target with no auth surface at all is auto-dispositioned
+			// not_applicable instead of silently blocking.
+			if !authSurfaceExists(state) && !state.AuthContextAvailable &&
+				// Only after recon actually surfaced a surface: a black-box
+				// target whose inventory is still empty must not get a premature
+				// auth N/A.
+				state.EndpointInventorySaved && len(state.DiscoveredEndpoints) > 0 {
+				t.Status = TaskSkipped
+				t.Disposition = DispositionNotApplicable
+				if t.Notes == "" {
+					t.Notes = "engine: no authentication surface discovered (no auth routes in inventory, no ingested credentials)"
+				}
+				continue
+			}
+			if authTaskComplete(state) {
 				t.Status = TaskCompleted
 			}
 		case "verify", "report":
