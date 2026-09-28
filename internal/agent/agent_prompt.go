@@ -1723,6 +1723,21 @@ The delegated task is your complete mission. Do not widen into the root's full m
 	if strings.Contains(lower, "business logic") {
 		skillHints = append(skillHints, "read_skill(name=\"business-logic\")")
 	}
+	if strings.Contains(lower, "workflow bypass") || strings.Contains(lower, "step skipping") || strings.Contains(lower, "state machine") {
+		skillHints = append(skillHints, "read_skill(name=\"workflow-state-machine-testing\")")
+	}
+	if strings.Contains(lower, "type confusion") || strings.Contains(lower, "input boundary") || strings.Contains(lower, "parameter tampering") {
+		skillHints = append(skillHints, "read_skill(name=\"input-boundary-testing\")")
+	}
+	if strings.Contains(lower, "tenant isolation") || strings.Contains(lower, "cross-tenant") {
+		skillHints = append(skillHints, "read_skill(name=\"authorization-testing\")")
+	}
+	if strings.Contains(lower, "archive extraction") || strings.Contains(lower, "zip slip") || strings.Contains(lower, "file pipeline") {
+		skillHints = append(skillHints, "read_skill(name=\"file-processing-pipeline-testing\")")
+	}
+	if strings.Contains(lower, "control differential") || strings.Contains(lower, "layer differential") {
+		skillHints = append(skillHints, "read_skill(name=\"security-control-differential-testing\")")
+	}
 	if strings.Contains(lower, "2fa") || strings.Contains(lower, "mfa") || strings.Contains(lower, "two-factor") || strings.Contains(lower, "multi-factor") {
 		skillHints = append(skillHints, "read_skill(name=\"2fa-mfa-bypass\")")
 	}

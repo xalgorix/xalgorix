@@ -237,7 +237,7 @@ func TestResolveAlias_SystemPromptHints(t *testing.T) {
 		{"insecure-file-uploads", "exploiting-file-upload-vulnerabilities"},
 		{"oauth2-attacks", "exploiting-oauth-misconfiguration"},
 		{"path-traversal-lfi-rfi", "performing-directory-traversal-testing"},
-		{"race-conditions", "exploiting-race-condition-vulnerabilities"},
+		{"race-conditions", "race-condition-testing"},
 		{"web-llm-attacks", "testing-llm-prompt-injection-and-jailbreaks"},
 		{"websocket-hijacking", "exploiting-websocket-vulnerabilities"},
 		{"zero-day-hunting", "performing-zero-day-vulnerability-discovery"},
@@ -733,5 +733,248 @@ Body.
 	}
 	if !strings.Contains(res.Output, "test-cloud-skill") {
 		t.Fatalf("expected skill with provider list metadata to be indexed and findable, got:\n%s", res.Output)
+	}
+}
+
+// TestSearchSkills_ApplicationSecurityDiscovery verifies each new
+// application-security skill is discoverable by the concepts it covers.
+func TestSearchSkills_ApplicationSecurityDiscovery(t *testing.T) {
+	subFS, err := fs.Sub(embeddedSkills, "data")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	search := makeSearchSkills(subFS)
+
+	cases := []struct {
+		query     string
+		wantSkill string
+	}{
+		{"application attack surface model roles workflows states", "application-attack-surface-modeling"},
+		{"session fixation logout invalidation replay", "authentication-session-testing"},
+		{"mfa bypass password reset account recovery", "authentication-session-testing"},
+		{"horizontal vertical tenant authorization boundary", "authorization-testing"},
+		{"ownership transition revoked share access", "authorization-testing"},
+		{"coupon quantity price business rules tampering", "business-logic-testing"},
+		{"referral credit limits invariant violation", "business-logic-testing"},
+		{"workflow step skipping state machine replay", "workflow-state-machine-testing"},
+		{"cross-account token reuse stale state", "workflow-state-machine-testing"},
+		{"type confusion mass assignment parameter domain", "input-boundary-testing"},
+		{"duplicate parameters encoding differential parser", "input-boundary-testing"},
+		{"double spend concurrent coupon race", "race-condition-testing"},
+		{"toctou check then act limit overrun", "race-condition-testing"},
+		{"file upload archive extraction transformation pipeline", "file-processing-pipeline-testing"},
+		{"polyglot content type mismatch serve stage", "file-processing-pipeline-testing"},
+		{"waf gateway path normalization differential", "security-control-differential-testing"},
+		{"method override proxy layer interpretation", "security-control-differential-testing"},
+		{"response over fetching export serializer exposure", "application-data-exposure-testing"},
+		{"error response stack trace data leak", "application-data-exposure-testing"},
+		{"source code sink trace reachability whitebox", "source-assisted-analysis"},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			res, err := search(map[string]string{"query": c.query})
+			if err != nil {
+				t.Fatalf("search error: %v", err)
+			}
+			if !strings.Contains(res.Output, c.wantSkill) {
+				t.Fatalf("query %q: expected %q in results, got:\n%s", c.query, c.wantSkill, res.Output)
+			}
+		})
+	}
+}
+
+// TestSearchSkills_ApplicationSecurityRanking verifies black-box application
+// skills outrank defensive implementation skills for pentest queries, and
+// that the relocated DevSecOps/RASP/fuzzing skills no longer pollute
+// application-security search results.
+func TestSearchSkills_ApplicationSecurityRanking(t *testing.T) {
+	subFS, err := fs.Sub(embeddedSkills, "data")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	search := makeSearchSkills(subFS)
+
+	cases := []struct {
+		query    string
+		wantTop  string
+		wantGone string
+	}{
+		{"application authentication testing session", "authentication-session-testing", "implementing-runtime-application-self-protection"},
+		{"business logic workflow testing", "business-logic-testing", "implementing-devsecops-security-scanning"},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			res, err := search(map[string]string{"query": c.query})
+			if err != nil {
+				t.Fatalf("search error: %v", err)
+			}
+			lines := strings.Split(res.Output, "\n")
+			// First result line starts with "• ".
+			var first string
+			for _, l := range lines {
+				if strings.HasPrefix(l, "• ") {
+					first = strings.TrimSpace(strings.TrimPrefix(l, "• "))
+					break
+				}
+			}
+			if first == "" || !strings.HasPrefix(first, c.wantTop) {
+				t.Fatalf("query %q: expected first result %q, got:\n%s", c.query, c.wantTop, res.Output)
+			}
+			if strings.Contains(res.Output, c.wantGone) {
+				t.Fatalf("query %q: relocated skill %q should not rank in pentest results, got:\n%s", c.query, c.wantGone, res.Output)
+			}
+		})
+	}
+}
+
+// TestSearchSkills_MovedSkillsInNewCategories verifies the four relocated
+// skills remain searchable within their new homes.
+func TestSearchSkills_MovedSkillsInNewCategories(t *testing.T) {
+	subFS, err := fs.Sub(embeddedSkills, "data")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	search := makeSearchSkills(subFS)
+
+	cases := []struct {
+		query    string
+		category string
+		want     string
+	}{
+		{"devsecops pipeline sast dast security gate", "devsecops", "implementing-devsecops-security-scanning"},
+		{"rasp runtime protection block mode", "devsecops", "implementing-runtime-application-self-protection"},
+		{"coverage guided binary fuzzing crash triage afl", "binary-exploitation", "performing-fuzzing-with-aflplusplus"},
+		{"dependency confusion typosquat simulation pip-audit", "supply-chain-security", "performing-supply-chain-attack-simulation"},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			res, err := search(map[string]string{"query": c.query, "category": c.category})
+			if err != nil {
+				t.Fatalf("search error: %v", err)
+			}
+			if !strings.Contains(res.Output, c.want) {
+				t.Fatalf("query %q in %q: expected %q, got:\n%s", c.query, c.category, c.want, res.Output)
+			}
+		})
+	}
+}
+
+// TestApplicationSecurityCategoryContents verifies the category now consists
+// of the black-box application reasoning skills only - no DevSecOps, RASP,
+// fuzzing, or supply-chain implementation skills remain.
+func TestApplicationSecurityCategoryContents(t *testing.T) {
+	subFS, err := fs.Sub(embeddedSkills, "data")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	list := makeListSkills(subFS)
+	res, err := list(map[string]string{"category": "application-security"})
+	if err != nil {
+		t.Fatalf("list error: %v", err)
+	}
+	for _, banned := range []string{
+		"implementing-devsecops-security-scanning",
+		"implementing-runtime-application-self-protection",
+		"performing-fuzzing-with-aflplusplus",
+		"performing-supply-chain-attack-simulation",
+	} {
+		if strings.Contains(res.Output, banned) {
+			t.Fatalf("misplaced skill still in application-security: %s", banned)
+		}
+	}
+	for _, want := range []string{
+		"application-attack-surface-modeling",
+		"authentication-session-testing",
+		"authorization-testing",
+		"business-logic-testing",
+		"workflow-state-machine-testing",
+		"input-boundary-testing",
+		"race-condition-testing",
+		"file-processing-pipeline-testing",
+		"security-control-differential-testing",
+		"application-data-exposure-testing",
+		"source-assisted-analysis",
+	} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("expected application-security skill %q in category listing, got:\n%s", want, res.Output)
+		}
+	}
+}
+
+// TestResolveAlias_ApplicationSecurity verifies remapped and new aliases
+// resolve to the rebuilt skills.
+func TestResolveAlias_ApplicationSecurity(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"broken-access-control", "authorization-testing"},
+		{"bac", "authorization-testing"},
+		{"business-logic", "business-logic-testing"},
+		{"session", "authentication-session-testing"},
+		{"session-management", "authentication-session-testing"},
+		{"session-fixation", "authentication-session-testing"},
+		{"race-condition", "race-condition-testing"},
+		{"race-conditions", "race-condition-testing"},
+		{"authorization", "authorization-testing"},
+		{"tenant-isolation", "authorization-testing"},
+		{"state-machine", "workflow-state-machine-testing"},
+		{"type-confusion", "input-boundary-testing"},
+		{"double-spend", "race-condition-testing"},
+		{"toctou", "race-condition-testing"},
+		{"zip-slip", "file-processing-pipeline-testing"},
+		{"control-differential", "security-control-differential-testing"},
+		{"over-fetching", "application-data-exposure-testing"},
+		{"whitebox", "source-assisted-analysis"},
+		{"source-assisted", "source-assisted-analysis"},
+		{"fuzzing-with-aflplusplus", "performing-fuzzing-with-aflplusplus"},
+		{"runtime-application-self-protection", "implementing-runtime-application-self-protection"},
+		{"devsecops-security-scanning", "implementing-devsecops-security-scanning"},
+		{"supply-chain-attack-simulation", "performing-supply-chain-attack-simulation"},
+	}
+	for _, tc := range cases {
+		if got := resolveAlias(tc.in); got != tc.want {
+			t.Errorf("resolveAlias(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestApplicationSecuritySkillMetadata verifies every rebuilt skill carries
+// offensive intent metadata and that the source-assisted skill is tagged
+// whitebox while remaining blackbox-first in positioning.
+func TestApplicationSecuritySkillMetadata(t *testing.T) {
+	dir := "data/application-security"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	offensive := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name(), "SKILL.md"))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		content := string(raw)
+		if !strings.Contains(content, "intent: offensive") {
+			t.Errorf("%s: missing 'intent: offensive' frontmatter", e.Name())
+		} else {
+			offensive++
+		}
+	}
+	if offensive != 11 {
+		t.Errorf("expected 11 offensive application-security skills, got %d", offensive)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "source-assisted-analysis", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read source-assisted-analysis: %v", err)
+	}
+	src := string(raw)
+	for _, want := range []string{"whitebox: true", "blackbox: false", "phase: source-analysis"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("source-assisted-analysis: missing frontmatter %q", want)
+		}
+	}
+	if !strings.Contains(src, "BLACK BOX") {
+		t.Errorf("source-assisted-analysis: missing black-box-first positioning")
 	}
 }

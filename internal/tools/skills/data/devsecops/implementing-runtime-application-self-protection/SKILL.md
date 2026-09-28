@@ -1,4 +1,5 @@
 ---
+intent: defensive
 name: implementing-runtime-application-self-protection
 description: Deploy Runtime Application Self-Protection (RASP) agents to detect and block attacks from within application
   runtime, covering OpenRASP integration, attack pattern detection, and security policy configuration for Java and Python
@@ -32,7 +33,7 @@ nist_csf:
 
 ## Overview
 
-Runtime Application Self-Protection (RASP) instruments application code at runtime to detect and block attacks by examining actual execution context rather than relying solely on network traffic patterns. Unlike WAFs that inspect HTTP requests externally, RASP agents intercept dangerous operations (SQL queries, file operations, command execution, deserialization) at the function level inside the application, achieving near-zero false positives. This skill covers deploying OpenRASP for Java applications, configuring detection policies for OWASP Top 10 attacks, tuning alerting thresholds, and integrating RASP telemetry with SIEM platforms.
+Runtime Application Self-Protection (RASP) instruments application code at runtime to detect and block attacks by examining actual execution context rather than relying solely on network traffic patterns. Unlike WAFs that inspect HTTP requests externally, RASP agents intercept dangerous operations (SQL queries, file operations, command execution, deserialization) at the function level inside the application. Function-level context sharply reduces false positives relative to network-layer WAFs, but it does not eliminate them: blind spots remain for logic-layer attacks, un-instrumented code paths, and exotic parsers. Treat any RASP accuracy claim (including from vendors) as unverified until tested against your own traffic. This skill covers deploying OpenRASP for Java applications, configuring detection policies for OWASP Top 10 attacks, tuning alerting thresholds, and integrating RASP telemetry with SIEM platforms.
 
 
 ## When to Use
@@ -56,7 +57,7 @@ RASP that is installed but left in monitor mode gives a false sense of protectio
 ## Prerequisites
 
 - Java 8+ application server (Tomcat, Spring Boot, or JBoss) or Python Flask/Django application
-- OpenRASP agent package (rasp-java or equivalent)
+- OpenRASP agent package (rasp-java) — note: the upstream OpenRASP project is archived and no longer actively maintained; pin the agent version and treat rule updates as frozen. Commercial RASP/endpoint agents follow the same deployment pattern
 - OpenRASP management console for centralized policy management
 - SIEM integration endpoint (Splunk HEC, Elasticsearch, or syslog)
 - Application staging environment for RASP testing before production

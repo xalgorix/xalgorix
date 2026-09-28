@@ -1,4 +1,5 @@
 ---
+intent: defensive
 name: implementing-devsecops-security-scanning
 description: 'Integrates Static Application Security Testing (SAST), Dynamic Application Security Testing (DAST), and Software
   Composition Analysis (SCA) into CI/CD pipelines using open-source tools. Covers Semgrep for SAST, Trivy for SCA and container
