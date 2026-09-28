@@ -298,8 +298,16 @@ func TestReconcilePlan(t *testing.T) {
 	state.DirBustingDone = true
 
 	reconcilePlan(state)
+	if state.Plan.Get("recon").Status == TaskCompleted {
+		t.Error("ReconDone alone must not complete the recon task while comprehensive recon is outstanding")
+	}
+	satisfyComprehensiveRecon(state)
+	// The /api/* inventory carries API signals; a completed API mapping is
+	// part of the comprehensive evidence.
+	state.ReconCoverage.APISurfaceDiscovered = true
+	reconcilePlan(state)
 	if state.Plan.Get("recon").Status != TaskCompleted {
-		t.Error("recon should be completed after ReconDone")
+		t.Error("recon should complete once the comprehensive predicate is satisfied")
 	}
 	if state.Plan.Get("test-sqli").Status == TaskCompleted {
 		t.Error("aggregate SQLi evidence must not complete a grouped endpoint task")
@@ -739,6 +747,7 @@ func TestReconCompleteWithCoverageEvidence(t *testing.T) {
 	s.ReconDone = true
 	s.EndpointInventorySaved = true
 	s.DirBustingDone = true
+	s.DirBustingUsedWordlist = true
 	s.DetectedTechs["flask"] = true
 	s.ReconCoverage.HTTPProbed = true
 	s.ReconCoverage.TechFingerprinted = true
@@ -758,6 +767,7 @@ func TestReconNAExempt(t *testing.T) {
 	s.ReconDone = true
 	s.EndpointInventorySaved = true
 	s.DirBustingDone = true
+	s.DirBustingUsedWordlist = true
 	s.DetectedTechs["static"] = true
 	s.ReconCoverage.HTTPProbed = true
 	s.ReconCoverage.TechFingerprinted = true
@@ -774,40 +784,38 @@ func TestReconNAExempt(t *testing.T) {
 // WorkTracker populates the coverage model from commands.
 func TestReconCoverageFromCommands(t *testing.T) {
 	state := NewScanState()
+	fire := func(command, output string) {
+		hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": command})
+		hookReconResultTracker(state, map[string]string{"tool_name": "terminal_execute", "command": command, "output": output})
+	}
 
 	// HTTP probe
-	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "curl -sk https://example.test/ -o tmp/main.html"})
+	fire("curl -sk https://example.test/ -o tmp/main.html", "<html><body>hello</body></html>")
 	if !state.ReconCoverage.HTTPProbed {
-		t.Fatal("curl should mark HTTPProbed")
+		t.Fatal("curl should mark HTTPProbed after a valid result")
 	}
 
 	// Tech fingerprint
-	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "whatweb https://example.test"})
+	fire("whatweb https://example.test", "https://example.test [200 OK] Title|x")
 	if !state.ReconCoverage.TechFingerprinted {
-		t.Fatal("whatweb should mark TechFingerprinted")
+		t.Fatal("whatweb should mark TechFingerprinted after a valid result")
 	}
 
 	// Crawling
-	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "curl -sk https://example.test/robots.txt -o tmp/robots.txt; cat tmp/robots.txt"})
+	fire("curl -sk https://example.test/robots.txt -o tmp/robots.txt; cat tmp/robots.txt", "User-agent: *\nDisallow: /admin")
 	if !state.ReconCoverage.Crawled {
-		t.Fatal("robots.txt fetch should mark Crawled")
+		t.Fatal("robots.txt fetch should mark Crawled after a valid result")
 	}
 
 	// JS analysis
-	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "curl -sk https://example.test/static/app.js -o tmp/app.js; grep -oP 'api[^\"]+' tmp/app.js"})
+	fire("curl -sk https://example.test/static/app.js -o tmp/app.js; grep -oP 'api[^\"]+' tmp/app.js", `webpackChunk(["app"],{42:function(e,t){fetch("/api/v1/orders")}})`)
 	if !state.ReconCoverage.JSAnalyzed {
-		t.Fatal("JS download should mark JSAnalyzed")
+		t.Fatal("JS download should mark JSAnalyzed after a valid result")
 	}
 
 	// Content discovery per-host
-	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "ffuf -w /usr/share/wordlists/common.txt -u https://example.test/FUZZ -mc 200"})
+	fire("ffuf -w /usr/share/wordlists/common.txt -u https://example.test/FUZZ -mc 200", "Progress: 100/100 :: Status: 404")
 	if !state.ReconCoverage.ContentDiscoveredHosts["example.test"] {
-		t.Fatal("ffuf should mark ContentDiscoveredHosts for the host")
-	}
-
-	// Parameter discovery
-	hookWorkTracker(state, map[string]string{"tool_name": "terminal_execute", "command": "arjun -u https://example.test/search"})
-	if !state.ReconCoverage.ParamDiscovered {
-		t.Fatal("arjun should mark ParamDiscovered")
+		t.Fatal("ffuf should mark ContentDiscoveredHosts for the host after a valid result")
 	}
 }

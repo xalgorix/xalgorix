@@ -424,6 +424,9 @@ func TestHookLedgerFinishGateScopesDelegatedOwnership(t *testing.T) {
 
 func TestHookDelegationCoordinatorFiresOnceWithLedger(t *testing.T) {
 	ctx, state := newTestCtxState(t)
+	// Single-agent mode suppresses every delegation nudge; this test
+	// exercises the ENABLED mode.
+	state.DelegationEnabled = true
 	state.ReconDone = true
 	state.EndpointInventorySaved = true
 	state.Iteration = 6
@@ -450,6 +453,9 @@ func TestHookDelegationCoordinatorFiresOnceWithLedger(t *testing.T) {
 
 func TestHookDelegationCoordinatorWaitsForPlanAndLedger(t *testing.T) {
 	_, state := newTestCtxState(t)
+	// Single-agent mode suppresses every delegation nudge; this test
+	// exercises the ENABLED mode.
+	state.DelegationEnabled = true
 	state.ReconDone = true
 	state.Iteration = 6
 

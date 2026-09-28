@@ -34,6 +34,9 @@ var reconDimensionAliases = map[string]string{
 	"param_discovery":     "parameter_discovery",
 	"input_discovery":     "parameter_discovery",
 	"auth_mapping":        "auth_mapping",
+	"subdomain_discovery": "subdomain_discovery",
+	"subdomains":          "subdomain_discovery",
+	"subdomain_enum":      "subdomain_discovery",
 	"content_discovery":   "content_discovery",
 	"historical":          "historical",
 	"historical_urls":     "historical",
@@ -60,14 +63,15 @@ func MarkReconDimensionNA(state *ScanState, dimension string) bool {
 
 // reconHostDispositionValues are the accepted per-host discovery dispositions.
 var reconHostDispositionValues = map[string]string{
-	"na":                    "not_applicable",
-	"not_applicable":        "not_applicable",
-	"not-applicable":        "not_applicable",
-	"blocked":               "blocked",
-	"unreachable":           "blocked",
-	"equivalent":            "covered_by_equivalent_app",
-	"covered_by_equivalent": "covered_by_equivalent_app",
-	"same_app":              "covered_by_equivalent_app",
+	"na":                        "not_applicable",
+	"not_applicable":            "not_applicable",
+	"not-applicable":            "not_applicable",
+	"blocked":                   "blocked",
+	"unreachable":               "blocked",
+	"equivalent":                "covered_by_equivalent_app",
+	"covered_by_equivalent":     "covered_by_equivalent_app",
+	"covered_by_equivalent_app": "covered_by_equivalent_app",
+	"same_app":                  "covered_by_equivalent_app",
 }
 
 // applyReconDispositions parses typed disposition lines from an update_plan
@@ -142,16 +146,27 @@ func distinctApplicationHosts(state *ScanState) []string {
 	}
 	seen := make(map[string]bool)
 	var hosts []string
-	for _, ep := range state.DiscoveredEndpoints {
-		host := hostOfEndpoint(ep)
+	add := func(host string) {
 		if host == "" || seen[host] {
-			continue
+			return
 		}
 		seen[host] = true
 		hosts = append(hosts, host)
+	}
+	for _, ep := range state.DiscoveredEndpoints {
+		add(hostOfEndpoint(ep))
 		if len(hosts) >= maxReconHostRequirement {
 			break
 		}
+	}
+	// Bare hostnames surfaced by DNS/subdomain/crawl results (they may never
+	// appear as full URLs inside the inventory) still owe content-discovery
+	// dispositions — losing them was silently untested surface.
+	for host := range state.DiscoveredHosts {
+		if len(hosts) >= maxReconHostRequirement {
+			break
+		}
+		add(host)
 	}
 	sort.Strings(hosts)
 	return hosts
@@ -237,14 +252,20 @@ func authSurfaceExists(state *ScanState) bool {
 	return false
 }
 
-// parameterizedSurfaceExists reports observed input-bearing surface: seeded
-// parameters, or any observed state-changing method. When one exists,
-// parameter/input discovery becomes a required recon dimension.
+// parameterizedSurfaceExists reports observed input-bearing surface.
+// Applicability activates from MORE than already-observed state-changing
+// methods: HTML forms, query-string links, seeded parameters (OpenAPI/HAR/
+// Postman, GraphQL variables), and route templates all make input discovery
+// an obligation — a /search route in the inventory owes parameter discovery
+// even before any POST has been seen.
 func parameterizedSurfaceExists(state *ScanState) bool {
 	if state == nil {
 		return false
 	}
 	if state.ReconCoverage.ParamDiscovered {
+		return true
+	}
+	if state.FormsObserved {
 		return true
 	}
 	for _, se := range state.SeededSurface {
@@ -255,6 +276,11 @@ func parameterizedSurfaceExists(state *ScanState) bool {
 	for _, method := range state.ObservedEndpointMethods {
 		switch method {
 		case "POST", "PUT", "PATCH", "DELETE":
+			return true
+		}
+	}
+	for _, ep := range state.DiscoveredEndpoints {
+		if strings.Contains(ep, "?") {
 			return true
 		}
 	}

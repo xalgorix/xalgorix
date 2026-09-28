@@ -448,7 +448,26 @@ This target is a reproducible local fixture, but treat it exactly like a remote 
 		prompt = directive + "\n\n" + prompt
 	}
 
+	// Single-agent mode: the system prompt must not instruct the root to
+	// spawn a wave that the configuration disabled. The root owns the full
+	// methodology; every coverage gate applies unchanged.
+	if !a.delegationEnabled() {
+		prompt = replacePromptSection(prompt,
+			"## Multi-Agent Coordinator (REQUIRED for full assessments)",
+			coordinatorSectionEndMarker(prompt),
+			"## Single-Agent Mode (specialists disabled)\nSpecialist delegation is disabled for this assessment: the configuration intends ONE agent to perform the complete methodology. Do NOT call spawn_agent or create_agent - no specialist wave will run, and none is required. You personally own every phase: complete reconnaissance (crawl, content discovery, JavaScript analysis, API mapping, auth surface mapping, parameter discovery), the full assessment plan, hypothesis testing on every applicable endpoint x class, verification, and reporting. Every coverage gate applies unchanged: comprehensive recon, the structural plan, and the hypothesis ledger are all enforced with zero specialists.")
+	}
+
 	return prompt
+}
+
+// coordinatorSectionEndMarker mirrors applyDelegatedSpecialistPrompt's end
+// marker selection (the skills section header changed across versions).
+func coordinatorSectionEndMarker(prompt string) string {
+	if strings.Contains(prompt, "## Knowledge skills — load selectively") {
+		return "## Knowledge skills — load selectively"
+	}
+	return "## 🧠 Deep Knowledge Skills (CRITICAL — USE THESE!)"
 }
 
 func applyProfessionalAssessmentPrompt(prompt string) string {

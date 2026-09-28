@@ -204,7 +204,7 @@ func TestReconApplicability_SignalDrivenRequirements(t *testing.T) {
 	a := &Agent{state: state}
 	missing := a.reconIncompleteReasons()
 	assertAny(t, missing, "API-surface")
-	assertAny(t, missing, "auth mapping")
+	assertAny(t, missing, "auth surface")
 	assertAny(t, missing, "parameter/input discovery")
 	// Dispositions clear the demands.
 	applyReconDispositions(state, "api_surface: no documentation or introspection surface\nauth_mapping: anonymous-only target\nparameter_discovery: no parameterized endpoints")

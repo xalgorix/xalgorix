@@ -86,6 +86,22 @@ type ReconCoverage struct {
 	// update_plan typed dispositions (the real mutation path is
 	// MarkReconDimensionNA / applyReconDispositions in recon_coverage.go).
 	NAMarked map[string]bool
+	// SubdomainEnumerated: subdomain enumeration produced a VALIDATED
+	// result (subfinder/crt.sh/assetfinder/...). Required only when the
+	// configured scope covers a bare domain or wildcard.
+	SubdomainEnumerated bool
+	// Attempted: dimensions whose command EXECUTED but whose result has not
+	// been validated yet. Attempted is not complete: a command that failed
+	// (missing binary, DNS failure, timeout) never satisfies coverage.
+	Attempted map[string]bool
+	// FailedAttempts counts failed executions per dimension so bounded
+	// retries can guide a typed "blocked" disposition instead of infinite
+	// re-running or silent satisfaction.
+	FailedAttempts map[string]int
+	// ContentDiscoveryAttempts: per-host content-discovery executions whose
+	// result has not been validated yet (the validated set lives in
+	// ContentDiscoveredHosts).
+	ContentDiscoveryAttempts map[string]bool
 }
 
 type ScanState struct {
@@ -134,6 +150,12 @@ type ScanState struct {
 	// misread as "not deep" and silently disabled deep-mode requirements for
 	// exactly the scans that ran every phase.
 	ScanDepth string
+	// DeepReconRequired reports whether the deep-mode recon obligations
+	// (service enumeration, parameter discovery, historical URLs) apply to
+	// THIS scan: depth=deep AND active intensity. Derived once at scan
+	// start; the comprehensive-recon predicate reads this field only, so
+	// deep behavior can never depend on specialist availability.
+	DeepReconRequired bool
 	// CompletionStatus is the honest terminal state computed when the finish
 	// gate finally allows the scan to end: "completed",
 	// "completed_with_blocked_work", or "incomplete". Finish-gate exhaustion
@@ -279,6 +301,17 @@ type ScanState struct {
 	EndpointContentTypes    map[string]string
 	SeededSurface           []SeededSurfaceEndpoint
 	ReconHostDispositions   map[string]string
+	// ScanTargets is the configured assessment scope (the targets given to
+	// Run). It drives scope-aware applicability: a single explicit host does
+	// not owe subdomain enumeration; a bare domain or wildcard does.
+	ScanTargets []string
+	// DiscoveredHosts records bare hostnames surfaced by DNS/subdomain/
+	// crawl results that may never appear as full URLs inside the endpoint
+	// inventory. They still owe content-discovery dispositions.
+	DiscoveredHosts map[string]bool
+	// FormsObserved: HTML form evidence appeared in a tool result, which
+	// activates parameter-discovery applicability.
+	FormsObserved bool
 	// ── Auth coverage dimensions (auth_coverage.go) ──
 	// AuthCoverage maps each applicable auth dimension to its state:
 	// "" (pending), "complete" (engine-detected evidence), "not_applicable",
@@ -306,6 +339,8 @@ type ScanState struct {
 	// recommendation for a different detected technology.
 	SkillSuggestionsSent        map[string]bool
 	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
+	DelegationEnabled           bool            // any specialist lane may run this scan; false = intentional single-agent mode (no waves, nudges, or reminders)
+	SingleAgentNoted            bool            // the one-time single-agent-mode notice was emitted
 	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
 	DelegationDeferReason       string          // last specialist-wave defer reason, for change-triggered diagnostics
 	ReconLaneLaunched           bool            // engine launched the early recon-discovery lane
@@ -316,6 +351,7 @@ type ScanState struct {
 	DelegationReminders         int             // bounded reminders after ignored/malformed spawn calls
 	LedgerSeeded                bool            // hypothesis ledger seeded from the plan once
 	LastPlanBrief               string          // last plan brief injected into context; avoids duplicate injection when unchanged
+	PlanSurfaceRevision         string          // fingerprint of the surface the engine-authored plan was built from; a change triggers an engine-owned refresh
 	BrowserPreferenceNudgeCount int             // tracks whether browser preference warning was emitted for consecutive calls
 	AdvisoryLeadsNudged         map[string]bool // exact CVE/advisory leads already committed to the ledger
 	OASTVerificationNudged      map[string]bool // raw callback tokens already routed to class-aware verify_oob
@@ -330,9 +366,13 @@ func NewScanState() *ScanState {
 		InjectionEndpoints:     make(map[string]bool),
 		AccessControlEndpoints: make(map[string]bool),
 		DirBustingHosts:        make(map[string]bool),
+		DiscoveredHosts:        make(map[string]bool),
 		ReconCoverage: ReconCoverage{
-			ContentDiscoveredHosts: make(map[string]bool),
-			NAMarked:               make(map[string]bool),
+			ContentDiscoveredHosts:   make(map[string]bool),
+			NAMarked:                 make(map[string]bool),
+			Attempted:                make(map[string]bool),
+			FailedAttempts:           make(map[string]int),
+			ContentDiscoveryAttempts: make(map[string]bool),
 		},
 		EndpointsTested:           make(map[string]bool),
 		EndpointClassCoverage:     make(map[string]map[string]bool),
@@ -555,6 +595,9 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolCall, hookCurlPreference)
 	reg.Register(OnToolExecute, hookWorkTracker)
 	reg.Register(OnStuckCheck, hookStuckNudge)
+	// Recon completion attribution runs before detectors so every result
+	// hook sees the freshly validated coverage state.
+	reg.Register(OnToolResult, hookReconResultTracker)
 	reg.Register(OnToolResult, hookSkillLoadTracker)
 	reg.Register(OnToolResult, hookAuthCoverageTracker)
 	reg.Register(OnToolResult, hookVerifierEvidenceBridge)
@@ -573,6 +616,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnFinishAttempt, hookLedgerFinishGate)
 	reg.Register(OnEmptyResponse, hookEmptyResponseHandler)
 	reg.Register(OnNoToolResponse, hookNoToolHandler)
+	reg.Register(OnIterationStart, hookDeepReconDirector)
 	reg.Register(OnIterationStart, hookDelegationCoordinator)
 	reg.Register(OnIterationStart, hookAutoSkillSuggester)
 	reg.Register(OnIterationStart, hookPlanner)
@@ -888,95 +932,26 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 			}
 		}
 
-		// Detect recon commands
-		if strings.Contains(cmd, "nmap") || strings.Contains(cmd, "whatweb") ||
-			strings.Contains(cmd, "curl -si") || strings.Contains(cmd, "curl -sk") ||
-			strings.Contains(cmd, "httpx") || strings.Contains(cmd, "wappalyzer") ||
-			strings.Contains(cmd, "ffuf") || strings.Contains(cmd, "gobuster") ||
-			strings.Contains(cmd, "dirsearch") || strings.Contains(cmd, "katana") ||
-			strings.Contains(cmd, "gospider") || strings.Contains(cmd, "wafw00f") {
-			state.ReconDone = true
-		}
-
-		// ── Per-dimension recon evidence ──
-		// DNS: dig/nslookup/host commands
-		if strings.Contains(cmd, "dig ") || strings.Contains(cmd, "nslookup ") ||
-			strings.Contains(cmd, "host ") {
-			state.ReconCoverage.DNSResolved = true
-		}
-		// Service/port discovery: nmap/naabu/masscan or explicit multi-port probe
-		if strings.Contains(cmd, "nmap") || strings.Contains(cmd, "naabu") ||
-			strings.Contains(cmd, "masscan") || strings.Contains(cmd, "-p ") ||
-			(strings.Contains(cmd, "port") && strings.Contains(cmd, "curl")) {
-			state.ReconCoverage.ServicesProbed = true
-		}
-		// HTTP probing: any successful HTTP interaction (curl with status/output)
-		if strings.Contains(cmd, "curl") || strings.Contains(cmd, "httpx") {
-			state.ReconCoverage.HTTPProbed = true
-		}
-		// Tech fingerprinting: whatweb/wappalyzer or framework-specific analysis
-		if strings.Contains(cmd, "whatweb") || strings.Contains(cmd, "wappalyzer") ||
-			strings.Contains(cmd, "wafw00f") || strings.Contains(cmd, "server:") ||
-			strings.Contains(cmd, "x-powered-by") {
-			state.ReconCoverage.TechFingerprinted = true
-		}
-		// Crawling: katana/gospider/sitemap/robots/browser navigation
-		if strings.Contains(cmd, "katana") || strings.Contains(cmd, "gospider") ||
-			strings.Contains(cmd, "sitemap") || strings.Contains(cmd, "robots.txt") ||
-			strings.Contains(cmd, "discover_client_routes") ||
-			(strings.Contains(cmd, "grep") && strings.Contains(cmd, "href")) {
-			state.ReconCoverage.Crawled = true
-		}
-		// JS analysis: downloading and analyzing .js files
-		if (strings.Contains(cmd, ".js") || strings.Contains(cmd, "bundle") ||
-			strings.Contains(cmd, "chunk")) && strings.Contains(cmd, "curl") {
-			state.ReconCoverage.JSAnalyzed = true
-		}
-		// API surface: OpenAPI/Swagger/GraphQL/API path detection
-		if strings.Contains(cmd, "swagger") || strings.Contains(cmd, "openapi") ||
-			strings.Contains(cmd, "graphql") || strings.Contains(cmd, "api-docs") ||
-			strings.Contains(cmd, "/api/") || strings.Contains(cmd, "introspection") {
-			state.ReconCoverage.APISurfaceDiscovered = true
-		}
-		// Parameter discovery: arjun/x8/paramspider or form/query analysis
-		if strings.Contains(cmd, "arjun") || strings.Contains(cmd, "x8 ") ||
-			strings.Contains(cmd, "paramspider") || strings.Contains(cmd, "parameth") ||
-			(strings.Contains(cmd, "grep") && strings.Contains(cmd, "param")) ||
-			strings.Contains(cmd, "form") {
-			state.ReconCoverage.ParamDiscovered = true
-		}
-		// Auth mapping: login/auth/token/session endpoints
-		if strings.Contains(cmd, "login") || strings.Contains(cmd, "/auth") ||
-			strings.Contains(cmd, "session") || strings.Contains(cmd, "signup") ||
-			strings.Contains(cmd, "register") {
-			if state.AuthContextAvailable {
-				state.ReconCoverage.AuthMapped = "complete"
-			} else {
-				state.ReconCoverage.AuthMapped = "blocked"
+		// ── Recon ATTEMPT tracking ──
+		// Completion is attributed ONLY from validated tool results
+		// (hookReconResultTracker, OnToolResult): an executed command is an
+		// attempt, never coverage. A failed run (missing binary, DNS failure,
+		// timeout, bad wordlist) must not silently satisfy any dimension.
+		for _, dim := range reconDimensionsForCommand(cmd) {
+			if state.ReconCoverage.Attempted == nil {
+				state.ReconCoverage.Attempted = make(map[string]bool)
 			}
+			state.ReconCoverage.Attempted[dim] = true
 		}
-		// Historical URLs: wayback/gau/archive
-		if strings.Contains(cmd, "wayback") || strings.Contains(cmd, "gau") ||
-			strings.Contains(cmd, "web.archive.org") || strings.Contains(cmd, "common crawl") {
-			state.ReconCoverage.HistoricalChecked = true
-		}
-
-		// Detect directory busting — track unique hosts/paths
-		if strings.Contains(cmd, "ffuf") || strings.Contains(cmd, "gobuster") ||
-			strings.Contains(cmd, "dirsearch") || strings.Contains(cmd, "feroxbuster") ||
-			strings.Contains(cmd, "dirb ") {
-			host := extractHostFromCmd(cmd)
-			if host != "" {
-				state.DirBustingHosts[host] = true
-				state.ReconCoverage.ContentDiscoveredHosts[host] = true
-			}
-			state.DirBustingDone = true
-			// Depth signal: a real content-discovery pass runs a wordlist, not a
-			// couple of targeted probes. Missing /console-class paths on
-			// shallow passes directly cost findings.
-			if strings.Contains(cmd, " -w ") || strings.Contains(cmd, "--wordlist") ||
-				strings.Contains(cmd, "-w=") {
-				state.DirBustingUsedWordlist = true
+		// Content-discovery attempts are recorded per host; the completed set
+		// (ContentDiscoveredHosts / DirBustingHosts) is set only by a validated
+		// result.
+		if dimInCommand(cmd, reconDimContent) {
+			if host := extractHostFromCmd(cmd); host != "" {
+				if state.ReconCoverage.ContentDiscoveryAttempts == nil {
+					state.ReconCoverage.ContentDiscoveryAttempts = make(map[string]bool)
+				}
+				state.ReconCoverage.ContentDiscoveryAttempts[host] = true
 			}
 		}
 
@@ -2362,28 +2337,21 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 				BlockReason: fmt.Sprintf("Professional assessment has only %d meaningful security test(s). Execute concrete control/probe checks for the grounded plan before finishing.", state.MeaningfulTestCalls),
 			}
 		}
-		// Comprehensive recon must also precede finish: content discovery and
-		// the endpoint inventory are load-bearing for the per-endpoint coverage
-		// contract, and a plan whose tasks all closed without them was grounded
-		// in a half-mapped surface (observed in production: finish at 132
-		// iterations with zero dirbusting and 5 findings on a 17-finding
-		// target). Bounded by the FinishAttempts ceiling above.
-		if !state.DirBustingDone {
+		// Comprehensive recon must also precede finish: the SAME canonical
+		// predicate that governs the recon plan task and the specialist wave
+		// governs the professional finish. Content discovery and the
+		// endpoint inventory are load-bearing for the per-endpoint coverage
+		// contract, and a plan whose tasks all closed without them was
+		// grounded in a half-mapped surface (observed in production: finish
+		// at 132 iterations with zero dirbusting and 5 findings on a
+		// 17-finding target). Bounded by the FinishAttempts ceiling above.
+		if missing := ComprehensiveReconMissing(state); len(missing) > 0 && state.FinishAttempts <= maxRejections {
 			return HookResult{
-				Block:       true,
-				BlockReason: "Content discovery has not run yet. Run a bounded content-discovery pass (ffuf/gobuster/dirsearch with a common wordlist and -maxtime) on the primary host before finishing — undiscovered routes are untested attack surface.",
-			}
-		}
-		if !state.DirBustingUsedWordlist {
-			return HookResult{
-				Block:       true,
-				BlockReason: "Content discovery must run a REAL wordlist pass (ffuf -w common.txt / gobuster dir -w with a common wordlist, bounded -maxtime, inspect the saved output). A few targeted probes are not content discovery — hidden paths (debug consoles, backups, admin panels) only surface via wordlist enumeration.",
-			}
-		}
-		if !state.EndpointInventorySaved {
-			return HookResult{
-				Block:       true,
-				BlockReason: "Save an Endpoint Inventory note (every live route from responses, links, forms, and first-party JavaScript) before finishing — the coverage contract is enforced per discovered endpoint.",
+				Block: true,
+				BlockReason: "Comprehensive reconnaissance is incomplete. Missing dimensions:\n" +
+					"  - " + strings.Join(missing, "\n  - ") +
+					"\n\nSettle each dimension before finishing: complete it with a validated tool run (failed commands do not count; a genuinely empty valid scan does), " +
+					"or record a typed disposition via update_plan on the recon task (\"dimension: reason\" or \"host <host>: blocked/na/covered_by_equivalent\" after bounded retries).",
 			}
 		}
 		return planFinishGate(state, maxRejections)
@@ -2418,7 +2386,7 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 		// path opens — specialist results are input, not a substitute for
 		// the coordinator's independent verification and exploration.
 		delegationBoost := 0
-		if state.DelegationAttempted {
+		if state.WaveLaunched {
 			delegationBoost = 40
 		}
 		// Small surface (< 5 endpoints): allow finish at 25+ iterations with deep testing
@@ -3053,6 +3021,9 @@ func isRefusal(response string) bool {
 // targets and tightly budgeted scans should retain control over provider cost.
 func hookDelegationCoordinator(state *ScanState, args map[string]string) HookResult {
 	if state == nil || state.DiscoveryMode || state.ReconOnlyMode || state.DelegatedAgent ||
+		// Single-agent mode: no lanes may run, so no decomposition nudge,
+		// no reminders, and no "delegation pending" state ever exists.
+		!state.DelegationEnabled ||
 		state.DelegationAttempted || !state.ReconDone || !state.EndpointInventorySaved || state.Iteration < 5 || state.Plan == nil ||
 		!state.PlanBuilt || !state.LedgerSeeded {
 		return HookResult{}
@@ -3187,6 +3158,22 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 		(len(state.DiscoveredEndpoints) > 0 || len(state.DetectedTechs) > 0) {
 		state.Plan = AutoPlanFromState(state)
 		state.PlanBuilt = true
+		state.PlanSurfaceRevision = surfaceRevision(state)
+	}
+
+	// Plan refresh belongs to the PLANNER, not to delegation: recon expands
+	// the surface while it runs (crawl, JS analysis, content discovery,
+	// OpenAPI, redirects, DNS), and the engine-owned plan must absorb those
+	// discoveries whether or not any specialist exists. A surface revision
+	// change triggers a rebuild that preserves settled outcomes; an
+	// LLM-authored plan is never clobbered. With zero specialists the plan
+	// stays exactly as complete as with the wave enabled.
+	if state.PlanBuilt && state.Plan != nil && planIsEngineAuthored(state.Plan) &&
+		len(state.DiscoveredEndpoints) > 0 {
+		if rev := surfaceRevision(state); rev != state.PlanSurfaceRevision {
+			refreshEnginePlan(state)
+			state.PlanSurfaceRevision = rev
+		}
 	}
 
 	// Reconcile plan status against exact endpoint × class coverage so a test on
@@ -3258,7 +3245,12 @@ func reconcilePlan(state *ScanState) {
 		}
 		switch t.ID {
 		case "recon":
-			if state.ReconDone {
+			// The recon task completes only under the canonical
+			// comprehensive predicate — the same definition the wave gate
+			// and the professional finish gate use. A single validated curl
+			// no longer closes recon while substantial applicable recon
+			// remains.
+			if ComprehensiveReconComplete(state) {
 				t.Status = TaskCompleted
 			}
 		case "dirbust":

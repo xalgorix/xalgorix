@@ -682,10 +682,7 @@ func TestFinishGatekeeper_ProfessionalCompletedPlanSkipsLegacyIterationQuota(t *
 	state.Iteration = 12
 	state.TerminalCalls = 8
 	state.MeaningfulTestCalls = 5
-	state.ReconDone = true
-	state.EndpointInventorySaved = true
-	state.DirBustingDone = true
-	state.DirBustingUsedWordlist = true
+	satisfyComprehensiveRecon(state)
 	state.PlanBuilt = true
 	plan := NewPlan()
 	plan.add(&Task{ID: "recon", Title: "Map live surface", Phase: 1, Status: TaskCompleted})
@@ -718,8 +715,10 @@ func TestFinishGatekeeper_ProfessionalPlanRequiresContentDiscovery(t *testing.T)
 	state.Plan = plan
 
 	result := hookFinishGatekeeper(state, nil)
-	if !result.Block || !strings.Contains(result.BlockReason, "Content discovery has not run yet") {
-		t.Fatalf("professional finish without dirbusting must be blocked, got: %+v", result)
+	if !result.Block ||
+		!strings.Contains(result.BlockReason, "Comprehensive reconnaissance is incomplete") ||
+		!strings.Contains(result.BlockReason, "content discovery") {
+		t.Fatalf("professional finish without dirbusting must be blocked by the comprehensive-recon gate, got: %+v", result)
 	}
 }
 
@@ -743,21 +742,42 @@ func TestFinishGatekeeper_ProfessionalPlanRequiresWordlistDirbust(t *testing.T) 
 	state.Plan = plan
 
 	result := hookFinishGatekeeper(state, nil)
-	if !result.Block || !strings.Contains(result.BlockReason, "REAL wordlist") {
-		t.Fatalf("professional finish with probe-only discovery must be blocked, got: %+v", result)
+	if !result.Block ||
+		!strings.Contains(result.BlockReason, "Comprehensive reconnaissance is incomplete") ||
+		!strings.Contains(result.BlockReason, "REAL wordlist") {
+		t.Fatalf("professional finish with probe-only discovery must be blocked by the comprehensive-recon gate, got: %+v", result)
 	}
 }
 
 // hookWorkTracker only marks DirBustingUsedWordlist when the command actually
 // carries a wordlist flag.
+// Wordlist tracking is result-attributed: the executed command records the
+// ATTEMPT (and per-host attempt), the validated result completes the pass.
+// A command string alone must never satisfy content discovery.
 func TestHookWorkTrackerTracksWordlistUsage(t *testing.T) {
 	state := NewScanState()
 	hookWorkTracker(state, map[string]string{
 		"tool_name": "terminal_execute",
 		"command":   "ffuf -u https://example.test/FUZZ -mc 200",
 	})
+	if state.DirBustingDone {
+		t.Fatal("an executed ffuf command must not complete content discovery before its result is validated")
+	}
+	if !state.ReconCoverage.Attempted["content_discovery"] {
+		t.Fatal("ffuf execution must record the content_discovery attempt")
+	}
+	if !state.ReconCoverage.ContentDiscoveryAttempts["example.test"] {
+		t.Fatal("ffuf execution must record the per-host attempt")
+	}
+
+	// A validated result completes the pass.
+	hookReconResultTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   "ffuf -u https://example.test/FUZZ -mc 200",
+		"output":    "Progress: 100/100 :: Status: 404",
+	})
 	if state.DirBustingDone != true {
-		t.Fatal("ffuf detection must set DirBustingDone")
+		t.Fatal("a validated ffuf run must set DirBustingDone")
 	}
 	if state.DirBustingUsedWordlist {
 		t.Fatal("ffuf without -w must not count as a wordlist pass")
@@ -767,8 +787,16 @@ func TestHookWorkTrackerTracksWordlistUsage(t *testing.T) {
 		"tool_name": "terminal_execute",
 		"command":   "ffuf -w /usr/share/wordlists/common.txt -u https://example.test/FUZZ -mc 200 -maxtime 90",
 	})
+	hookReconResultTracker(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"command":   "ffuf -w /usr/share/wordlists/common.txt -u https://example.test/FUZZ -mc 200 -maxtime 90",
+		"output":    "Progress: 100/100 :: Status: 404",
+	})
 	if !state.DirBustingUsedWordlist {
-		t.Fatal("ffuf -w must set DirBustingUsedWordlist")
+		t.Fatal("ffuf -w must set DirBustingUsedWordlist after a validated run")
+	}
+	if !state.ReconCoverage.ContentDiscoveredHosts["example.test"] {
+		t.Fatal("a validated ffuf run must complete content discovery for its host")
 	}
 }
 
@@ -777,10 +805,7 @@ func TestFinishGatekeeper_ProfessionalPlanStillRequiresMeaningfulWorkAndCompleti
 	state.ProfessionalAssessment = true
 	state.Iteration = 12
 	state.TerminalCalls = 8
-	state.ReconDone = true
-	state.EndpointInventorySaved = true
-	state.DirBustingDone = true
-	state.DirBustingUsedWordlist = true
+	satisfyComprehensiveRecon(state)
 	state.PlanBuilt = true
 	plan := NewPlan()
 	plan.add(&Task{ID: "test-xss", Title: "Test client routes", Phase: 6, VulnClass: "xss", Status: TaskPending})
@@ -1606,6 +1631,9 @@ func TestHookReportVulnerabilityTracker_CapsMalformedRecovery(t *testing.T) {
 
 func TestDelegationCoordinatorNudgesOnceAfterRecon(t *testing.T) {
 	state := NewScanState()
+	// Single-agent mode suppresses every delegation nudge; this test
+	// exercises the ENABLED mode.
+	state.DelegationEnabled = true
 	state.Iteration = 8
 	state.ReconDone = true
 	state.EndpointInventorySaved = true
@@ -1651,6 +1679,9 @@ func TestDelegationCoordinatorSkipsDiscoveryAndExistingDelegation(t *testing.T) 
 
 func TestDelegationCoordinatorRetriesMalformedSpawnWithoutLooping(t *testing.T) {
 	state := NewScanState()
+	// Single-agent mode suppresses every delegation nudge; this test
+	// exercises the ENABLED mode.
+	state.DelegationEnabled = true
 	state.Iteration = 5
 	state.ReconDone = true
 	state.EndpointInventorySaved = true

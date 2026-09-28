@@ -659,75 +659,11 @@ func (a *Agent) reconPhaseComplete() bool {
 	if a == nil || a.state == nil {
 		return false
 	}
-	s := a.state
-
-	// Legacy booleans remain the floor: a curl, an inventory note, one
-	// content-discovery pass, and at least one detected tech. The coverage
-	// model adds the breadth that was previously missing.
-	if !s.ReconDone || !s.EndpointInventorySaved || !s.DirBustingDone || len(s.DetectedTechs) == 0 {
-		return false
-	}
-
-	// Per-dimension requirements: each must be complete or marked
-	// not-applicable. Raw IP targets skip DNS/subdomain dimensions;
-	// static sites skip API/JS; targets without auth skip auth mapping.
-	rc := s.ReconCoverage
-
-	// HTTP probing and tech fingerprinting are always required for web targets.
-	if !rc.HTTPProbed {
-		return false
-	}
-	if !rc.TechFingerprinted && !rc.NAMarked["tech_fingerprint"] {
-		return false
-	}
-
-	// Crawling OR JS analysis must have occurred (at least one surface-
-	// mapping technique beyond a single curl).
-	if !rc.Crawled && !rc.JSAnalyzed && !rc.NAMarked["crawling"] {
-		return false
-	}
-
-	// Content discovery: at least one host received a real wordlist pass.
-	if len(rc.ContentDiscoveredHosts) == 0 && !rc.NAMarked["content_discovery"] {
-		return false
-	}
-	// Per-application coverage: every distinct host the inventory surfaced
-	// (bounded to the first maxReconHostRequirement) must have been
-	// content-discovered OR carry a typed disposition (not_applicable,
-	// blocked, covered-by-equivalent-app). One pass on app.example.com no
-	// longer silently satisfies api/admin/files.example.com.
-	for _, host := range distinctApplicationHosts(s) {
-		if rc.ContentDiscoveredHosts[host] || reconHostDispositioned(s, host) {
-			continue
-		}
-		return false
-	}
-	// Applicability-informed required dimensions (N/A dispositions honored):
-	// API signals require API-surface discovery; an auth surface requires
-	// auth mapping; input-bearing surface requires parameter discovery.
-	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !rc.NAMarked["api_surface"] {
-		return false
-	}
-	if authSurfaceExists(s) && rc.AuthMapped == "" && !rc.NAMarked["auth_mapping"] {
-		return false
-	}
-	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
-		return false
-	}
-
-	// Deep mode expects additional breadth. Standard mode treats these
-	// as recommended but not blocking.
-	if a.scanIntensity == activityModeActive && a.isDeepMode() {
-		// Deep: service enumeration and parameter discovery expected.
-		if !rc.ServicesProbed && !rc.NAMarked["service_discovery"] {
-			return false
-		}
-		if !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
-			return false
-		}
-	}
-
-	return true
+	// THE authoritative comprehensive-recon predicate (recon_predicate.go).
+	// The wave gate, the recon plan task, and the professional finish gate
+	// all share this single definition, so enabling or disabling specialists
+	// can never change what reconnaissance is owed.
+	return ComprehensiveReconComplete(a.state)
 }
 
 // isDeepMode reports whether the scan runs in deep-intensity mode. Deep used
@@ -749,57 +685,9 @@ func (a *Agent) reconIncompleteReasons() []string {
 	if a == nil || a.state == nil {
 		return nil
 	}
-	s := a.state
-	rc := s.ReconCoverage
-	var missing []string
-
-	if !s.ReconDone {
-		missing = append(missing, "banner/technology fingerprinting (curl -sI, whatweb)")
-	}
-	if !s.EndpointInventorySaved {
-		missing = append(missing, "an Endpoint Inventory note listing every live route")
-	}
-	if !s.DirBustingDone {
-		missing = append(missing, "content discovery on at least one host (ffuf/gobuster/dirsearch)")
-	}
-	if len(s.DetectedTechs) == 0 {
-		missing = append(missing, "technology stack detection (whatweb / server headers)")
-	}
-
-	// Coverage-model dimensions
-	if !rc.HTTPProbed {
-		missing = append(missing, "HTTP probing of the live web surface (confirm status, title, redirects)")
-	}
-	if !rc.TechFingerprinted && !rc.NAMarked["tech_fingerprint"] {
-		missing = append(missing, "deliberate technology fingerprinting (whatweb / wappalyzer, not just a Server header)")
-	}
-	if !rc.Crawled && !rc.JSAnalyzed && !rc.NAMarked["crawling"] {
-		missing = append(missing, "web crawling or JavaScript analysis (katana/gospider/sitemap or JS bundle routes)")
-	}
-	if len(rc.ContentDiscoveredHosts) == 0 && !rc.NAMarked["content_discovery"] {
-		missing = append(missing, "content discovery with a real wordlist on the primary host")
-	}
-	if a.isDeepMode() {
-		if !rc.ServicesProbed && !rc.NAMarked["service_discovery"] {
-			missing = append(missing, "service/port enumeration (nmap/naabu on the target)")
-		}
-	}
-	for _, host := range distinctApplicationHosts(s) {
-		if rc.ContentDiscoveredHosts[host] || reconHostDispositioned(s, host) {
-			continue
-		}
-		missing = append(missing, "content discovery on "+host+" (or a typed disposition via update_plan: host "+host+": blocked/na/covered_by_equivalent)")
-	}
-	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !rc.NAMarked["api_surface"] {
-		missing = append(missing, "API-surface discovery (OpenAPI/GraphQL/route enumeration)")
-	}
-	if authSurfaceExists(s) && rc.AuthMapped == "" && !rc.NAMarked["auth_mapping"] {
-		missing = append(missing, "auth mapping (login flows, session capture)")
-	}
-	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
-		missing = append(missing, "parameter/input discovery (arjun/x8, forms, query parameters)")
-	}
-	return missing
+	// One authoritative reason generator (recon_predicate.go) serves the
+	// wave deferral, the recon plan task, and the finish contract.
+	return ComprehensiveReconMissing(a.state)
 }
 
 // maybeAutoDelegate launches the one deterministic specialist wave once the
@@ -819,12 +707,18 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 		a.state.ReconOnlyMode || a.state.DelegationAttempted {
 		return ""
 	}
-	// XALGORIX_DISABLE_AUTO_DELEGATE=true: skip the specialist wave entirely,
-	// restoring pre-v4.6.93 behavior where the root agent does all the work
-	// itself. Some operators prefer the deeper single-threaded methodology.
-	if a.cfg != nil && a.cfg.DisableAutoDelegate {
-		a.noteDelegationDefer("disabled by configuration (XALGORIX_DISABLE_AUTO_DELEGATE=true)")
-		a.state.DelegationAttempted = true
+	// Single-agent mode (XALGORIX_DISABLE_AUTO_DELEGATE=true, or every
+	// specialist lane operator-disabled): an intentional configuration, not
+	// a failure state. No wave, no defer diagnostics, no reminders — and
+	// DelegationAttempted must NEVER be set, because finish/adaptive logic
+	// reads it as "a specialist wave ran" and would inflate iteration
+	// requirements for a scan that never had specialists. The root agent
+	// owns the complete methodology; every coverage gate applies unchanged.
+	if !a.state.DelegationEnabled {
+		if !a.state.SingleAgentNoted {
+			a.state.SingleAgentNoted = true
+			a.emit(Event{Type: "message", Content: "🧭 Single-agent mode: specialist delegation is disabled by configuration. The root agent owns the complete methodology — reconnaissance, plan, testing, verification, and reporting — and every coverage gate applies unchanged. No specialist wave will be launched."})
+		}
 		return ""
 	}
 	if _, ok := a.registry.Get("spawn_agent"); !ok {
@@ -874,18 +768,12 @@ func (a *Agent) maybeAutoDelegate(targets []string) string {
 		return ""
 	}
 
-	// Ground the wave in the FINAL mapped surface. The auto plan is built as
-	// soon as an inventory note exists; dirbusting and client-route discovery
-	// surface more endpoints afterwards, so that early plan goes stale. Rebuild
-	// the engine-owned plan from the completed surface (reconcilePlan restores
-	// task completion from the coverage matrix) so every run partitions the
-	// same fully mapped endpoint set instead of whatever a one-minute
-	// inventory happened to contain. An LLM-authored plan is never clobbered.
-	if planIsEngineAuthored(a.state.Plan) && len(a.state.DiscoveredEndpoints) > 0 {
-		a.state.Plan = AutoPlanFromState(a.state)
-		a.state.PlanBuilt = true
-		reconcilePlan(a.state)
-	}
+	// The wave is grounded in the FINAL mapped surface because plan refresh
+	// moved into the planner: hookPlanner refreshes the engine-owned plan on
+	// every surface-revision change, with or without specialists, so by the
+	// time the wave launches the plan already reflects the completed
+	// surface. Delegation code no longer rebuilds plans — disabling every
+	// specialist leaves plan completeness byte-identical.
 
 	profiles := a.eligibleSpecialistProfiles()
 	spawned := make([]string, 0, len(profiles))
@@ -1066,6 +954,36 @@ func vulnClassMatches(have, want string) bool {
 	}
 	hc, wc := CanonicalVulnClassID(have), CanonicalVulnClassID(want)
 	return hc != "" && hc == wc
+}
+
+// delegationEnabled reports whether ANY specialist delegation is possible
+// this scan: auto-delegation not disabled by configuration, the spawn tool
+// available, a lane-using scan type, and at least one lane not
+// operator-disabled. False means intentional single-agent mode: no waves, no
+// decomposition nudges, no reminders — and DelegationAttempted must never be
+// set, because consumers read it as "a specialist wave ran".
+func (a *Agent) delegationEnabled() bool {
+	if a == nil || a.registry == nil {
+		return false
+	}
+	if a.cfg != nil && a.cfg.DisableAutoDelegate {
+		return false
+	}
+	if a.ctfMission {
+		return false
+	}
+	if a.state != nil && (a.state.DiscoveryMode || a.state.ReconOnlyMode) {
+		return false
+	}
+	if _, ok := a.registry.Get("spawn_agent"); !ok {
+		return false
+	}
+	for _, profile := range defaultSpecialistProfiles {
+		if !a.specialistDisabled(profile.Role) {
+			return true
+		}
+	}
+	return false
 }
 
 // specialistDisabled reports whether the named specialist lane is turned off
@@ -1549,6 +1467,16 @@ func (a *Agent) Run(targets []string, instruction string) {
 	if a.state.ReconOnlyMode {
 		a.state.DiscoveryMode = true
 	}
+	// Configured scope drives applicability: a single explicit host does not
+	// owe subdomain enumeration; a bare domain or wildcard does.
+	a.state.ScanTargets = append([]string(nil), targets...)
+	// Deep-mode recon obligations are a function of depth + intensity ONLY —
+	// never of specialist availability. Single-agent scans owe the same
+	// deep reconnaissance as wave-enabled scans.
+	a.state.DeepReconRequired = a.isDeepMode() && a.scanIntensity == activityModeActive
+	// Single-agent mode is an intentional configuration, not a failure
+	// state; derived once so every delegation path reads one flag.
+	a.state.DelegationEnabled = a.delegationEnabled()
 	a.resetPassiveReconGuardForRun()
 
 	// Helper to get current token count

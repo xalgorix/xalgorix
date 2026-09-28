@@ -106,9 +106,6 @@ func recommendedSkillsForState(state *ScanState) []skillRecommendation {
 	if state == nil {
 		return nil
 	}
-	if len(state.DetectedTechs) == 0 && !state.WAFDetected {
-		return nil
-	}
 	var out []skillRecommendation
 	seen := make(map[string]bool)
 	add := func(query, reason string) {
@@ -127,6 +124,21 @@ func recommendedSkillsForState(state *ScanState) []skillRecommendation {
 	if state.WAFDetected {
 		add("xss", "WAF bypass payloads for the detected firewall")
 		add("sql injection", "WAF bypass payloads for the detected firewall")
+	}
+	// Task-driven recommendations: the next READY plan lane names the
+	// methodology the root needs now, so skill loading follows the work
+	// instead of only technology detection. Bounded to the current lane
+	// (up to 3), never a catalog dump — with zero specialists this is the
+	// primary discovery path for class methodology.
+	if state.Plan != nil {
+		for _, t := range state.Plan.NextTasks(3) {
+			if t.VulnClass == "" {
+				continue
+			}
+			if query, ok := VulnClassSkill(t.VulnClass); ok && query != "" {
+				add(query, "next plan lane: "+t.ID)
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Skill < out[j].Skill })
 	return out

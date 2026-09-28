@@ -469,6 +469,70 @@ func planIsEngineAuthored(p *Plan) bool {
 	return true
 }
 
+// refreshEnginePlan rebuilds the engine-owned plan from the current
+// surface. It is called by the PLANNER whenever the surface revision
+// changes — never by delegation code — so plan completeness is identical
+// with zero specialists: recon expands the surface while it runs (crawl,
+// JS analysis, content discovery, OpenAPI, redirects, DNS), and the plan
+// absorbs those discoveries whether or not any specialist exists. An
+// LLM-authored plan is never touched.
+func refreshEnginePlan(state *ScanState) {
+	if state == nil || state.Plan == nil || !planIsEngineAuthored(state.Plan) {
+		return
+	}
+	// Preserve settled outcomes the rebuild cannot re-derive: explicit
+	// skipped/NA tasks. Completed work is re-derived by reconcilePlan from
+	// the coverage matrix; a skip is a judged disposition, so it survives
+	// only while the CURRENT surface still supports it.
+	prev := make(map[string]Task)
+	for _, t := range state.Plan.Tasks {
+		if t.Status == TaskSkipped {
+			prev[t.ID] = *t
+		}
+	}
+	state.Plan = AutoPlanFromState(state)
+	for _, t := range state.Plan.Tasks {
+		old, ok := prev[t.ID]
+		if !ok || t.Status != TaskPending {
+			continue
+		}
+		if !skipDispositionStillValid(state, &old) {
+			continue
+		}
+		t.Status = old.Status
+		t.Disposition = old.Disposition
+		t.Notes = old.Notes
+	}
+	reconcilePlan(state)
+	// New surface means new (class x endpoint) obligations: re-seed the
+	// ledger. Upsert dedupes, so this only adds hypotheses the previous
+	// seed did not know about — no specialist is needed for the ledger to
+	// cover the refreshed plan.
+	if l := ledgerForState(state); l != nil {
+		seedLedgerFromPlan(state, l)
+	}
+}
+
+// skipDispositionStillValid re-checks a preserved N/A skip against the
+// CURRENT surface: the surface change that triggered the refresh may have
+// invalidated it (e.g. auth endpoints appeared after auth-session was
+// dispositioned not-applicable).
+func skipDispositionStillValid(state *ScanState, t *Task) bool {
+	if t == nil || t.Disposition != DispositionNotApplicable {
+		return true
+	}
+	switch t.ID {
+	case "auth-session":
+		return !authSurfaceExists(state) && !state.AuthContextAvailable
+	case "dirbust":
+		return false // content discovery always applies to web targets
+	}
+	if t.VulnClass != "" {
+		return len(ApplicableEndpointsForClass(state, t.VulnClass)) == 0
+	}
+	return true
+}
+
 // newCoverageTask builds the engine-owned per-class coverage task. It is the
 // coverage floor for both the auto plan and model-authored plans: a class task
 // carries Origin "auto", so update_plan cannot hand-complete it — only the
@@ -758,10 +822,22 @@ func truncList(items []string, n int) string {
 var planBriefSkillsState *ScanState
 
 // FormatPlanState is FormatPlan with the ScanState for skill-aware hints.
+// While reconnaissance is still owed, it appends the applicability-aware
+// dimension checklist so the brief shows exactly WHAT remains ("Recon 73%:
+// crawl ✓, JS analysis ✗") instead of an opaque pending task.
 func FormatPlanState(state *ScanState, p *Plan, gaps []CoverageGap) string {
 	planBriefSkillsState = state
 	defer func() { planBriefSkillsState = nil }()
-	return FormatPlan(p, gaps)
+	brief := FormatPlan(p, gaps)
+	if state != nil && p != nil {
+		if rt := p.Get("recon"); rt != nil &&
+			(rt.Status == TaskPending || rt.Status == TaskActive) {
+			if lines := ReconDimensionChecklist(state); len(lines) > 0 {
+				brief += "\n" + strings.Join(lines, "\n") + "\n"
+			}
+		}
+	}
+	return brief
 }
 
 // FormatPlan renders the plan as a compact, model-facing brief: progress,

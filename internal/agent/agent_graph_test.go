@@ -120,6 +120,7 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 	state := NewScanState()
 	state.Iteration = 5
 	state.ReconDone = true
+	state.DelegationEnabled = true
 	// Coverage-model evidence: the recon completion gate requires
 	// HTTP probing, tech fingerprinting, and crawling/JS analysis.
 	state.ReconCoverage.HTTPProbed = true
@@ -176,7 +177,16 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 		t.Fatalf("testing wave launched before comprehensive recon: message=%q count=%d", got, graph.DelegationCount())
 	}
 	state.DirBustingDone = true
+	state.DirBustingUsedWordlist = true
 	state.DetectedTechs["flask"] = true
+	// Plan refresh now lives in the PLANNER (surface-revision based), not
+	// in delegation code: simulate hookPlanner's refresh step so the wave
+	// launches from the rebuilt plan exactly as production does. With zero
+	// specialists the same refresh keeps the plan equally complete.
+	if rev := surfaceRevision(state); rev != state.PlanSurfaceRevision {
+		refreshEnginePlan(state)
+		state.PlanSurfaceRevision = rev
+	}
 
 	// ── Stage W: the testing wave launches the non-overlapping lanes
 	// (authz-logic included: operator token supplies both identities).
@@ -203,8 +213,8 @@ func TestMaybeAutoDelegateLaunchesOneDeterministicWave(t *testing.T) {
 		t.Fatalf("wave not recorded: attempted=%v wave=%v message=%q", state.DelegationAttempted, state.WaveLaunched, message)
 	}
 	// The stale one-endpoint plan must have been rebuilt from the full
-	// discovered surface at wave launch, so specialists partition every
-	// endpoint instead of the seeded subset.
+	// discovered surface by the PLANNER refresh before wave launch, so
+	// specialists partition every endpoint instead of the seeded subset.
 	fresh := false
 	for _, task := range state.Plan.Tasks {
 		if strings.Contains(task.Notes, "/admin/export") {
