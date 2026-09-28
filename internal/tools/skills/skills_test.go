@@ -556,3 +556,182 @@ func TestAPISkillEvidenceContracts(t *testing.T) {
 		})
 	}
 }
+
+// TestSearchSkills_CloudOffensiveDiscovery verifies each consolidated offensive
+// cloud skill is discoverable by natural agent queries.
+func TestSearchSkills_CloudOffensiveDiscovery(t *testing.T) {
+	subFS, err := fs.Sub(embeddedSkills, "data")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	search := makeSearchSkills(subFS)
+
+	cases := []struct {
+		query     string
+		wantSkill string
+	}{
+		{"cloud fingerprint target domain aws azure gcp", "cloud-attack-surface-discovery"},
+		{"s3 bucket public access anonymous listing", "cloud-storage-exposure-testing"},
+		{"imds metadata endpoint credentials ssrf", "cloud-metadata-workload-identity"},
+		{"found aws access key what now", "cloud-credential-abuse"},
+		{"aws pentest account enumeration iam", "aws-cloud-pentesting"},
+		{"azure entra tenant service principal graph", "azure-entra-cloud-pentesting"},
+		{"gcp project service account iam inheritance", "gcp-cloud-pentesting"},
+		{"aws privilege escalation createpolicyversion", "aws-iam-privilege-escalation"},
+		{"gcp service account impersonation actas", "gcp-iam-privilege-escalation"},
+		{"azure application service principal credential escalation", "azure-privilege-escalation"},
+		{"lambda function url public invoke serverless", "serverless-cloud-security"},
+		{"cross account role trust assume role", "cloud-cross-account-tenant-trust"},
+		{"secrets manager key vault retrieve", "cloud-secrets-data-access"},
+	}
+	for _, c := range cases {
+		t.Run(c.query, func(t *testing.T) {
+			res, err := search(map[string]string{"query": c.query})
+			if err != nil {
+				t.Fatalf("search error: %v", err)
+			}
+			if !strings.Contains(res.Output, c.wantSkill) {
+				t.Fatalf("query %q: expected %q in results, got:\n%s", c.query, c.wantSkill, res.Output)
+			}
+		})
+	}
+}
+
+// TestSearchSkills_CloudOffensiveRanksAboveDefensive verifies that for
+// attack-context cloud queries, offensive methodology outranks defensive
+// implementation and detection skills (which were moved out of cloud-security).
+func TestSearchSkills_CloudOffensiveRanksAboveDefensive(t *testing.T) {
+	subFS, _ := fs.Sub(embeddedSkills, "data")
+	search := makeSearchSkills(subFS)
+
+	res, err := search(map[string]string{"query": "aws cloud security privilege escalation"})
+	if err != nil {
+		t.Fatalf("search error: %v", err)
+	}
+	offPos := strings.Index(res.Output, "aws-iam-privilege-escalation")
+	if offPos < 0 {
+		t.Fatalf("expected offensive skill in results, got:\n%s", res.Output)
+	}
+	for _, def := range []string{"securing-aws-iam-permissions", "implementing-aws-security-hub", "detecting-aws-iam-privilege-escalation"} {
+		defPos := strings.Index(res.Output, def)
+		if defPos >= 0 && defPos < offPos {
+			t.Errorf("defensive skill %q ranks above offensive skill for attack-context query, got:\n%s", def, res.Output)
+		}
+	}
+}
+
+// TestSearchSkills_CloudDefensiveSearchableWhenRequested verifies defensive
+// cloud skills (moved to their proper categories) remain reachable for
+// explicitly defensive queries and rank above offensive skills there.
+func TestSearchSkills_CloudDefensiveSearchableWhenRequested(t *testing.T) {
+	subFS, _ := fs.Sub(embeddedSkills, "data")
+	search := makeSearchSkills(subFS)
+
+	res, err := search(map[string]string{"query": "implement cloud security posture management"})
+	if err != nil {
+		t.Fatalf("search error: %v", err)
+	}
+	defPos := strings.Index(res.Output, "implementing-cloud-security-posture-management")
+	if defPos < 0 {
+		t.Fatalf("defensive cloud skill should remain searchable when explicitly requested, got:\n%s", res.Output)
+	}
+	offPos := strings.Index(res.Output, "aws-cloud-pentesting")
+	if offPos >= 0 && offPos < defPos {
+		t.Errorf("offensive skill should not outrank explicit defensive request, got:\n%s", res.Output)
+	}
+}
+
+// TestSearchSkills_CloudDetectionSkillsFindable verifies detection-oriented
+// cloud skills still surface for detection-context queries in their new
+// category (threat-hunting).
+func TestSearchSkills_CloudDetectionSkillsFindable(t *testing.T) {
+	subFS, _ := fs.Sub(embeddedSkills, "data")
+	search := makeSearchSkills(subFS)
+
+	res, err := search(map[string]string{"query": "detect aws cloudtrail anomalies"})
+	if err != nil {
+		t.Fatalf("search error: %v", err)
+	}
+	if !strings.Contains(res.Output, "detecting-aws-cloudtrail-anomalies") {
+		t.Fatalf("expected moved detection skill to remain findable, got:\n%s", res.Output)
+	}
+}
+
+// TestSearchSkills_ForsetiNotPromoted verifies the retired (upstream-archived)
+// Forseti methodology no longer exists as a first-class skill and that its
+// historical alias resolves to the modern GCP assessment methodology.
+func TestSearchSkills_ForsetiNotPromoted(t *testing.T) {
+	subFS, _ := fs.Sub(embeddedSkills, "data")
+	search := makeSearchSkills(subFS)
+
+	res, _ := search(map[string]string{"query": "gcp security assessment forseti"})
+	if strings.Contains(res.Output, "performing-gcp-security-assessment-with-forseti") {
+		t.Fatalf("retired Forseti skill should no longer be promoted, got:\n%s", res.Output)
+	}
+
+	if got := resolveAlias("gcp-security-assessment-with-forseti"); got != "gcp-cloud-pentesting" {
+		t.Errorf("forseti alias should resolve to modern GCP methodology, got %q", got)
+	}
+}
+
+// TestResolveAlias_CloudOffensive verifies the new cloud alias surface.
+func TestResolveAlias_CloudOffensive(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"s3", "cloud-storage-exposure-testing"},
+		{"gcs", "cloud-storage-exposure-testing"},
+		{"imds", "cloud-metadata-workload-identity"},
+		{"managed-identity", "cloud-metadata-workload-identity"},
+		{"aws-pentest", "aws-cloud-pentesting"},
+		{"azure-pentest", "azure-entra-cloud-pentesting"},
+		{"gcp-pentest", "gcp-cloud-pentesting"},
+		{"actas", "gcp-iam-privilege-escalation"},
+		{"passrole", "aws-iam-privilege-escalation"},
+		{"key-vault", "cloud-secrets-data-access"},
+		{"cloud-penetration-testing-with-pacu", "aws-cloud-pentesting"},
+		{"aws-privilege-escalation-assessment", "aws-iam-privilege-escalation"},
+		{"gcp-penetration-testing-with-gcpbucketbrute", "cloud-storage-exposure-testing"},
+		{"aws-lambda-execution-roles", "serverless-cloud-security"},
+		{"serverless-functions", "serverless-cloud-security"},
+	}
+	for _, tc := range tests {
+		got := resolveAlias(tc.input)
+		if got != tc.want {
+			t.Errorf("resolveAlias(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestFrontmatterProviderMetadata verifies the frontmatter parser tolerates
+// richer metadata (provider lists, assessment_mode) without breaking skill
+// indexing or search.
+func TestFrontmatterProviderMetadata(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "cloud-security", "test-cloud-skill"), 0755)
+	os.WriteFile(filepath.Join(dir, "cloud-security", "test-cloud-skill", "SKILL.md"), []byte(`---
+name: test-cloud-skill
+description: Metadata tolerance test skill
+intent: offensive
+assessment_mode:
+  - blackbox
+  - credentialed
+provider:
+  - aws
+  - gcp
+---
+
+# Test
+Body.
+`), 0644)
+
+	search := makeSearchSkills(os.DirFS(dir))
+	res, err := search(map[string]string{"query": "blackbox aws cloud"})
+	if err != nil {
+		t.Fatalf("search error: %v", err)
+	}
+	if !strings.Contains(res.Output, "test-cloud-skill") {
+		t.Fatalf("expected skill with provider list metadata to be indexed and findable, got:\n%s", res.Output)
+	}
+}
