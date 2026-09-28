@@ -710,15 +710,17 @@ func (a *Agent) reconPhaseComplete() bool {
 	return true
 }
 
-// isDeepMode reports whether the scan runs in deep-intensity mode. The current
-// engine has active/passive intensity; deep is inferred from the phase
-// selection (all 22 phases selected) or a scan mode override.
+// isDeepMode reports whether the scan runs in deep-intensity mode. Deep used
+// to be inferred from len(AllowedPhases) >= 20, which misread the EMPTY
+// selection (meaning the full methodology is allowed) as "not deep" and
+// silently disabled deep-mode recon requirements for full scans. The explicit
+// ScanDepth field is now derived once at scan start; this accessor stays for
+// compatibility.
 func (a *Agent) isDeepMode() bool {
-	if a == nil {
+	if a == nil || a.state == nil {
 		return false
 	}
-	// A full 22-phase selection implies deep methodology.
-	return len(a.state.AllowedPhases) >= 20
+	return a.state.ScanDepth == "deep"
 }
 
 // reconIncompleteReasons lists the reconnaissance milestones still missing,
@@ -1486,6 +1488,14 @@ func (a *Agent) Run(targets []string, instruction string) {
 	}
 	a.state.DiscoveryMode = a.discoveryMode
 	a.state.AllowedPhases = append([]int(nil), a.allowedPhases...)
+	// Derive the explicit depth mode ONCE from the phase selection. Empty
+	// AllowedPhases = the full methodology is allowed = deep requirements
+	// apply; it must never be misread as "no phases selected = shallow".
+	if len(a.allowedPhases) == 0 || len(a.allowedPhases) >= 20 {
+		a.state.ScanDepth = "deep"
+	} else {
+		a.state.ScanDepth = "standard"
+	}
 	a.state.ReconOnlyMode = isReconReportOnlyPhaseSelection(a.allowedPhases)
 	if a.state.ReconOnlyMode {
 		a.state.DiscoveryMode = true

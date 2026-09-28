@@ -125,6 +125,14 @@ type ScanState struct {
 	PassiveReconGuardActive      bool
 	PassiveReconPassiveLookups   int
 	PassiveReconBlockedActive    int
+	// ScanDepth is the explicit depth mode: "deep" enforces the full-
+	// methodology recon requirements (service enumeration, parameter
+	// discovery), "standard" treats them as recommended. It is derived once
+	// at scan start from the phase selection: an EMPTY AllowedPhases means
+	// the full methodology is allowed, which previously (len >= 20) was
+	// misread as "not deep" and silently disabled deep-mode requirements for
+	// exactly the scans that ran every phase.
+	ScanDepth string
 
 	// Coverage counters — track UNIQUE endpoints per test category.
 	// These replace the old boolean flags (InjectionTested, etc.) which

@@ -271,3 +271,20 @@ func TestVulnClassSkill_Resolution(t *testing.T) {
 		t.Error("dirbusting has no methodology skill query and must not resolve")
 	}
 }
+
+// Part 21 case 25: empty AllowedPhases (full methodology) must not disable
+// deep-mode requirements.
+func TestScanDepth_EmptyPhasesMeansDeep(t *testing.T) {
+	a := &Agent{state: NewScanState()}
+	// Legacy inference: len(AllowedPhases)==0 -> NOT deep (the bug).
+	a.allowedPhases = nil
+	a.state.AllowedPhases = nil
+	a.state.ScanDepth = "deep" // derived at Run() start
+	if !a.isDeepMode() {
+		t.Fatal("empty AllowedPhases means the full methodology: deep requirements must apply")
+	}
+	a.state.ScanDepth = "standard"
+	if a.isDeepMode() {
+		t.Fatal("explicit standard depth must not be deep")
+	}
+}
