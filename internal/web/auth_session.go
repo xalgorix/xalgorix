@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,21 +61,73 @@ type loginAttempt struct {
 	lockUntil time.Time
 }
 
+// Login-limiter defaults. Every threshold is operator-tunable via env (see
+// loginRateLimitDisabled / loginEnvMinutes / loginEnvInt), and
+// XALGORIX_LOGIN_RATE_LIMIT=off disables the limiter entirely.
 const (
-	loginAttemptWindow = 15 * time.Minute
-	loginMaxFailures   = 10
-	loginLockDuration  = 5 * time.Minute
+	defaultLoginWindow   = 15 * time.Minute
+	defaultLoginMaxFails = 10
+	defaultLoginLockFor  = 5 * time.Minute
 )
+
+// loginRateLimitDisabled reports whether the per-IP login limiter is fully
+// disabled via XALGORIX_LOGIN_RATE_LIMIT=off (accepted spellings: off,
+// disabled, false, 0, no). Intended for deployments where the login endpoint
+// is not reachable from the public internet (the scanner sits behind a
+// network-level allowlist or a reverse-proxy gate), or where a pooled
+// reverse-proxy IP can otherwise accumulate unrelated clients' failures and
+// lock out legitimate automation. Settings are read per attempt, so
+// configuration changes apply on the next login without a restart.
+func loginRateLimitDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("XALGORIX_LOGIN_RATE_LIMIT"))) {
+	case "off", "disabled", "false", "0", "no":
+		return true
+	}
+	return false
+}
+
+// loginEnvMinutes reads a positive integer minutes value from env with a
+// default; missing, unparseable, or non-positive values fall back to the
+// default rather than disabling the limiter by accident.
+func loginEnvMinutes(name string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return time.Duration(n) * time.Minute
+}
+
+// loginEnvInt reads a positive integer from env with a default; missing,
+// unparseable, or non-positive values fall back to the default.
+func loginEnvInt(name string, def int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
 
 // loginIsLocked returns (locked, retryAfterSeconds). It also garbage-collects
 // stale entries opportunistically so the map cannot grow unbounded.
 func loginIsLocked(ip string) (bool, int) {
+	if loginRateLimitDisabled() {
+		return false, 0
+	}
 	loginAttemptsMu.Lock()
 	defer loginAttemptsMu.Unlock()
 	now := time.Now()
+	window := loginEnvMinutes("XALGORIX_LOGIN_WINDOW_MINUTES", defaultLoginWindow)
 	// Opportunistic GC — bounded work, runs only when this IP is queried.
 	for k, v := range loginAttempts {
-		if now.Sub(v.firstFail) > loginAttemptWindow && now.After(v.lockUntil) {
+		if now.Sub(v.firstFail) > window && now.After(v.lockUntil) {
 			delete(loginAttempts, k)
 		}
 	}
@@ -88,20 +142,26 @@ func loginIsLocked(ip string) (bool, int) {
 }
 
 // loginRecordFailure increments the failure counter for an IP. After
-// loginMaxFailures within loginAttemptWindow, subsequent attempts are locked
-// out for loginLockDuration.
+// XALGORIX_LOGIN_MAX_FAILURES (default 10) within
+// XALGORIX_LOGIN_WINDOW_MINUTES (default 15), subsequent attempts are locked
+// out for XALGORIX_LOGIN_LOCKOUT_MINUTES (default 5). With
+// XALGORIX_LOGIN_RATE_LIMIT=off nothing is recorded at all.
 func loginRecordFailure(ip string) {
+	if loginRateLimitDisabled() {
+		return
+	}
 	loginAttemptsMu.Lock()
 	defer loginAttemptsMu.Unlock()
 	now := time.Now()
+	window := loginEnvMinutes("XALGORIX_LOGIN_WINDOW_MINUTES", defaultLoginWindow)
 	a := loginAttempts[ip]
-	if a == nil || now.Sub(a.firstFail) > loginAttemptWindow {
+	if a == nil || now.Sub(a.firstFail) > window {
 		loginAttempts[ip] = &loginAttempt{failures: 1, firstFail: now}
 		return
 	}
 	a.failures++
-	if a.failures >= loginMaxFailures {
-		a.lockUntil = now.Add(loginLockDuration)
+	if a.failures >= loginEnvInt("XALGORIX_LOGIN_MAX_FAILURES", defaultLoginMaxFails) {
+		a.lockUntil = now.Add(loginEnvMinutes("XALGORIX_LOGIN_LOCKOUT_MINUTES", defaultLoginLockFor))
 	}
 }
 
