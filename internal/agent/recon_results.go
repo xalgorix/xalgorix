@@ -61,9 +61,7 @@ func reconDimensionsForCommand(cmd string) []string {
 	if strings.Contains(cmd, "curl") || strings.Contains(cmd, "httpx") {
 		add(reconDimHTTP)
 	}
-	if strings.Contains(cmd, "whatweb") || strings.Contains(cmd, "wappalyzer") ||
-		strings.Contains(cmd, "wafw00f") || strings.Contains(cmd, "server:") ||
-		strings.Contains(cmd, "x-powered-by") {
+	if techFingerprintCommand(cmd) {
 		add(reconDimTech)
 	}
 	if strings.Contains(cmd, "katana") || strings.Contains(cmd, "gospider") ||
@@ -72,8 +70,7 @@ func reconDimensionsForCommand(cmd string) []string {
 		(strings.Contains(cmd, "grep") && strings.Contains(cmd, "href")) {
 		add(reconDimCrawl)
 	}
-	if (strings.Contains(cmd, ".js") || strings.Contains(cmd, "bundle") ||
-		strings.Contains(cmd, "chunk")) && strings.Contains(cmd, "curl") {
+	if jsAnalysisCommand(cmd) {
 		add(reconDimJS)
 	}
 	if strings.Contains(cmd, "swagger") || strings.Contains(cmd, "openapi") ||
@@ -196,8 +193,12 @@ func reconDimEvidenceSatisfied(dim, cmd, out string) bool {
 		return apiSurfaceEvidence(out)
 	case reconDimAuth:
 		return authSurfaceEvidence(out)
+	case reconDimCrawl:
+		return crawlEvidence(out, cmd)
+	case reconDimTech:
+		return techFingerprintEvidence(out, cmd)
 	case reconDimJS:
-		return jsAnalysisEvidence(out)
+		return jsAnalysisEvidence(out, cmd)
 	default:
 		return true
 	}
@@ -263,13 +264,142 @@ func authSurfaceEvidence(out string) bool {
 	return false
 }
 
-// jsAnalysisEvidence: JavaScript analysis completes when actual script
-// content was retrieved (bundle/source-map markers), not a 404 fallback page.
-func jsAnalysisEvidence(out string) bool {
+// techFingerprintCommand reports whether a command is a DELIBERATE
+// technology-fingerprinting action: a dedicated fingerprint tool, or a
+// header-fetching request (curl -I/-i/-sI/--head) whose output the evidence
+// layer can validate. A random command that merely contains "server:" or
+// "x-powered-by" in its text is not fingerprinting.
+var techHeaderFlagRe = regexp.MustCompile(`(?:^|[\s=])(?:-si|-i|--head|--include)(?:\s|$)`)
+
+func techFingerprintCommand(cmd string) bool {
+	if strings.Contains(cmd, "whatweb") || strings.Contains(cmd, "wappalyzer") ||
+		strings.Contains(cmd, "wafw00f") {
+		return true
+	}
+	if (strings.Contains(cmd, "curl") || strings.Contains(cmd, "httpx")) &&
+		techHeaderFlagRe.MatchString(cmd) {
+		return true
+	}
+	return false
+}
+
+// jsAnalysisCommand reports whether a command attempts first-party JS
+// analysis: fetching a script asset (curl/wget of a .js/.mjs/.map/bundle/
+// chunk URL), OR analyzing an ALREADY-DOWNLOADED JS artifact with bounded
+// local tools (rg/grep/jq/cat/sed/python). The download-then-grep workflow is
+// the primary real-world pattern - curl -o saves the file, the analysis runs
+// on the artifact, and the curl result alone carries little JS.
+func jsAnalysisCommand(cmd string) bool {
+	jsAsset := strings.Contains(cmd, ".js") || strings.Contains(cmd, ".mjs") ||
+		strings.Contains(cmd, ".map") || strings.Contains(cmd, "bundle") ||
+		strings.Contains(cmd, "chunk")
+	if !jsAsset {
+		return false
+	}
+	if strings.Contains(cmd, "curl") || strings.Contains(cmd, "wget") {
+		return true
+	}
+	for _, tool := range []string{"rg ", "grep ", "jq ", "cat ", "sed ", "python"} {
+		if strings.Contains(cmd, tool) {
+			return true
+		}
+	}
+	return false
+}
+
+// httpNotFoundMarker reports 404-class responses in curl-like output: an
+// error page is data about the request, never evidence the recon dimension
+// completed.
+func httpNotFoundMarker(l string) bool {
+	for _, m := range []string{"404 not found", "http/1.1 404", "http/2 404", "http/1.0 404", "status: 404"} {
+		if strings.Contains(l, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// crawlEvidence validates a crawling result. A 404 on robots.txt (or any
+// error-page fetch) is only an attempt. Real coverage comes from a dedicated
+// crawler run (any non-error output, including the VALID NEGATIVE "crawler
+// processed the application, zero additional routes"), useful robots/sitemap
+// content, link extraction from a real document, or browser navigation.
+func crawlEvidence(out, cmd string) bool {
 	l := strings.ToLower(out)
+	// Dedicated crawlers: a non-error run is valid; an empty result is a
+	// valid negative (the crawler really processed the application).
+	if strings.Contains(cmd, "katana") || strings.Contains(cmd, "gospider") ||
+		strings.Contains(cmd, "hakrawler") || strings.Contains(cmd, "discover_client_routes") ||
+		strings.Contains(cmd, "page_agent") {
+		return true
+	}
+	// robots.txt fetch: only useful content counts, never a 404/error body.
+	if strings.Contains(cmd, "robots.txt") {
+		return strings.Contains(l, "user-agent") || strings.Contains(l, "disallow") ||
+			strings.Contains(l, "allow:") || strings.Contains(l, "sitemap")
+	}
+	// sitemap fetch: useful content only.
+	if strings.Contains(cmd, "sitemap") {
+		return strings.Contains(l, "<urlset") || strings.Contains(l, "<loc") ||
+			strings.Contains(l, "<sitemap")
+	}
+	// link/route extraction from a real document.
+	if (strings.Contains(l, "href") || strings.Contains(l, "<a ") || strings.Contains(l, "routes found")) &&
+		!httpNotFoundMarker(l) {
+		return true
+	}
+	// explicit valid negative from a real crawler pass.
+	for _, m := range []string{"0 urls", "no urls found", "no results", "no links found", "found 0", "no routes", "no endpoints"} {
+		if strings.Contains(l, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// techFingerprintEvidence validates deliberate technology fingerprinting: a
+// dedicated tool that ran without error, or a real HTTP response carrying
+// useful technology headers (Server, X-Powered-By, Set-Cookie, framework
+// banners). A bare 200 body without those headers is only an attempt.
+func techFingerprintEvidence(out, cmd string) bool {
+	if strings.Contains(cmd, "whatweb") || strings.Contains(cmd, "wappalyzer") ||
+		strings.Contains(cmd, "wafw00f") {
+		return true
+	}
+	l := strings.ToLower(out)
+	return strings.Contains(l, "server:") || strings.Contains(l, "x-powered-by") ||
+		strings.Contains(l, "set-cookie")
+}
+
+// jsAnalysisEvidence validates a JS-analysis result. A dedicated local
+// analysis of a downloaded JS artifact (rg/grep/jq/...) is valid even with
+// zero interesting routes - a real JS file with no routes is a VALID
+// NEGATIVE analysis, not a missing dimension. A raw script fetch counts only
+// when actual JavaScript content came back (real JS tokens, not a 404 page
+// or an HTML fallback).
+func jsAnalysisEvidence(out, cmd string) bool {
+	l := strings.ToLower(out)
+	// Local artifact analysis: the artifact was fetched separately; a
+	// no-match grep is a valid negative analysis result.
+	for _, tool := range []string{"rg ", "grep ", "jq ", "cat "} {
+		if strings.Contains(cmd, tool) {
+			return true
+		}
+	}
+	if strings.Contains(cmd, "discover_client_routes") {
+		return true
+	}
+	if httpNotFoundMarker(l) {
+		return false
+	}
+	// HTML fallback pages are not scripts.
+	if strings.Contains(l, "<!doctype html") || strings.Contains(l, "<html") {
+		return false
+	}
 	for _, m := range []string{
 		"sourcemap", "sourcemappingurl", "webpack", "webpackjsonp",
 		"fetch(", "xmlhttprequest", "require(", "module.exports",
+		"function", "=>", "var ", "let ", "const ",
 	} {
 		if strings.Contains(l, m) {
 			return true
@@ -306,10 +436,14 @@ func markReconDimensionComplete(state *ScanState, dim string) {
 	case reconDimParams:
 		rc.ParamDiscovered = true
 	case reconDimAuth:
-		// Auth SURFACE mapping is complete on evidence; credential
-		// availability is tracked separately (AuthContextAvailable) and
+		// Auth SURFACE mapping completes only when no OBSERVED flow family
+		// remains unmapped: one live /login response maps the login flow,
+		// not the password-reset or OAuth flows the inventory carries.
+		// Credential availability is tracked separately (AuthContextAvailable);
 		// authenticated testing blocks separately (auth_coverage.go).
-		rc.AuthMapped = "complete"
+		if unmapped := authFlowsUnmapped(state); len(unmapped) == 0 {
+			rc.AuthMapped = "complete"
+		}
 	case reconDimHistorical:
 		rc.HistoricalChecked = true
 	case reconDimContent:
@@ -333,10 +467,16 @@ func hookReconResultTracker(state *ScanState, args map[string]string) HookResult
 	errStr := strings.TrimSpace(args["error"])
 	out := args["output"]
 
-	// Non-terminal recon-capable tools: a clean result completes crawling.
+	// discover_client_routes processes first-party JS and extracts client
+	// routes: a clean run completes crawling, and completes JS analysis when
+	// the surface ships JS assets. A valid negative (zero routes found after
+	// successful processing) is still real coverage.
 	if toolName == "discover_client_routes" {
-		if errStr == "" && strings.TrimSpace(out) != "" {
+		if errStr == "" {
 			markReconDimensionComplete(state, reconDimCrawl)
+			if jsAnalysisApplicable(state) {
+				markReconDimensionComplete(state, reconDimJS)
+			}
 		}
 		return HookResult{}
 	}
@@ -363,6 +503,14 @@ func hookReconResultTracker(state *ScanState, args map[string]string) HookResult
 		if !reconDimEvidenceSatisfied(dim, cmd, out) {
 			continue
 		}
+		if dim == reconDimAuth {
+			// Flow-family mapping: a validated auth result maps every flow
+			// family it covers; the dimension completes only when no
+			// OBSERVED family remains unmapped.
+			for _, f := range authFlowsFromText(out) {
+				markAuthFlowMapped(state, f)
+			}
+		}
 		markReconDimensionComplete(state, dim)
 	}
 	if failed {
@@ -381,13 +529,147 @@ func hookReconResultTracker(state *ScanState, args map[string]string) HookResult
 			state.DirBustingUsedWordlist = true
 		}
 	}
-	// HTML form evidence activates parameter discovery.
-	if strings.Contains(strings.ToLower(out), "<form") {
-		state.FormsObserved = true
+	// HTML form evidence activates parameter discovery AND becomes
+	// structured surface: fields attach to the form action endpoint.
+	recordFormsFromHTML(state, out)
+	// JS analysis enriches the structured surface: routes, API paths,
+	// GraphQL/WebSocket URLs from a VALIDATED JS result fold in with
+	// provenance "js" (bounded, confidence-anchored; a valid negative adds
+	// nothing).
+	if dimInCommand(cmd, reconDimJS) {
+		maybeRecordJSRoutes(state, out)
+	}
+	// API discovery enriches the structured surface: OpenAPI paths and
+	// GraphQL operations from a validated result enter the inventory with
+	// provenance "api".
+	if dimInCommand(cmd, reconDimAPI) {
+		maybeRecordAPIRoutes(state, out)
+	}
+	// Parameter discovery enriches the structured surface: names found by
+	// arjun/x8/etc. attach to the probed endpoint.
+	if dimInCommand(cmd, reconDimParams) {
+		maybeRecordDiscoveredParams(state, cmd, out)
 	}
 	// Structured host inventory: bare hostnames from DNS/subdomain results.
 	maybeRecordDiscoveredHosts(state, cmd, out)
 	return HookResult{}
+}
+
+// maxRoutesFromResult bounds per-result route extraction.
+const maxRoutesFromResult = 20
+
+// jsRouteMarkerKeywords anchor route candidates found in JS analysis output
+// to confident route-bearing lines (fetch/axios/XHR/router definitions,
+// API/GraphQL/WebSocket references).
+var jsRouteMarkerKeywords = []string{
+	"fetch", "axios", "xhr", "router", "route", "api", "graphql", "websocket", "ws://", "wss://",
+}
+
+// maybeRecordJSRoutes folds route candidates from a validated JS analysis
+// result into the structured surface with provenance "js". Only
+// marker-anchored lines contribute; arbitrary string literals in bundle text
+// are not promoted.
+func maybeRecordJSRoutes(state *ScanState, out string) {
+	if state == nil {
+		return
+	}
+	l := strings.ToLower(out)
+	confident := false
+	for _, k := range jsRouteMarkerKeywords {
+		if strings.Contains(l, k) {
+			confident = true
+			break
+		}
+	}
+	if !confident {
+		return
+	}
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if count >= maxRoutesFromResult {
+			break
+		}
+		ll := strings.ToLower(line)
+		if !containsAnyKeyword(ll, jsRouteMarkerKeywords) {
+			continue
+		}
+		for _, ep := range extractPaths(line) {
+			if count >= maxRoutesFromResult {
+				break
+			}
+			RecordSurfaceObservation(state, SurfaceObservation{
+				Endpoint: ep,
+				Source:   "js",
+				Promote:  true,
+			})
+			count++
+		}
+	}
+}
+
+// maybeRecordAPIRoutes folds paths from a validated API-discovery result
+// (OpenAPI/GraphQL documents, extracted /api/ listings) into the structured
+// surface with provenance "api". Bounded; idempotent via promotion dedupe.
+func maybeRecordAPIRoutes(state *ScanState, out string) {
+	if state == nil {
+		return
+	}
+	eps := extractPaths(out)
+	if len(eps) > maxRoutesFromResult {
+		eps = eps[:maxRoutesFromResult]
+	}
+	for _, ep := range eps {
+		RecordSurfaceObservation(state, SurfaceObservation{
+			Endpoint: ep,
+			Source:   "api",
+			Promote:  true,
+		})
+	}
+}
+
+// paramDiscoveryNameRe matches parameter-name listings in arjun/x8-style
+// output ("valid parameters: q, sort").
+var paramDiscoveryNameRe = regexp.MustCompile(`(?i)(?:valid\s+parameters?\s*:?|parameters?\s*found\s*:?|parameters?\s*:|params?\s*:)\s*(.{1,200})`)
+
+// maybeRecordDiscoveredParams attaches parameter names found by a validated
+// parameter-discovery run to the probed endpoint, so the discovery enriches
+// the structured surface (and applicability) instead of only flipping a
+// boolean.
+func maybeRecordDiscoveredParams(state *ScanState, cmd, out string) {
+	if state == nil {
+		return
+	}
+	endpoint := extractEndpointFromCmd(cmd)
+	if endpoint == "" {
+		return
+	}
+	seen := map[string]bool{}
+	var params []SurfaceParameter
+	for _, m := range paramDiscoveryNameRe.FindAllStringSubmatch(out, 8) {
+		for _, tok := range strings.FieldsFunc(m[1], func(r rune) bool {
+			return r == ',' || r == '|' || r == ';' || r == ' ' || r == '\n' || r == '\t' || r == '&'
+		}) {
+			tok = strings.Trim(tok, ":\"'-")
+			if !validParamName(tok) || seen[tok] {
+				continue
+			}
+			seen[tok] = true
+			params = append(params, SurfaceParameter{Name: tok, Location: "query"})
+			if len(params) >= maxObservedParamsPerEndpoint {
+				break
+			}
+		}
+		if len(params) >= maxObservedParamsPerEndpoint {
+			break
+		}
+	}
+	if len(params) > 0 {
+		RecordSurfaceObservation(state, SurfaceObservation{
+			Endpoint:   endpoint,
+			Parameters: params,
+			Source:     "param-mining",
+		})
+	}
 }
 
 // maxDiscoveredHosts bounds the structured host inventory.
@@ -429,8 +711,11 @@ func maybeRecordDiscoveredHosts(state *ScanState, cmd, out string) {
 }
 
 // scopeDomainSuffixes extracts the registrable-domain suffixes of the
-// configured targets (last two labels), so subdomain results can be filtered
-// to in-scope names. IP/local targets contribute nothing.
+// configured targets via the Public Suffix List, so subdomain results can be
+// filtered to in-scope names. *.example.co.uk scopes to example.co.uk, NEVER
+// to co.uk - deriving the suffix from the last two labels broadened
+// enumeration to the entire public suffix. IP/local targets contribute
+// nothing.
 func scopeDomainSuffixes(state *ScanState) []string {
 	if state == nil {
 		return nil
@@ -442,11 +727,10 @@ func scopeDomainSuffixes(state *ScanState) []string {
 		if host == "" || netIsIPOrLocal(host) {
 			continue
 		}
-		labels := strings.Split(strings.TrimSuffix(host, "."), ".")
-		if len(labels) < 2 {
+		suffix := registrableDomain(host)
+		if suffix == "" {
 			continue
 		}
-		suffix := strings.Join(labels[len(labels)-2:], ".")
 		if !seen[suffix] {
 			seen[suffix] = true
 			out = append(out, suffix)

@@ -17,8 +17,11 @@ package agent
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // ComprehensiveReconComplete reports whether every APPLICABLE recon
@@ -29,6 +32,27 @@ import (
 // gate.
 func ComprehensiveReconComplete(state *ScanState) bool {
 	return len(ComprehensiveReconMissing(state)) == 0
+}
+
+// reconDimDispositionSettled reports whether a recon dimension carries a
+// typed terminal disposition. Blocked and not_applicable are DIFFERENT
+// terminal reasons that both settle the dimension without claiming it
+// complete: blocked means the work was attempted and could not proceed
+// (network policy, unreachable host), not_applicable means the target
+// genuinely does not owe the dimension. Neither can be laundered from vague
+// prose - the typed update_plan path validates them.
+func reconDimDispositionSettled(state *ScanState, dim string) bool {
+	if state == nil {
+		return false
+	}
+	if state.ReconCoverage.NAMarked[dim] {
+		return true
+	}
+	switch state.ReconCoverage.Dispositions[dim] {
+	case "blocked", "not_applicable":
+		return true
+	}
+	return false
 }
 
 // ComprehensiveReconMissing lists the reconnaissance dimensions still owed,
@@ -57,7 +81,7 @@ func ComprehensiveReconMissing(state *ScanState) []string {
 	if !s.DirBustingDone {
 		add("content discovery with a real wordlist on the primary host (ffuf/gobuster/dirsearch, -maxtime bounded)")
 	}
-	if s.DirBustingDone && !s.DirBustingUsedWordlist && !rc.NAMarked["content_discovery"] {
+	if s.DirBustingDone && !s.DirBustingUsedWordlist && !reconDimDispositionSettled(s, "content_discovery") {
 		add("content discovery must run a REAL wordlist pass (ffuf -w common.txt / gobuster -w, bounded -maxtime; a few targeted probes are not content discovery)")
 	}
 	if len(s.DetectedTechs) == 0 {
@@ -68,13 +92,13 @@ func ComprehensiveReconMissing(state *ScanState) []string {
 	if !rc.HTTPProbed {
 		add("HTTP probing of the live web surface (confirm status, title, redirects)")
 	}
-	if !rc.TechFingerprinted && !rc.NAMarked["tech_fingerprint"] {
+	if !rc.TechFingerprinted && !reconDimDispositionSettled(s, "tech_fingerprint") {
 		add("deliberate technology fingerprinting (whatweb / wappalyzer, not just a Server header)")
 	}
-	if !rc.Crawled && !rc.NAMarked["crawling"] {
+	if !rc.Crawled && !reconDimDispositionSettled(s, "crawling") {
 		add("web crawling (katana/gospider/sitemap/robots or browser navigation)")
 	}
-	if len(rc.ContentDiscoveredHosts) == 0 && !rc.NAMarked["content_discovery"] {
+	if len(rc.ContentDiscoveredHosts) == 0 && !reconDimDispositionSettled(s, "content_discovery") {
 		add("content discovery with a real wordlist on the primary host")
 	}
 	// Per-application coverage: every distinct host the surface surfaced
@@ -89,46 +113,55 @@ func ComprehensiveReconMissing(state *ScanState) []string {
 	}
 	// First-party JS analysis is CONDITIONAL BUT REAL: crawling alone no
 	// longer satisfies a surface that ships meaningful client JS.
-	if jsAnalysisApplicable(s) && !rc.JSAnalyzed && !rc.NAMarked["js_analysis"] {
+	if jsAnalysisApplicable(s) && !rc.JSAnalyzed && !reconDimDispositionSettled(s, "js_analysis") {
 		add("JavaScript analysis of first-party bundles (routes, API paths, parameters, WebSocket/GraphQL URLs, source maps, secrets)")
 	}
 	// API mapping must represent actual discovery, not a 404 probe.
-	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !rc.NAMarked["api_surface"] {
+	if apiSignalsExist(s) && !rc.APISurfaceDiscovered && !reconDimDispositionSettled(s, "api_surface") {
 		add("API-surface mapping from real evidence (OpenAPI/Swagger parsed, GraphQL schema examined, or routes extracted from JS/traffic)")
 	}
 	// Auth SURFACE mapping is separate from credential availability: it can
 	// complete without credentials; authenticated testing blocks separately.
-	if authSurfaceExists(s) && rc.AuthMapped != "complete" && !rc.NAMarked["auth_mapping"] {
-		add("auth surface mapping (login/registration/password-reset/logout/MFA/OAuth/token endpoints, session cookies)")
+	// Mapping covers every flow family the SURFACE evidences - one live
+	// /login response maps the login flow, not the password-reset or OAuth
+	// flows the inventory also carries.
+	if !reconDimDispositionSettled(s, "auth_mapping") {
+		if authSurfaceExists(s) && rc.AuthMapped != "complete" {
+			add("auth surface mapping (login/registration/password-reset/logout/MFA/OAuth/token endpoints, session cookies)")
+		} else if rc.AuthMapped == "complete" {
+			if unmapped := authFlowsUnmapped(s); len(unmapped) > 0 {
+				add("auth surface mapping: observed flow families not yet mapped: %s", strings.Join(unmapped, ", "))
+			}
+		}
 	}
 	// Parameter discovery activates from forms, query strings, seeded
 	// parameters, and state-changing methods — not only from POSTs already
 	// observed.
-	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
+	if parameterizedSurfaceExists(s) && !rc.ParamDiscovered && !reconDimDispositionSettled(s, "parameter_discovery") {
 		add("parameter/input discovery (arjun/x8, HTML forms, query strings)")
 	}
 	// Scope-aware DNS/subdomain discovery: a bare-domain or wildcard scope
 	// owes enumeration; a single explicit host does not.
 	if subdomainScopeApplicable(s) {
-		if !rc.DNSResolved && !rc.NAMarked["dns"] {
+		if !rc.DNSResolved && !reconDimDispositionSettled(s, "dns") {
 			add("DNS resolution of the in-scope domain (dig/nslookup/host)")
 		}
-		if !rc.SubdomainEnumerated && !rc.NAMarked["subdomain_discovery"] {
+		if !rc.SubdomainEnumerated && !reconDimDispositionSettled(s, "subdomain_discovery") {
 			add("subdomain enumeration for the domain scope (subfinder/crt.sh/assetfinder) + live-host probing (httpx)")
 		}
 	}
 	// Historical URLs only for deep scans against public targets: local
 	// fixtures and private IPs owe nothing (and may record N/A).
-	if historicalApplicable(s) && !rc.HistoricalChecked && !rc.NAMarked["historical"] {
+	if historicalApplicable(s) && !rc.HistoricalChecked && !reconDimDispositionSettled(s, "historical") {
 		add("historical URL discovery (gau/waybackurls) for the public target")
 	}
 	// Deep mode expects additional breadth; standard mode does not inherit
 	// deep obligations. Derived from ScanDepth, never from specialists.
 	if s.DeepReconRequired {
-		if !rc.ServicesProbed && !rc.NAMarked["service_discovery"] {
+		if !rc.ServicesProbed && !reconDimDispositionSettled(s, "service_discovery") {
 			add("service/port enumeration (nmap/naabu) — deep mode")
 		}
-		if !rc.ParamDiscovered && !rc.NAMarked["parameter_discovery"] {
+		if !rc.ParamDiscovered && !reconDimDispositionSettled(s, "parameter_discovery") {
 			add("parameter/input discovery — deep mode (arjun/x8, forms, query strings)")
 		}
 	}
@@ -214,18 +247,33 @@ func hostnameOfTarget(raw string) string {
 }
 
 // isBareDomain reports whether a host is a registrable-domain-level scope
-// ("example.com") rather than a single named host ("app.example.com").
-// Two labels is the practical convention; deeper public suffixes are treated
-// as explicit hosts, which is the conservative direction (no forced
-// organization-wide enumeration).
+// ("example.com", "example.co.uk") rather than a single named host
+// ("app.example.com"). Uses the Public Suffix List so multi-label suffixes
+// (co.uk, com.au, co.in) resolve correctly; the old two-label dot count
+// misclassified example.co.uk as an explicit host and silently dropped its
+// enumeration obligations.
 func isBareDomain(host string) bool {
-	if host == "" {
-		return false
+	host = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(host, ".")))
+	return host != "" && registrableDomain(host) == host
+}
+
+// registrableDomain returns the effective TLD+1 of a host via the Public
+// Suffix List, or "" when the host is an IP, a local/private name, or not a
+// multi-label domain. It never returns a bare public suffix: *.example.co.uk
+// scopes to example.co.uk, never to co.uk.
+func registrableDomain(host string) string {
+	host = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(host, ".")))
+	if host == "" || strings.Count(host, ".") == 0 || netIsIPOrLocal(host) {
+		return ""
 	}
-	if netIsIPOrLocal(host) {
-		return false
+	if net.ParseIP(host) != nil {
+		return ""
 	}
-	return strings.Count(host, ".") == 1
+	eTLD, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return ""
+	}
+	return eTLD
 }
 
 // historicalApplicable reports whether historical URL discovery is owed:
@@ -338,8 +386,12 @@ func ReconDimensionChecklist(state *ScanState) []string {
 			lines = append(lines, "  \u2713 "+d.name)
 			continue
 		}
-		if d.naKey != "" && rc.NAMarked[d.naKey] {
-			lines = append(lines, "  \u2713 "+d.name+" (not applicable)")
+		if d.naKey != "" && reconDimDispositionSettled(s, d.naKey) {
+			if rc.NAMarked[d.naKey] {
+				lines = append(lines, "  \u2713 "+d.name+" (not applicable)")
+			} else {
+				lines = append(lines, "  \u2713 "+d.name+" (blocked)")
+			}
 			continue
 		}
 		lines = append(lines, "  \u2717 "+d.name)
@@ -351,35 +403,87 @@ func ReconDimensionChecklist(state *ScanState) []string {
 }
 
 // surfaceRevision fingerprints the structured attack surface so the planner
-// can detect that recon has expanded it since the engine-owned plan was last
-// built. A revision change — not a delegation event — is the trigger for a
-// plan refresh, keeping plan completeness identical with zero specialists.
+// can detect that recon has ENRICHED it since the plan was last built. It
+// covers every state component that can change
+// ApplicableClassesForEndpoint: the endpoint inventory, per-endpoint METHODS,
+// CONTENT TYPES, observed PARAMETERS, seeded-surface methods+params,
+// technologies, discovered hosts, form evidence, and observed auth-flow
+// families. A POST observed on an existing route, an application/xml content
+// type, or a ?url= query parameter changes the revision even when no new
+// endpoint appeared — applicability changed, so the plan must respond. All
+// components are sorted before joining; Go map iteration order never leaks in.
+// A revision change — not a delegation event — is the trigger for a plan
+// refresh, keeping plan completeness identical with zero specialists.
 func surfaceRevision(state *ScanState) string {
 	if state == nil {
 		return ""
 	}
-	eps := append([]string(nil), state.DiscoveredEndpoints...)
+	epSet := map[string]bool{}
+	for _, ep := range state.DiscoveredEndpoints {
+		epSet[ep] = true
+	}
+	for ep := range state.ObservedEndpointMethods {
+		epSet[ep] = true
+	}
+	for ep := range state.EndpointContentTypes {
+		epSet[ep] = true
+	}
+	for ep := range state.ObservedEndpointParameters {
+		epSet[ep] = true
+	}
+	eps := make([]string, 0, len(epSet))
+	for ep := range epSet {
+		eps = append(eps, ep)
+	}
 	sort.Strings(eps)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "ep=%d:%s", len(eps), strings.Join(eps, ","))
+	for _, ep := range eps {
+		if methods := sortedObservedMethods(state, ep); len(methods) > 0 {
+			fmt.Fprintf(&b, "|m:%s=%s", ep, strings.Join(methods, "+"))
+		}
+	}
+	for _, ep := range eps {
+		if cts := state.EndpointContentTypes[ep]; cts != "" {
+			fmt.Fprintf(&b, "|ct:%s=%s", ep, cts)
+		}
+	}
+	for _, ep := range eps {
+		if params := state.ObservedEndpointParameters[ep]; len(params) > 0 {
+			parts := make([]string, 0, len(params))
+			for _, p := range params {
+				parts = append(parts, p.Name+":"+p.Location)
+			}
+			fmt.Fprintf(&b, "|p:%s=%s", ep, strings.Join(parts, ","))
+		}
+	}
 	seeded := make([]string, 0, len(state.SeededSurface))
 	for _, se := range state.SeededSurface {
-		seeded = append(seeded, se.Path)
+		seeded = append(seeded,
+			se.Path+"|"+strings.ToUpper(strings.TrimSpace(se.Method))+"|"+strings.Join(se.Params, "."))
 	}
 	sort.Strings(seeded)
+	fmt.Fprintf(&b, "|seed=%d:%s", len(seeded), strings.Join(seeded, ","))
 	techs := make([]string, 0, len(state.DetectedTechs))
 	for t := range state.DetectedTechs {
 		techs = append(techs, t)
 	}
 	sort.Strings(techs)
+	fmt.Fprintf(&b, "|tech=%d:%s", len(techs), strings.Join(techs, ","))
 	hosts := make([]string, 0, len(state.DiscoveredHosts))
 	for h := range state.DiscoveredHosts {
 		hosts = append(hosts, h)
 	}
 	sort.Strings(hosts)
-	return fmt.Sprintf("ep=%d:%s|seed=%d:%s|tech=%d:%s|hosts=%d:%s",
-		len(eps), strings.Join(eps, ","),
-		len(seeded), strings.Join(seeded, ","),
-		len(techs), strings.Join(techs, ","),
-		len(hosts), strings.Join(hosts, ","))
+	fmt.Fprintf(&b, "|hosts=%d:%s", len(hosts), strings.Join(hosts, ","))
+	if state.FormsObserved {
+		b.WriteString("|forms=1")
+	}
+	for _, f := range authFlowsObservedForState(state) {
+		fmt.Fprintf(&b, "|authflow:%s", f)
+	}
+	return b.String()
 }
 
 // ── Root-owned deep recon duties ──────────────────────────────────────────
@@ -465,7 +569,7 @@ func hookDeepReconDirector(state *ScanState, args map[string]string) HookResult 
 	}
 	content := "RECON DIRECTIVE (root-owned; specialists are optional acceleration) — the comprehensive-recon contract still owes:\n" +
 		strings.Join(lines, "\n") +
-		"\nA failed command does not count as coverage: rerun tools that errored (check missing binaries/wordlists), and record a typed disposition via update_plan only for dimensions that genuinely do not apply."
+		"\nA failed command does not count as coverage: rerun tools that errored (check missing binaries/wordlists), and record a typed disposition via update_plan (\"dimension: not_applicable \u2014 reason\" or \"dimension: blocked \u2014 reason\") only for dimensions that genuinely do not apply or were attempted and stuck."
 	return HookResult{Directives: []Directive{{
 		Priority:  DirectivePriorityPlanner,
 		Category:  "recon",

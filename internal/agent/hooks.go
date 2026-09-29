@@ -84,8 +84,16 @@ type ReconCoverage struct {
 	HistoricalChecked bool
 	// NAMarked: dimensions the model has justified as not applicable via
 	// update_plan typed dispositions (the real mutation path is
-	// MarkReconDimensionNA / applyReconDispositions in recon_coverage.go).
+	// MarkReconDisposition / applyReconDispositions in recon_coverage.go).
 	NAMarked map[string]bool
+	// Dispositions: TYPED per-dimension states beyond the completion booleans:
+	// "blocked" (attempted, could not proceed) and "not_applicable" (the
+	// target genuinely does not owe the dimension). Both are recorded via the
+	// typed update_plan syntax and validated against engine evidence; blocked
+	// and not_applicable are distinct terminal reasons, and neither can be
+	// laundered from vague prose. NAMarked remains a compatibility view of the
+	// not_applicable subset.
+	Dispositions map[string]string
 	// SubdomainEnumerated: subdomain enumeration produced a VALIDATED
 	// result (subfinder/crt.sh/assetfinder/...). Required only when the
 	// configured scope covers a bare domain or wildcard.
@@ -297,10 +305,29 @@ type ScanState struct {
 	// methods and parameters). The "Endpoint Inventory" note remains the
 	// human/model-facing mirror; these are the machine-readable source of
 	// truth for what testing applies where.
-	ObservedEndpointMethods map[string]string
+	ObservedEndpointMethods map[string]map[string]bool
 	EndpointContentTypes    map[string]string
-	SeededSurface           []SeededSurfaceEndpoint
-	ReconHostDispositions   map[string]string
+	// ObservedEndpointParameters: black-box parameter names observed per
+	// endpoint (query strings, form fields, JSON keys, multipart names).
+	// Parameters are applicability SIGNALS, never vulnerability proof.
+	ObservedEndpointParameters map[string][]SurfaceParameter
+	// EndpointProvenance records where each endpoint was observed (request,
+	// browser, crawler, js, api, forms, manual, context) - the audit trail
+	// that keeps the structured surface authoritative over note regexes.
+	EndpointProvenance map[string]map[string]bool
+	SeededSurface      []SeededSurfaceEndpoint
+	// AuthFlowsMapped: observed auth flow families with validated mapping
+	// evidence. Auth-surface mapping covers every family the surface
+	// evidences (login, password-reset, OAuth, ...), not just the first
+	// live login response. AuthContextAvailable (credentials) remains a
+	// separate axis: its absence blocks authenticated testing, never
+	// auth-surface mapping.
+	AuthFlowsMapped map[string]bool
+	// SkillLoadFailures counts failed read_skill lookups per skill so a
+	// failed load stays retryable instead of permanently suppressing that
+	// class methodology.
+	SkillLoadFailures     map[string]int
+	ReconHostDispositions map[string]string
 	// ScanTargets is the configured assessment scope (the targets given to
 	// Run). It drives scope-aware applicability: a single explicit host does
 	// not owe subdomain enumeration; a bare domain or wildcard does.
@@ -370,22 +397,27 @@ func NewScanState() *ScanState {
 		ReconCoverage: ReconCoverage{
 			ContentDiscoveredHosts:   make(map[string]bool),
 			NAMarked:                 make(map[string]bool),
+			Dispositions:             make(map[string]string),
 			Attempted:                make(map[string]bool),
 			FailedAttempts:           make(map[string]int),
 			ContentDiscoveryAttempts: make(map[string]bool),
 		},
-		EndpointsTested:           make(map[string]bool),
-		EndpointClassCoverage:     make(map[string]map[string]bool),
-		VulnClassesTested:         make(map[string]bool),
-		AdvisoryLeadsNudged:       make(map[string]bool),
-		OASTVerificationNudged:    make(map[string]bool),
-		OASTVerificationReminders: make(map[string]int),
-		LoadedSkills:              make(map[string]*LoadedSkillInfo),
-		SkillSuggestionsSent:      make(map[string]bool),
-		ObservedEndpointMethods:   make(map[string]string),
-		EndpointContentTypes:      make(map[string]string),
-		ReconHostDispositions:     make(map[string]string),
-		AuthCoverage:              make(map[string]string),
+		EndpointsTested:            make(map[string]bool),
+		EndpointClassCoverage:      make(map[string]map[string]bool),
+		VulnClassesTested:          make(map[string]bool),
+		AdvisoryLeadsNudged:        make(map[string]bool),
+		OASTVerificationNudged:     make(map[string]bool),
+		OASTVerificationReminders:  make(map[string]int),
+		LoadedSkills:               make(map[string]*LoadedSkillInfo),
+		SkillSuggestionsSent:       make(map[string]bool),
+		ObservedEndpointMethods:    make(map[string]map[string]bool),
+		EndpointContentTypes:       make(map[string]string),
+		ObservedEndpointParameters: make(map[string][]SurfaceParameter),
+		EndpointProvenance:         make(map[string]map[string]bool),
+		AuthFlowsMapped:            make(map[string]bool),
+		SkillLoadFailures:          make(map[string]int),
+		ReconHostDispositions:      make(map[string]string),
+		AuthCoverage:               make(map[string]string),
 	}
 }
 
@@ -587,6 +619,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	// result detection and reset hooks run only after an executed attempt.
 	reg.Register(OnToolCall, hookReportRetryGuard)
 	reg.Register(OnToolCall, hookProfessionalDelegationPlanGuard)
+	reg.Register(OnToolCall, hookSingleAgentSpawnGuard)
 	reg.Register(OnToolCall, hookOASTSelfProbeGuard)
 	reg.Register(OnToolCall, hookTimingProofPreference)
 	reg.Register(OnToolCall, hookBenchmarkIsolationGuard)
@@ -619,6 +652,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnIterationStart, hookDeepReconDirector)
 	reg.Register(OnIterationStart, hookDelegationCoordinator)
 	reg.Register(OnIterationStart, hookAutoSkillSuggester)
+	reg.Register(OnIterationStart, hookLaneSkillGate)
 	reg.Register(OnIterationStart, hookPlanner)
 	// Registered AFTER the planner so state.Plan exists when we seed the ledger.
 	reg.Register(OnIterationStart, hookLedgerSeed)
@@ -665,6 +699,25 @@ func hookProfessionalDelegationPlanGuard(state *ScanState, args map[string]strin
 	return HookResult{
 		ForceSkip: true,
 		Nudge:     "⛔ PLAN BEFORE DELEGATION: build one grounded root assessment plan from the live endpoint inventory before spawning specialists. The shared plan and ledger define non-overlapping lanes and let child evidence close root tasks; spawning first causes duplicate whole-target scans and an unnecessary completion tail.",
+	}
+}
+
+// hookSingleAgentSpawnGuard hard-enforces zero specialists: when
+// DelegationEnabled is false, manual spawn_agent/create_agent calls are
+// rejected with a concise message. Single-agent mode is deterministic, not
+// advisory - with every specialist lane disabled, no agent may be created
+// from the model side either.
+func hookSingleAgentSpawnGuard(state *ScanState, args map[string]string) HookResult {
+	if state == nil || state.DelegationEnabled {
+		return HookResult{}
+	}
+	toolName := strings.TrimSpace(args["tool_name"])
+	if toolName != "spawn_agent" && toolName != "create_agent" {
+		return HookResult{}
+	}
+	return HookResult{
+		ForceSkip: true,
+		Nudge:     "⛔ Single-agent mode is active. Perform this work directly with the root agent - no specialist agents are available in this scan.",
 	}
 }
 
@@ -920,16 +973,20 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
 		}
-		// Structured-surface evidence: the method and content type of this
-		// concrete request drive the applicability layer (state-changing
-		// routes owe business-logic/race obligations, XML owes XXE, ...).
+		// Structured-surface evidence: the method, content type, and
+		// parameters of this concrete request flow through the central
+		// observation path so every request tool enriches the surface
+		// consistently (state-changing routes owe business-logic/race
+		// obligations, XML owes XXE, ?url= owes SSRF/open-redirect, ...).
 		if endpoint != "" {
-			if m := methodFromCurlCmd(rawCmd); m != "" {
-				recordEndpointMethod(state, endpoint, m)
-			}
-			if ct := contentTypeFromCmd(rawCmd); ct != "" {
-				recordEndpointContentType(state, endpoint, ct)
-			}
+			RecordSurfaceObservation(state, SurfaceObservation{
+				Endpoint:    endpoint,
+				Method:      methodFromCurlCmd(rawCmd),
+				ContentType: contentTypeFromCmd(rawCmd),
+				Parameters:  paramsFromCommand(rawCmd),
+				Source:      "request",
+				Promote:     true,
+			})
 		}
 
 		// ── Recon ATTEMPT tracking ──
@@ -1016,6 +1073,12 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		endpoint := extractEndpointFromCmd(rawCode)
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
+			RecordSurfaceObservation(state, SurfaceObservation{
+				Endpoint:   endpoint,
+				Parameters: paramsFromPythonCode(rawCode),
+				Source:     "request",
+				Promote:    true,
+			})
 		}
 		recordDetectedClassCoverage(state, endpoint, code)
 	}
@@ -1029,12 +1092,14 @@ func hookWorkTracker(state *ScanState, args map[string]string) HookResult {
 		endpoint := endpointFromToolArgs(args)
 		if endpoint != "" {
 			state.EndpointsTested[endpoint] = true
-			if m := strings.ToUpper(strings.TrimSpace(args["method"])); m != "" {
-				recordEndpointMethod(state, endpoint, m)
-			}
-			if ct := strings.TrimSpace(args["content_type"]); ct != "" {
-				recordEndpointContentType(state, endpoint, ct)
-			}
+			RecordSurfaceObservation(state, SurfaceObservation{
+				Endpoint:    endpoint,
+				Method:      strings.ToUpper(strings.TrimSpace(args["method"])),
+				ContentType: args["content_type"],
+				Parameters:  paramsFromToolArgs(args),
+				Source:      "request",
+				Promote:     true,
+			})
 		}
 		requestText := joinedToolArgs(args)
 		recordDetectedClassCoverage(state, endpoint, requestText)
@@ -2351,7 +2416,7 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 				BlockReason: "Comprehensive reconnaissance is incomplete. Missing dimensions:\n" +
 					"  - " + strings.Join(missing, "\n  - ") +
 					"\n\nSettle each dimension before finishing: complete it with a validated tool run (failed commands do not count; a genuinely empty valid scan does), " +
-					"or record a typed disposition via update_plan on the recon task (\"dimension: reason\" or \"host <host>: blocked/na/covered_by_equivalent\" after bounded retries).",
+					"or record a TYPED disposition via update_plan on the recon task: \"dimension: not_applicable \u2014 reason\" or \"dimension: blocked \u2014 reason\" (or \"host <host>: blocked/na/covered_by_equivalent\"). Blocked and not_applicable are different: blocked means attempted-but-stuck; not_applicable is rejected when the engine holds contradictory surface evidence.",
 			}
 		}
 		return planFinishGate(state, maxRejections)
@@ -2537,6 +2602,14 @@ Execute your next tool call NOW.`, iter, minIter, coverageNote, scannerNote, ski
 func planFinishGate(state *ScanState, maxRejections int) HookResult {
 	if state == nil || state.Plan == nil || state.Plan.IsEmpty() {
 		return HookResult{}
+	}
+	// Plan freshness: finish is evaluated against the CURRENT surface. If the
+	// surface was enriched after the plan was last built (new method, content
+	// type, parameter, or endpoint), absorb those changes first; newly
+	// created engine obligations then appear as remaining tasks below and
+	// block finish. A stale plan can never evaluate as complete.
+	if state.FinishAttempts <= maxRejections {
+		refreshPlanForSurface(state)
 	}
 	var remaining []string
 	var invalidSkips []string
@@ -3123,10 +3196,12 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	}
 
 	// Refresh discovered endpoints from notes once an inventory has been saved
-	// (hookWorkTracker flips EndpointInventorySaved). This grounds the plan +
-	// the coverage-gap math in what recon actually surfaced.
+	// (hookWorkTracker flips EndpointInventorySaved). The notes inventory is
+	// a compatibility fallback: structured observations (real observed
+	// traffic, forms, JS/API extraction) are MERGED in rather than replaced,
+	// so a runtime-enriched surface never regresses to note text alone.
 	if state.EndpointInventorySaved {
-		state.DiscoveredEndpoints = extractEndpointsFromNotes(state)
+		state.DiscoveredEndpoints = mergeDiscoveredEndpoints(state, extractEndpointsFromNotes(state))
 	}
 	// A curl to /api/health is not a real attack-surface inventory. Building a
 	// generic whole-target plan from one observed path caused the coordinator
@@ -3165,17 +3240,14 @@ func hookPlanner(state *ScanState, args map[string]string) HookResult {
 	// Plan refresh belongs to the PLANNER, not to delegation: recon expands
 	// the surface while it runs (crawl, JS analysis, content discovery,
 	// OpenAPI, redirects, DNS), and the engine-owned plan must absorb those
-	// discoveries whether or not any specialist exists. A surface revision
-	// change triggers a rebuild that preserves settled outcomes; an
-	// LLM-authored plan is never clobbered. With zero specialists the plan
-	// stays exactly as complete as with the wave enabled.
-	if state.PlanBuilt && state.Plan != nil && planIsEngineAuthored(state.Plan) &&
-		len(state.DiscoveredEndpoints) > 0 {
-		if rev := surfaceRevision(state); rev != state.PlanSurfaceRevision {
-			refreshEnginePlan(state)
-			state.PlanSurfaceRevision = rev
-		}
-	}
+	// discoveries whether or not any specialist exists. The refresh trigger is
+	// the SURFACE REVISION, which fingerprints every applicability-changing
+	// fact (methods, content types, parameters, forms, auth flows) - not just
+	// the endpoint list. Engine-authored plans rebuild; MIXED plans receive
+	// missing engine obligations incrementally via MergeRequiredEngineTasks;
+	// purely LLM-authored plans are never clobbered. With zero specialists the
+	// plan stays exactly as complete as with the wave enabled.
+	refreshPlanForSurface(state)
 
 	// Reconcile plan status against exact endpoint × class coverage so a test on
 	// one route cannot complete the grouped task for every discovered route.

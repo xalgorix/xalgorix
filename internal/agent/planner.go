@@ -533,6 +533,98 @@ func skipDispositionStillValid(state *ScanState, t *Task) bool {
 	return true
 }
 
+// planHasEngineTasks reports whether the plan is MIXED: at least one
+// engine-owned (Origin "auto") task exists alongside LLM-authored tasks.
+// Mixed plans receive incremental engine-task merging on surface change
+// instead of a wholesale rebuild; purely LLM-authored plans are never
+// rewritten by the engine.
+func planHasEngineTasks(p *Plan) bool {
+	if p == nil {
+		return false
+	}
+	for _, t := range p.Tasks {
+		if t.Origin == "auto" {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshPlanForSurface is the single plan-freshness entry point, called by
+// the planner hook each iteration and by the finish gate before it evaluates
+// completeness. When the surface revision changed since the plan was last
+// built: an engine-authored plan is rebuilt (settled outcomes preserved), a
+// MIXED plan receives missing engine-owned tasks via MergeRequiredEngineTasks,
+// and purely LLM-authored plans only record the new revision. The revision
+// is always updated so freshness tracking stays consistent.
+func refreshPlanForSurface(state *ScanState) {
+	if state == nil || state.Plan == nil || !state.PlanBuilt || len(state.DiscoveredEndpoints) == 0 {
+		return
+	}
+	rev := surfaceRevision(state)
+	if rev == state.PlanSurfaceRevision {
+		return
+	}
+	switch {
+	case planIsEngineAuthored(state.Plan):
+		refreshEnginePlan(state)
+	case planHasEngineTasks(state.Plan):
+		if MergeRequiredEngineTasks(state, state.Plan) > 0 {
+			reconcilePlan(state)
+			if l := ledgerForState(state); l != nil {
+				seedLedgerFromPlan(state, l)
+			}
+		}
+	}
+	state.PlanSurfaceRevision = rev
+}
+
+// MergeRequiredEngineTasks incrementally adds MISSING engine-owned tasks to
+// an existing (possibly LLM-authored) plan. All existing tasks - model-built
+// or engine - keep their status, notes, and dependencies; only absent
+// engine obligations are appended, so a later upload endpoint can add the
+// file-upload lane without touching any custom task, and a later workflow
+// route can add business-logic + race-conditions lanes. Recorded N/A skips
+// are revalidated against the CURRENT surface: a skip the new evidence
+// contradicts is reopened. Returns the number of tasks added.
+func MergeRequiredEngineTasks(state *ScanState, plan *Plan) int {
+	if state == nil || plan == nil {
+		return 0
+	}
+	required := AutoPlanFromState(state)
+	if required == nil {
+		return 0
+	}
+	added := 0
+	for _, t := range required.Tasks {
+		existing := plan.Get(t.ID)
+		if existing != nil || plan.Get(t.ID+"-coverage") != nil {
+			// Reevaluate recorded N/A skips: the surface change that
+			// triggered this merge may have invalidated them.
+			if existing != nil && existing.Status == TaskSkipped && !skipDispositionStillValid(state, existing) {
+				existing.Status = TaskPending
+				existing.Disposition = ""
+			}
+			continue
+		}
+		// Keep custom dependencies intact; only reference deps that exist
+		// in THIS plan so a merged task never waits on a phantom task.
+		nt := *t
+		nt.DependsOn = nil
+		for _, d := range t.DependsOn {
+			if plan.Get(d) != nil {
+				nt.DependsOn = append(nt.DependsOn, d)
+			}
+		}
+		if nt.Notes != "" {
+			nt.Notes += " (added by engine surface refresh)"
+		}
+		plan.add(&nt)
+		added++
+	}
+	return added
+}
+
 // newCoverageTask builds the engine-owned per-class coverage task. It is the
 // coverage floor for both the auto plan and model-authored plans: a class task
 // carries Origin "auto", so update_plan cannot hand-complete it — only the

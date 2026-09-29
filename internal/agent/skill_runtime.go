@@ -40,6 +40,18 @@ func hookSkillLoadTracker(state *ScanState, args map[string]string) HookResult {
 	}
 	if args["error"] != "" {
 		state.FailedSkillLoads++
+		// Skill failure recovery: a failed lookup must not permanently
+		// suppress that class methodology. Record the per-skill failure
+		// (bounded retries) and clear the delivered-recommendation marker so
+		// the skill can be recommended/resolved again.
+		name := strings.TrimSpace(args["name"])
+		if name != "" {
+			if state.SkillLoadFailures == nil {
+				state.SkillLoadFailures = make(map[string]int)
+			}
+			state.SkillLoadFailures[name]++
+			delete(state.SkillSuggestionsSent, name)
+		}
 		return HookResult{}
 	}
 	name := strings.TrimSpace(args["skill_name"])
@@ -142,6 +154,53 @@ func recommendedSkillsForState(state *ScanState) []skillRecommendation {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Skill < out[j].Skill })
 	return out
+}
+
+// maxLaneSkillLoadRetries bounds how many times the lane-skill gate keeps
+// demanding a skill whose lookups keep failing before it stops nagging (the
+// class obligation itself is unaffected).
+const maxLaneSkillLoadRetries = 3
+
+// hookLaneSkillGate (OnIterationStart) makes active-lane methodology use
+// DETERMINISTIC: when the next READY plan lane carries a vulnerability class
+// whose methodology skill has not been LOADED yet, a directive stays active
+// until read_skill succeeds. A delivered RECOMMENDATION is not a LOADED
+// skill - those are different states, and only a successful load satisfies
+// the gate. Bounded: after repeated failed lookups the gate stops nagging,
+// and the failure remains retryable through search_skills.
+func hookLaneSkillGate(state *ScanState, args map[string]string) HookResult {
+	if state == nil || state.Plan == nil || !state.PlanBuilt || state.ReconOnlyMode {
+		return HookResult{}
+	}
+	var next *Task
+	var skill string
+	for _, t := range state.Plan.NextTasks(3) {
+		if strings.TrimSpace(t.VulnClass) == "" {
+			continue
+		}
+		candidate, ok := VulnClassSkill(t.VulnClass)
+		if !ok || candidate == "" {
+			continue
+		}
+		if state.LoadedSkills != nil && state.LoadedSkills[candidate] != nil {
+			continue // methodology already in context for this lane
+		}
+		next = t
+		skill = candidate
+		break
+	}
+	if next == nil {
+		return HookResult{}
+	}
+	if state.SkillLoadFailures[skill] >= maxLaneSkillLoadRetries {
+		return HookResult{}
+	}
+	return HookResult{Directives: []Directive{{
+		Priority:  DirectivePriorityCritical,
+		Category:  "methodology",
+		DedupeKey: "lane-skill-" + skill,
+		Content:   fmt.Sprintf("ACTIVE LANE METHODOLOGY: the current plan lane [%s] (%s) requires its methodology skill. Call read_skill(name=%q) and apply it to this lane before testing. This gate stays active until the skill is loaded.", next.ID, next.VulnClass, skill),
+	}}}
 }
 
 // skillCovered reports whether a skill is either already loaded or already

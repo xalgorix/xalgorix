@@ -40,7 +40,8 @@ type SurfaceParameter struct {
 type SurfaceEndpoint struct {
 	Endpoint     string // coverage-matrix alias (host+path or path)
 	Path         string
-	Method       string // GET/POST/PUT/PATCH/DELETE; "" unknown
+	Method       string   // primary observed method (compat view); "" unknown
+	Methods      []string // every observed method, sorted, uppercased - real routes commonly serve GET + POST + ...
 	ContentTypes []string
 	Parameters   []SurfaceParameter
 	Features     []string // graphql, websocket, upload, workflow, xml, json, object-scoped, static-asset, auth-surface, admin-surface, jwt
@@ -57,13 +58,29 @@ func (se *SurfaceEndpoint) HasFeature(f string) bool {
 	return false
 }
 
-// stateChanging reports whether the method mutates state.
+// stateChanging reports whether ANY observed method mutates state.
 func (se *SurfaceEndpoint) stateChanging() bool {
+	for _, m := range se.Methods {
+		switch strings.ToUpper(m) {
+		case "POST", "PUT", "PATCH", "DELETE":
+			return true
+		}
+	}
 	switch strings.ToUpper(se.Method) {
 	case "POST", "PUT", "PATCH", "DELETE":
 		return true
 	}
 	return false
+}
+
+// hasMethod reports whether the endpoint was observed with the method.
+func (se *SurfaceEndpoint) hasMethod(method string) bool {
+	for _, m := range se.Methods {
+		if strings.EqualFold(m, method) {
+			return true
+		}
+	}
+	return strings.EqualFold(se.Method, method)
 }
 
 // ── Feature detection (path/param/content-type evidence only) ────────────────
@@ -181,25 +198,49 @@ func buildSurfaceEndpoint(state *ScanState, endpoint string) *SurfaceEndpoint {
 	se.Path = path
 
 	// Seed artifact metadata (richest source).
+	methods := map[string]bool{}
+	paramSeen := map[string]bool{}
 	for _, s := range state.SeededSurface {
 		if samePath(s.Path, path) || samePath(s.Path, value) {
 			if m := strings.ToUpper(strings.TrimSpace(s.Method)); m != "" {
-				se.Method = m
+				methods[m] = true
 			}
 			for _, p := range s.Params {
+				if p == "" || paramSeen[p+":unknown"] {
+					continue
+				}
+				paramSeen[p+":unknown"] = true
 				se.Parameters = append(se.Parameters, SurfaceParameter{Name: p, Location: "unknown"})
 			}
 			se.Source = "context"
 		}
 	}
-	// Observed method from real requests.
-	if m, ok := state.ObservedEndpointMethods[endpoint]; ok && se.Method == "" {
-		se.Method = strings.ToUpper(m)
+	// Observed methods from real requests: EVERY method the surface saw -
+	// a later POST never replaces an earlier GET and vice versa.
+	for _, m := range sortedObservedMethods(state, endpoint) {
+		methods[m] = true
 	}
+	// Runtime black-box parameter observations (query/form/JSON/multipart).
+	for _, alias := range endpointCoverageAliases(endpoint) {
+		for _, p := range state.ObservedEndpointParameters[alias] {
+			key := p.Name + ":" + p.Location
+			if p.Name == "" || paramSeen[key] {
+				continue
+			}
+			paramSeen[key] = true
+			se.Parameters = append(se.Parameters, p)
+		}
+	}
+	se.Methods = sortedStringSet(methods)
+	se.Method = primaryMethod(se.Methods)
 	// Content types observed for this endpoint.
-	if cts, ok := state.EndpointContentTypes[endpoint]; ok && cts != "" {
-		se.ContentTypes = strings.FieldsFunc(cts, func(r rune) bool { return r == ',' || r == ';' || r == ' ' })
+	for _, alias := range endpointCoverageAliases(endpoint) {
+		if cts := state.EndpointContentTypes[alias]; cts != "" {
+			se.ContentTypes = append(se.ContentTypes,
+				strings.FieldsFunc(cts, func(r rune) bool { return r == ',' || r == ';' || r == ' ' })...)
+		}
 	}
+	se.ContentTypes = dedupeStrings(se.ContentTypes)
 
 	se.Features = deriveEndpointFeatures(se, state)
 	return se
@@ -268,6 +309,50 @@ func deriveEndpointFeatures(se *SurfaceEndpoint, state *ScanState) []string {
 		_ = se
 	}
 	return dedupeStrings(features)
+}
+
+// sortedObservedMethods returns every method observed for an endpoint
+// (across its coverage-alias keys), sorted.
+func sortedObservedMethods(state *ScanState, endpoint string) []string {
+	if state == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, alias := range endpointCoverageAliases(endpoint) {
+		for m, observed := range state.ObservedEndpointMethods[alias] {
+			if observed {
+				seen[strings.ToUpper(m)] = true
+			}
+		}
+	}
+	return sortedStringSet(seen)
+}
+
+// sortedStringSet joins a set of non-empty strings in sorted order.
+func sortedStringSet(in map[string]bool) []string {
+	out := make([]string, 0, len(in))
+	for s := range in {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// primaryMethod picks the compat single-method view: the first
+// state-changing method, else the first sorted method.
+func primaryMethod(methods []string) string {
+	for _, m := range methods {
+		switch strings.ToUpper(m) {
+		case "POST", "PUT", "PATCH", "DELETE":
+			return strings.ToUpper(m)
+		}
+	}
+	if len(methods) > 0 {
+		return methods[0]
+	}
+	return ""
 }
 
 // parseSurfacePath extracts the path portion of a URL-ish endpoint string.
@@ -378,18 +463,29 @@ func (se *SurfaceEndpoint) ApplicableClasses() []string {
 		add("nosqli", "sqli")
 	}
 
-	// Generic input classes for any parameterized endpoint.
-	if se.HasFeature("parameterized") || (se.Method != "" && se.Method != "GET" && se.Method != "HEAD") {
+	// Generic input classes for any parameterized endpoint or any
+	// non-GET/HEAD/OPTIONS method observed on it.
+	nonGetMethod := false
+	for _, m := range se.Methods {
+		if m != "" && m != "GET" && m != "HEAD" && m != "OPTIONS" {
+			nonGetMethod = true
+			break
+		}
+	}
+	if se.HasFeature("parameterized") || nonGetMethod {
 		add("sqli", "xss", "parameter_mining")
 	}
 	// State-changing obligations.
 	if se.stateChanging() {
 		add("csrf", "idor", "business-logic", "race-conditions")
-		if strings.EqualFold(se.Method, "PUT") || strings.EqualFold(se.Method, "PATCH") {
-			add("mass-assignment")
+		for _, m := range se.Methods {
+			if strings.EqualFold(m, "PUT") || strings.EqualFold(m, "PATCH") {
+				add("mass-assignment")
+				break
+			}
 		}
 	}
-	if strings.EqualFold(se.Method, "GET") && se.HasFeature("parameterized") {
+	if se.hasMethod("GET") && se.HasFeature("parameterized") {
 		add("sqli", "xss", "parameter_mining", "ssrf")
 	}
 
@@ -482,26 +578,24 @@ func contentTypeFromCmd(cmd string) string {
 	return ""
 }
 
-// recordEndpointMethod stores the observed method for an endpoint. A
-// state-changing observation is never downgraded by a later GET (same route
-// observed both ways); GET never overwrites a known mutating method.
+// recordEndpointMethod records one observed HTTP method for an endpoint.
+// Real routes commonly serve several methods; the model is a SET, so a later
+// observation can never replace or downgrade an earlier one (GET then POST
+// keeps BOTH, and either observation order produces the same state).
 func recordEndpointMethod(state *ScanState, endpoint, method string) {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if state == nil || endpoint == "" || method == "" {
 		return
 	}
 	if state.ObservedEndpointMethods == nil {
-		state.ObservedEndpointMethods = make(map[string]string)
+		state.ObservedEndpointMethods = make(map[string]map[string]bool)
 	}
-	switch state.ObservedEndpointMethods[endpoint] {
-	case "POST", "PUT", "PATCH", "DELETE":
-		if method == "GET" || method == "HEAD" {
-			return
-		}
+	set, ok := state.ObservedEndpointMethods[endpoint]
+	if !ok {
+		set = make(map[string]bool)
+		state.ObservedEndpointMethods[endpoint] = set
 	}
-	if state.ObservedEndpointMethods[endpoint] == "" {
-		state.ObservedEndpointMethods[endpoint] = method
-	}
+	set[method] = true
 }
 
 func recordEndpointContentType(state *ScanState, endpoint, contentType string) {
@@ -512,12 +606,12 @@ func recordEndpointContentType(state *ScanState, endpoint, contentType string) {
 	if state.EndpointContentTypes == nil {
 		state.EndpointContentTypes = make(map[string]string)
 	}
-	existing := state.EndpointContentTypes[endpoint]
-	if !strings.Contains(existing, contentType) {
-		if existing == "" {
-			state.EndpointContentTypes[endpoint] = contentType
-		} else {
-			state.EndpointContentTypes[endpoint] = existing + "," + contentType
-		}
+	seen := map[string]bool{}
+	for _, ct := range strings.FieldsFunc(state.EndpointContentTypes[endpoint], func(r rune) bool {
+		return r == ',' || r == ';' || r == ' '
+	}) {
+		seen[ct] = true
 	}
+	seen[contentType] = true
+	state.EndpointContentTypes[endpoint] = strings.Join(sortedStringSet(seen), ",")
 }

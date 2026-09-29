@@ -14,10 +14,10 @@ func surfaceState(eps []string, methods map[string]string, cts map[string]string
 	s.ReconDone = true
 	s.DiscoveredEndpoints = eps
 	for k, v := range methods {
-		s.ObservedEndpointMethods[k] = v
+		recordEndpointMethod(s, k, v)
 	}
 	for k, v := range cts {
-		s.EndpointContentTypes[k] = v
+		recordEndpointContentType(s, k, v)
 	}
 	return s
 }
@@ -156,8 +156,8 @@ func TestTaskCoverage_RespectsApplicability(t *testing.T) {
 func TestLedgerSeeding_BusinessLogicHypotheses(t *testing.T) {
 	ctx, state := newTestCtxState(t)
 	state.DiscoveredEndpoints = []string{"example.com/api/checkout", "example.com/api/coupon/redeem"}
-	state.ObservedEndpointMethods["example.com/api/checkout"] = "POST"
-	state.ObservedEndpointMethods["example.com/api/coupon/redeem"] = "POST"
+	recordEndpointMethod(state, "example.com/api/checkout", "POST")
+	recordEndpointMethod(state, "example.com/api/coupon/redeem", "POST")
 	state.Plan = AutoPlanFromState(state)
 
 	if state.Plan.Get("test-business-logic") == nil {

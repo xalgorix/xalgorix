@@ -258,6 +258,85 @@ func seedLedgerFromPlan(state *ScanState, l *scanctx.LedgerStore) int {
 			}
 		}
 	}
+	seeded += seedParamHypotheses(state, l)
+	return seeded
+}
+
+// maxParamHypotheses bounds parameter-level hypothesis seeding.
+const maxParamHypotheses = 24
+
+// paramClassCandidates maps a semantic parameter name to the vulnerability
+// classes it makes APPLICABLE (a signal, never proof: a dangerous-looking
+// name alone never reports anything).
+func paramClassCandidates(name string) []string {
+	lp := strings.ToLower(strings.TrimSpace(name))
+	if lp == "" {
+		return nil
+	}
+	switch {
+	case hasParamLike([]string{lp}, urlishParams):
+		return []string{"ssrf", "open-redirect"}
+	case hasParamLike([]string{lp}, fileishParams):
+		return []string{"path_traversal"}
+	case hasParamLike([]string{lp}, roleParams):
+		return []string{"mass-assignment", "privilege-escalation"}
+	case hasParamLike([]string{lp}, idLikeParams):
+		return []string{"idor"}
+	}
+	return nil
+}
+
+// seedParamHypotheses creates parameter-specific hypotheses for observed
+// high-value parameters: SSRF on /fetch?url=, traversal on /download?file=,
+// mass-assignment on role fields, IDOR on object ids. Parameter names are
+// applicability signals; every hypothesis still requires concrete
+// differential evidence to become a finding. Idempotent via ledger dedup on
+// (class, endpoint, parameter, role); bounded to avoid combinatorial
+// explosions.
+func seedParamHypotheses(state *ScanState, l *scanctx.LedgerStore) int {
+	if state == nil || l == nil {
+		return 0
+	}
+	seeded := 0
+	seed := func(endpoint, param, class string) bool {
+		before := l.Len()
+		l.Upsert(scanctx.Hypothesis{
+			Title:      "Test " + class + " on " + endpoint + " (parameter: " + param + ")",
+			VulnClass:  class,
+			Endpoint:   endpoint,
+			Parameter:  param,
+			Status:     scanctx.HypothesisQueued,
+			Confidence: 0.5,
+			Origin:     "auto-surface-param",
+			NextAction: "Probe " + endpoint + " for " + class + " through the " + param + " parameter: benign control first, then the class-specific technique; record the differential as evidence.",
+		})
+		if l.Len() > before {
+			seeded++
+		}
+		return seeded < maxParamHypotheses
+	}
+	for _, ep := range state.DiscoveredEndpoints {
+		var params []SurfaceParameter
+		for _, alias := range endpointCoverageAliases(ep) {
+			params = append(params, state.ObservedEndpointParameters[alias]...)
+		}
+		for _, p := range params {
+			for _, class := range paramClassCandidates(p.Name) {
+				if !seed(ep, p.Name, class) {
+					return seeded
+				}
+			}
+		}
+	}
+	for _, se := range state.SeededSurface {
+		for _, name := range se.Params {
+			for _, class := range paramClassCandidates(name) {
+				if !seed(se.Path, name, class) {
+					return seeded
+				}
+			}
+		}
+	}
 	return seeded
 }
 

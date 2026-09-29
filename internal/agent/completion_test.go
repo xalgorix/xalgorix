@@ -135,7 +135,7 @@ func TestReconNA_MarkedTypedDimensions(t *testing.T) {
 	if state.ReconCoverage.NAMarked["service_discovery"] {
 		t.Fatal("setup: dimension must start pending")
 	}
-	applied := applyReconDispositions(state, "service_discovery: raw IP target, no ports beyond HTTP\nwayback: static target, no historical content expected")
+	applied := applyReconDispositions(state, "service_discovery: not_applicable \u2014 raw IP target, no ports beyond HTTP\nwayback: not_applicable \u2014 static target, no historical content expected")
 	if len(applied) != 2 {
 		t.Fatalf("expected 2 applied dispositions, got %v", applied)
 	}
@@ -197,7 +197,7 @@ func TestReconApplicability_SignalDrivenRequirements(t *testing.T) {
 	if !authSurfaceExists(state) {
 		t.Fatal("a /login inventory must set auth signals")
 	}
-	state.ObservedEndpointMethods["example.com/api/users"] = "POST"
+	recordEndpointMethod(state, "example.com/api/users", "POST")
 	if !parameterizedSurfaceExists(state) {
 		t.Fatal("an observed POST must set parameterized signals")
 	}
@@ -206,15 +206,42 @@ func TestReconApplicability_SignalDrivenRequirements(t *testing.T) {
 	assertAny(t, missing, "API-surface")
 	assertAny(t, missing, "auth surface")
 	assertAny(t, missing, "parameter/input discovery")
-	// Dispositions clear the demands.
-	applyReconDispositions(state, "api_surface: no documentation or introspection surface\nauth_mapping: anonymous-only target\nparameter_discovery: no parameterized endpoints")
+	// N/A is REJECTED when engine evidence contradicts it (this state holds
+	// API/auth/parameter signals); a failed/unknown disposition value is
+	// likewise not applied.
+	applied := applyReconDispositions(state, "api_surface: not_applicable \u2014 no documentation or introspection surface\nauth_mapping: not_applicable \u2014 anonymous-only target\nparameter_discovery: not_applicable \u2014 no parameterized endpoints")
+	if len(applied) == 0 {
+		t.Fatal("rejected dispositions must be echoed back")
+	}
+	for _, line := range applied {
+		if !strings.Contains(line, "rejected:") {
+			t.Fatalf("contradicted N/A dispositions must be rejected, got %v", applied)
+		}
+	}
+	if state.ReconCoverage.NAMarked["api_surface"] {
+		t.Fatal("a contradicted N/A must not mark the dimension N/A")
+	}
+	// "failed" is not a disposition keyword: it must not apply either.
+	applyReconDispositions(state, "api_surface: failed")
+	if state.ReconCoverage.NAMarked["api_surface"] || state.ReconCoverage.Dispositions["api_surface"] != "" {
+		t.Fatal("api_surface: failed must not become N/A or blocked")
+	}
+	// Blocked is a DISTINCT accepted terminal state: the work was attempted
+	// and could not proceed, which does not claim the dimension is absent.
+	applyReconDispositions(state, "api_surface: blocked \u2014 no API docs reachable\nauth_mapping: blocked \u2014 anonymous-only target\nparameter_discovery: blocked \u2014 no parameterized endpoints")
 	missing = a.reconIncompleteReasons()
 	for _, m := range missing {
 		for _, banned := range []string{"API-surface", "auth mapping", "parameter/input"} {
 			if strings.Contains(m, banned) {
-				t.Fatalf("N/A dimension must not be demanded anymore, got %q", m)
+				t.Fatalf("blocked dimensions must not be demanded anymore, got %q", m)
 			}
 		}
+	}
+	if state.ReconCoverage.NAMarked["api_surface"] {
+		t.Fatal("blocked must never be recorded as not_applicable")
+	}
+	if state.ReconCoverage.Dispositions["api_surface"] != "blocked" {
+		t.Fatalf("blocked must be recorded as its own typed state, got %q", state.ReconCoverage.Dispositions["api_surface"])
 	}
 }
 

@@ -376,9 +376,24 @@ func TestSingleAgent_CrawlingDoesNotBypassJSAnalysis(t *testing.T) {
 	}
 	fireExec(state, "curl -sk https://example.test/static/js/app.js -o tmp/app.js",
 		"webpackChunk: fetch('/api/orders')")
-	if !state.ReconCoverage.JSAnalyzed || !ComprehensiveReconComplete(state) {
-		t.Fatal("a validated JS analysis must settle the dimension and complete recon")
+	if !state.ReconCoverage.JSAnalyzed {
+		t.Fatal("a validated JS analysis must settle the JS dimension")
 	}
+	// The validated JS result ENRICHES the structured surface: the bundle's
+	// fetch('/api/orders') promotes /api/orders with provenance "js", which
+	// legitimately creates a NEW API-mapping obligation. Completeness is
+	// evaluated against the CURRENT surface, never the stale one.
+	found := false
+	for _, ep := range state.DiscoveredEndpoints {
+		if ep == "/api/orders" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a JS-extracted API route must enter the structured surface, got %v", state.DiscoveredEndpoints)
+	}
+	missing := ComprehensiveReconMissing(state)
+	assertAny(t, missing, "API-surface")
 }
 
 // Scenario 20: with no first-party JS observed, a typed N/A disposition is
@@ -469,7 +484,7 @@ func TestSingleAgent_ParameterDiscoverySignals(t *testing.T) {
 
 	// Scenario 27: a state-changing route activates it.
 	state = NewScanState()
-	state.ObservedEndpointMethods["/api/orders"] = "PUT"
+	recordEndpointMethod(state, "/api/orders", "PUT")
 	if !parameterizedSurfaceExists(state) {
 		t.Fatal("a state-changing route must activate parameter discovery")
 	}
@@ -771,6 +786,7 @@ func TestSingleAgent_DeepReconDirectorGivesRootTheSpecialistPlaybook(t *testing.
 	state.ReconCoverage.JSAnalyzed = true
 	state.ReconCoverage.APISurfaceDiscovered = true
 	state.ReconCoverage.AuthMapped = "complete"
+	markAuthFlowMapped(state, "login")
 	state.ReconCoverage.ParamDiscovered = true
 	if !ComprehensiveReconComplete(state) {
 		t.Fatalf("setup: expected settled recon, missing %v", ComprehensiveReconMissing(state))

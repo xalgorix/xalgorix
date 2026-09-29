@@ -8,6 +8,7 @@
 package agent
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -43,22 +44,91 @@ var reconDimensionAliases = map[string]string{
 	"wayback":             "historical",
 }
 
-// MarkReconDimensionNA records a typed not-applicable disposition for a recon
-// dimension. Only dimensions in the closed set are accepted; an unknown name
-// is rejected (returns false) so dispositions stay auditable.
-func MarkReconDimensionNA(state *ScanState, dimension string) bool {
+// reconDispositionValues are the accepted typed disposition values for
+// recon dimensions. The disposition keyword must be EXPLICIT: "not_applicable"
+// (with its common spellings) or "blocked" (with "unreachable" as a synonym).
+// Anything else - "failed", "done", arbitrary prose - is not a disposition.
+var reconDispositionValues = map[string]string{
+	"not_applicable": "not_applicable",
+	"not-applicable": "not_applicable",
+	"na":             "not_applicable",
+	"n/a":            "not_applicable",
+	"blocked":        "blocked",
+	"unreachable":    "blocked",
+}
+
+// markReconDisposition records a typed terminal disposition for a recon
+// dimension after validating it against engine evidence. N/A is rejected
+// when the engine already holds contradictory surface evidence (API routes
+// exist, JS assets exist, an auth surface exists, a parameterized surface
+// exists, or the configured scope makes the dimension apply). Blocked is
+// distinct from N/A and always accepted as a terminal state: it records that
+// the work was attempted and could not proceed, never that it did not apply.
+// Returns an error string when the disposition is rejected.
+func markReconDisposition(state *ScanState, dimension, value string) error {
 	if state == nil {
-		return false
+		return fmt.Errorf("no scan state")
 	}
 	key, ok := reconDimensionAliases[strings.ToLower(strings.TrimSpace(dimension))]
 	if !ok {
-		return false
+		return fmt.Errorf("unknown recon dimension %q", dimension)
 	}
-	if state.ReconCoverage.NAMarked == nil {
-		state.ReconCoverage.NAMarked = make(map[string]bool)
+	mapped, ok := reconDispositionValues[strings.ToLower(strings.TrimSpace(value))]
+	if !ok {
+		return fmt.Errorf("unrecognized disposition %q (accepted: not_applicable | blocked)", value)
 	}
-	state.ReconCoverage.NAMarked[key] = true
-	return true
+	if mapped == "not_applicable" && reconNAContradicted(state, key) {
+		return fmt.Errorf("not_applicable for %q is contradicted by observed surface evidence", key)
+	}
+	if state.ReconCoverage.Dispositions == nil {
+		state.ReconCoverage.Dispositions = make(map[string]string)
+	}
+	state.ReconCoverage.Dispositions[key] = mapped
+	if mapped == "not_applicable" {
+		if state.ReconCoverage.NAMarked == nil {
+			state.ReconCoverage.NAMarked = make(map[string]bool)
+		}
+		state.ReconCoverage.NAMarked[key] = true
+	}
+	return nil
+}
+
+// MarkReconDimensionNA records a typed not-applicable disposition. Returns
+// false (and records nothing) when the dimension name is unknown, or engine
+// evidence contradicts the N/A. The typed syntax in update_plan notes is
+// "dimension: not_applicable \u2014 reason"; a bare "dimension: <prose>" line
+// is NOT accepted.
+func MarkReconDimensionNA(state *ScanState, dimension string) bool {
+	return markReconDisposition(state, dimension, "not_applicable") == nil
+}
+
+// MarkReconDispositionBlocked records a typed blocked disposition
+// ("dimension: blocked \u2014 reason").
+func MarkReconDispositionBlocked(state *ScanState, dimension string) bool {
+	return markReconDisposition(state, dimension, "blocked") == nil
+}
+
+// reconNAContradicted reports whether engine knowledge contradicts an N/A
+// disposition for a dimension. The engine never blindly clears a requirement
+// the surface itself disproves: API evidence blocks a false api_surface N/A,
+// JS assets block a false js_analysis N/A, an auth surface blocks a false
+// auth_mapping N/A, observed inputs block a false parameter_discovery N/A,
+// and a domain/wildcard scope blocks dismissing subdomain enumeration merely
+// because the model does not want to perform it.
+func reconNAContradicted(state *ScanState, dim string) bool {
+	switch dim {
+	case "api_surface":
+		return apiSignalsExist(state)
+	case "js_analysis":
+		return jsAnalysisApplicable(state)
+	case "auth_mapping":
+		return authSurfaceExists(state)
+	case "parameter_discovery":
+		return parameterizedSurfaceExists(state)
+	case "subdomain_discovery":
+		return subdomainScopeApplicable(state)
+	}
+	return false
 }
 
 // reconHostDispositionValues are the accepted per-host discovery dispositions.
@@ -74,15 +144,22 @@ var reconHostDispositionValues = map[string]string{
 	"same_app":                  "covered_by_equivalent_app",
 }
 
-// applyReconDispositions parses typed disposition lines from an update_plan
-// note on a structural (non-coverage) task and applies them:
+// applyReconDispositions parses TYPED disposition lines from an update_plan
+// note on a structural (non-coverage) task and applies them. The disposition
+// keyword must be explicit:
 //
-//	"service_discovery: raw IP target, no ports beyond HTTP"   → NAMarked
-//	"host api.example.com: covered_by_equivalent_app"          → host disposition
+//	"api_surface: not_applicable — no API/XHR/GraphQL evidence after crawl + JS analysis"
+//	"service_discovery: blocked — network policy prevents port scanning"
+//	"historical: not_applicable — private localhost fixture"
+//	"host admin.example.com: blocked — unreachable after bounded retries"
+//	"host api.example.com: covered_by_equivalent_app — identical deployment fingerprint"
 //
-// Only closed-set dimension names and disposition values are accepted; every
-// applied line is echoed back so the tool result shows exactly what the engine
-// recorded. This is the single real mutation path behind NAMarked.
+// A line whose value is not a recognized disposition ("api_surface: failed",
+// or arbitrary prose after the colon) is NOT applied - it is echoed back as
+// rejected so the model can correct the syntax. N/A dispositions are
+// validated against engine evidence; blocked and not_applicable are recorded
+// as distinct typed states. This is the single real mutation path behind
+// NAMarked / Dispositions.
 func applyReconDispositions(state *ScanState, notes string) []string {
 	if state == nil || strings.TrimSpace(notes) == "" {
 		return nil
@@ -108,6 +185,7 @@ func applyReconDispositions(state *ScanState, notes string) []string {
 			value := strings.ToLower(strings.Fields(valueRest)[0])
 			mapped, ok := reconHostDispositionValues[value]
 			if !ok || host == "" {
+				applied = append(applied, "rejected: unrecognized host disposition — line: "+line)
 				continue
 			}
 			if state.ReconHostDispositions == nil {
@@ -117,15 +195,23 @@ func applyReconDispositions(state *ScanState, notes string) []string {
 			applied = append(applied, "host "+host+": "+mapped)
 			continue
 		}
-		// Dimension N/A line: "dimension: reason"
+		// Dimension disposition line: "dimension: <disposition> — reason".
 		colon := strings.Index(line, ":")
 		if colon <= 0 {
 			continue
 		}
 		dim := strings.TrimSpace(line[:colon])
-		if MarkReconDimensionNA(state, dim) {
-			applied = append(applied, "recon dimension "+reconDimensionAliases[strings.ToLower(dim)]+": not_applicable")
+		valueRest := strings.TrimSpace(line[colon+1:])
+		if valueRest == "" {
+			continue
 		}
+		value := strings.Fields(valueRest)[0]
+		if err := markReconDisposition(state, dim, value); err != nil {
+			applied = append(applied, "rejected: "+err.Error()+" — line: "+line)
+			continue
+		}
+		mapped := reconDispositionValues[strings.ToLower(value)]
+		applied = append(applied, "recon dimension "+reconDimensionAliases[strings.ToLower(strings.TrimSpace(dim))]+": "+mapped)
 	}
 	sort.Strings(applied)
 	return applied
@@ -138,38 +224,88 @@ func applyReconDispositions(state *ScanState, notes string) []string {
 const maxReconHostRequirement = 4
 
 // distinctApplicationHosts returns the host-qualified applications surfaced by
-// the endpoint inventory (bounded). Path-only inventory entries carry no host
-// and are skipped.
+// the surface (bounded, DETERMINISTIC). All candidates are gathered FIRST,
+// then ranked: hosts with meaningful web-application signals (admin/api/auth/
+// app/files/workflow roles) outrank arbitrary names, live-traffic evidence
+// adds weight, and ties break alphabetically - never by Go map iteration
+// order. The same input produces the same required hosts every run.
 func distinctApplicationHosts(state *ScanState) []string {
 	if state == nil {
 		return nil
 	}
 	seen := make(map[string]bool)
-	var hosts []string
+	candidates := make([]string, 0, len(state.DiscoveredEndpoints)+len(state.DiscoveredHosts))
 	add := func(host string) {
 		if host == "" || seen[host] {
 			return
 		}
 		seen[host] = true
-		hosts = append(hosts, host)
+		candidates = append(candidates, host)
 	}
 	for _, ep := range state.DiscoveredEndpoints {
 		add(hostOfEndpoint(ep))
-		if len(hosts) >= maxReconHostRequirement {
-			break
-		}
 	}
 	// Bare hostnames surfaced by DNS/subdomain/crawl results (they may never
 	// appear as full URLs inside the inventory) still owe content-discovery
 	// dispositions — losing them was silently untested surface.
 	for host := range state.DiscoveredHosts {
+		add(host)
+	}
+	type rankedHost struct {
+		host  string
+		score int
+	}
+	ranked := make([]rankedHost, 0, len(candidates))
+	for _, host := range candidates {
+		ranked = append(ranked, rankedHost{host: host, score: applicationHostScore(state, host)})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].host < ranked[j].host
+	})
+	hosts := make([]string, 0, maxReconHostRequirement)
+	for _, r := range ranked {
 		if len(hosts) >= maxReconHostRequirement {
 			break
 		}
-		add(host)
+		hosts = append(hosts, r.host)
 	}
-	sort.Strings(hosts)
 	return hosts
+}
+
+// applicationHostScore ranks a candidate application host. Role signals
+// provide the professional priority (admin/api/auth/app/files before
+// workflow/payment, before other names); hosts that appeared inside live
+// observed traffic get a bonus; hostname text alone is the weakest signal.
+func applicationHostScore(state *ScanState, host string) int {
+	l := strings.ToLower(host)
+	score := 0
+	switch {
+	case strings.Contains(l, "admin"):
+		score += 60
+	case strings.Contains(l, "api"):
+		score += 55
+	case strings.Contains(l, "auth"), strings.Contains(l, "sso"):
+		score += 50
+	case strings.Contains(l, "app"), strings.Contains(l, "portal"):
+		score += 45
+	case strings.Contains(l, "files"), strings.Contains(l, "static"), strings.Contains(l, "upload"):
+		score += 40
+	case strings.Contains(l, "pay"), strings.Contains(l, "shop"), strings.Contains(l, "checkout"),
+		strings.Contains(l, "billing"), strings.Contains(l, "workflow"):
+		score += 35
+	}
+	if state != nil {
+		for _, ep := range state.DiscoveredEndpoints {
+			if hostOfEndpoint(ep) == l {
+				score += 10 // surfaced inside live observed traffic
+				break
+			}
+		}
+	}
+	return score
 }
 
 // hostOfEndpoint extracts a hostname from an inventory endpoint, or "" for
@@ -273,9 +409,18 @@ func parameterizedSurfaceExists(state *ScanState) bool {
 			return true
 		}
 	}
-	for _, method := range state.ObservedEndpointMethods {
-		switch method {
-		case "POST", "PUT", "PATCH", "DELETE":
+	for _, methods := range state.ObservedEndpointMethods {
+		for m := range methods {
+			switch m {
+			case "POST", "PUT", "PATCH", "DELETE":
+				return true
+			}
+		}
+	}
+	// Runtime black-box parameter observations count the same way: an
+	// endpoint that carries observed inputs owes input discovery.
+	for _, params := range state.ObservedEndpointParameters {
+		if len(params) > 0 {
 			return true
 		}
 	}
