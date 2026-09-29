@@ -1284,7 +1284,7 @@ func (s *Server) Start() error {
 	isLoopback := bindAddr == "127.0.0.1" || bindAddr == "::1" || bindAddr == "localhost"
 	if !isLoopback && !authConfigured(s.cfg) {
 		return fmt.Errorf(
-			"refusing to bind to non-loopback address %q without auth: set XALGORIX_USERNAME and either XALGORIX_PASSWORD_HASH (bcrypt) or XALGORIX_PASSWORD in ~/.xalgorix.env, or set XALGORIX_BIND=127.0.0.1",
+			"refusing to bind to non-loopback address %q without auth: set XALGORIX_USERNAME and either XALGORIX_PASSWORD_HASH (bcrypt) or XALGORIX_PASSWORD in ~/.xalgorix.env (dashboard), or XALGORIX_API_TOKEN (machine-to-machine API access), or set XALGORIX_BIND=127.0.0.1",
 			bindAddr,
 		)
 	}
@@ -1302,6 +1302,9 @@ func (s *Server) Start() error {
 			authMode = "bcrypt"
 		}
 		log.Printf("Authentication enabled (user: %s, password: %s)", s.cfg.Username, authMode)
+		if n := len(apiTokenHashes(s.cfg.APITokens)); n > 0 {
+			log.Printf("Machine API tokens: %d configured (XALGORIX_API_TOKEN(S))", n)
+		}
 	} else {
 		log.Printf("Authentication disabled — listening on loopback only. Set XALGORIX_USERNAME and XALGORIX_PASSWORD_HASH in ~/.xalgorix.env to enable.")
 	}

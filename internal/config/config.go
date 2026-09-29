@@ -275,6 +275,13 @@ type Config struct {
 	Username     string // XALGORIX_USERNAME - dashboard login username
 	Password     string // XALGORIX_PASSWORD - dashboard login password (DEPRECATED: prefer PasswordHash)
 	PasswordHash string // XALGORIX_PASSWORD_HASH - bcrypt hash of the dashboard password (preferred)
+	// APITokens: machine-to-machine API tokens (XALGORIX_API_TOKEN, plus
+	// XALGORIX_API_TOKENS for comma-separated rotation sets). Completely
+	// separate from dashboard credentials: they authenticate Authorization:
+	// Bearer API clients, never create browser sessions, and never interact
+	// with the human login rate limiter. The web layer matches against
+	// SHA-256 digests of these values.
+	APITokens []string
 
 	// Network binding
 	// BindAddr controls which interface the web server listens on. Defaults to
@@ -485,6 +492,7 @@ func load() *Config {
 		Username:     envOr("XALGORIX_USERNAME", ""),
 		Password:     envOr("XALGORIX_PASSWORD", ""),
 		PasswordHash: envOr("XALGORIX_PASSWORD_HASH", ""),
+		APITokens:    appendAPITokens(envOr("XALGORIX_API_TOKEN", ""), envOr("XALGORIX_API_TOKENS", "")),
 
 		// Network binding — loopback-only by default.
 		BindAddr: envOr("XALGORIX_BIND", "127.0.0.1"),
@@ -769,6 +777,35 @@ func envOrStringSlice(key string) []string {
 			out = append(out, strings.ToLower(t))
 		}
 	}
+	return out
+}
+
+// appendAPITokens merges the single-token and comma-separated token variables
+// into one trimmed, de-duplicated list. Blank entries are dropped so an unset
+// variable can never become a zero-length token that trivially matches.
+func appendAPITokens(single, csv string) []string {
+	out := make([]string, 0, 4)
+	add := func(raw string) {
+		for _, tok := range strings.Split(raw, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			// Linear de-dupe: token lists are tiny (1-3 entries in practice).
+			dup := false
+			for _, existing := range out {
+				if existing == tok {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				out = append(out, tok)
+			}
+		}
+	}
+	add(single)
+	add(csv)
 	return out
 }
 

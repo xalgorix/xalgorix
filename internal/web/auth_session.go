@@ -283,19 +283,71 @@ func isCSRFSafe(r *http.Request) bool {
 	return true
 }
 
-// authConfigured returns true when the server has dashboard credentials set
-// (either plaintext password or bcrypt hash). When false, the authMiddleware
-// short-circuits and serves all routes — used by the bind-time safety check
-// to refuse external interfaces without auth.
+// authConfigured returns true when the server has any authentication
+// configured: dashboard credentials (username + password/hash) for human
+// logins, OR at least one machine API token. A token-only configuration is a
+// valid headless deployment (API access via Bearer; the dashboard cannot be
+// logged into because no human credentials exist). When nothing is
+// configured, the authMiddleware short-circuits and serves all routes — used
+// by the bind-time safety check to refuse external interfaces without auth.
 func authConfigured(cfg *config.Config) bool {
-	return cfg.Username != "" && (cfg.Password != "" || cfg.PasswordHash != "")
+	if cfg.Username != "" && (cfg.Password != "" || cfg.PasswordHash != "") {
+		return true
+	}
+	return len(apiTokenHashes(cfg.APITokens)) > 0
 }
 
-// authMiddleware protects routes when auth is configured
+// authMiddleware protects routes when auth is configured. Two independent
+// authentication flows pass through here:
+//
+//   - human: POST /api/auth/login + username/password -> xalgorix_session
+//     cookie, with browser CSRF checks and the per-IP login rate limiter;
+//   - machine: Authorization: Bearer <API token> -> direct API access with no
+//     session, no CSRF requirement (browsers never auto-attach bearer
+//     headers, so a forged cross-site request cannot carry one), no
+//     dashboard-page authorization, and no interaction with the login
+//     limiter.
+//
+// The flows do not fall back into each other: a presented-but-invalid bearer
+// token is machine traffic (browsers never send Authorization), so it gets a
+// clean 401 instead of silently continuing through the cookie path.
 func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
+		// Machine tokens are immutable for the process lifetime — hash them
+		// once at middleware creation, never per request.
+		tokenHashes := apiTokenHashes(cfg.APITokens)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
+
+			// ── Machine-to-machine authentication ──
+			switch classifyMachineAuth(r, tokenHashes) {
+			case machineAuthValid:
+				if isMachineAPIPath(path) && machineTokenPathAllowed(path) {
+					// Valid service token on an authorized API route: serve
+					// directly. This skips the browser CSRF check on purpose
+					// — CSRF protects cookie-based browser sessions; a bearer
+					// credential is not auto-attached by browsers and a
+					// valid token never needs the login limiter or a session.
+					next.ServeHTTP(w, r)
+					return
+				}
+				// Valid token, but the route is not authorized for machine
+				// clients (dashboard pages or operator-only APIs): fall
+				// through to the standard session flow. A service token can
+				// never silently authorize the dashboard.
+			case machineAuthInvalid:
+				// A presented credential that matches no configured token:
+				// fail loudly with a generic 401. Never fall back to cookie
+				// auth (that would let a stale token hide behind a browser
+				// session), never log the token, never touch the human login
+				// failure counters.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "Invalid API token",
+				})
+				return
+			}
 
 			// CSRF: validate state-changing requests on /api/* regardless of
 			// whether auth is configured. This blocks an attacker page from
