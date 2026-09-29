@@ -339,6 +339,8 @@ function InstanceCard({ instance }: { instance: ScanInstance }) {
           current={instance.current_phase}
           selected={instance.phases}
           status={instance.status}
+          phaseStatus={instance.phase_status}
+          worked={instance.phases_worked}
         />
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2 text-xs text-muted-foreground">
           <div>

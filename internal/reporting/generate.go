@@ -957,58 +957,41 @@ func Generate(scan *Scan, opts Options) (string, error) {
 		"with tool access to terminal, browser, and specialized security utilities.", "", "L", false)
 	pdf.Ln(5)
 
-	executedPhases := scan.Phases
-	allPhases := len(executedPhases) == 0 // empty = all phases
-	type phaseRow struct {
-		num      int
-		name     string
-		executed bool
+	rows := MethodologyRows(scan)
+	statusColor := func(status string) ([3]int, [3]int) {
+		// marker color, text color
+		switch status {
+		case MethodologyStatusCompleted, MethodologyStatusExecuted:
+			return accent, white
+		case MethodologyStatusNotApplicable:
+			return gray, gray
+		case MethodologyStatusBlocked:
+			return red, white
+		case MethodologyStatusNotSelected:
+			return gray, gray
+		default: // SELECTED / PENDING
+			return border, white
+		}
 	}
-	var phaseRows []phaseRow
-	for phaseNum := 1; phaseNum <= 22; phaseNum++ {
-		name, ok := MethodologyPhaseNames[phaseNum]
-		if !ok {
-			continue
-		}
-		executed := allPhases
-		if !allPhases {
-			for _, p := range executedPhases {
-				if p == phaseNum {
-					executed = true
-					break
-				}
-			}
-		}
-		phaseRows = append(phaseRows, phaseRow{phaseNum, name, executed})
-	}
-	paginatedRows(8.4, len(phaseRows), border, func(ry float64, i int) {
-		p := phaseRows[i]
-		col := gray
-		if p.executed {
-			col = accent
-		}
+	paginatedRows(8.4, len(rows), border, func(ry float64, i int) {
+		p := rows[i]
+		col, textCol := statusColor(p.Status)
 		pdf.SetXY(textX, ry+2.1)
 		pdf.SetFont("Helvetica", "B", 8.5)
 		setColor(col)
-		pdf.CellFormat(9, 5, fmt.Sprintf("%02d", p.num), "", 0, "L", false, 0, "")
+		pdf.CellFormat(9, 5, fmt.Sprintf("%02d", p.Num), "", 0, "L", false, 0, "")
 		setColor(border)
 		pdf.SetFont("Helvetica", "", 8.5)
 		pdf.CellFormat(4, 5, "|", "", 0, "L", false, 0, "")
-		if p.executed {
-			setColor(white)
-		} else {
-			setColor(gray)
+		setColor(textCol)
+		label := fmt.Sprintf("Phase %d: %s", p.Num, p.Name)
+		if p.Reason != "" {
+			label += " — " + p.Reason
 		}
-		pdf.CellFormat(textW-9-4-32, 5, fmt.Sprintf("Phase %d: %s", p.num, p.name), "", 0, "L", false, 0, "")
+		pdf.CellFormat(textW-9-4-52, 5, DisplayText(label, naText, 100), "", 0, "L", false, 0, "")
 		pdf.SetFont("Helvetica", "B", 7.3)
-		status := "SKIPPED"
-		if p.executed {
-			status = "SELECTED"
-			setColor(accent)
-		} else {
-			setColor(gray)
-		}
-		pdf.CellFormat(32, 5, status, "", 0, "R", false, 0, "")
+		setColor(col)
+		pdf.CellFormat(52, 5, p.Status, "", 0, "R", false, 0, "")
 	})
 
 	pdf.SetFont("Helvetica", "", 7.5)
@@ -1016,10 +999,13 @@ func Generate(scan *Scan, opts Options) (string, error) {
 	pdf.SetX(marginX)
 	drawRect(marginX+2, pdf.GetY()+1.2, 2.6, 2.6, accent)
 	pdf.SetX(marginX + 8)
-	pdf.CellFormat(35, 5, "= Executed", "", 0, "L", false, 0, "")
+	pdf.CellFormat(40, 5, "= Completed / Executed", "", 0, "L", false, 0, "")
 	drawRect(marginX+56, pdf.GetY()+1.2, 2.6, 2.6, gray)
 	pdf.SetX(marginX + 62)
-	pdf.CellFormat(35, 5, "= Skipped", "", 1, "L", false, 0, "")
+	pdf.CellFormat(40, 5, "= Not applicable / Not selected", "", 0, "L", false, 0, "")
+	drawRect(marginX+112, pdf.GetY()+1.2, 2.6, 2.6, red)
+	pdf.SetX(marginX + 118)
+	pdf.CellFormat(35, 5, "= Blocked", "", 1, "L", false, 0, "")
 
 	// ─── RECONNAISSANCE FINDINGS ─────────────────────────
 	recon := CollectReconSummary(scan.Events)

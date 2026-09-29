@@ -139,6 +139,11 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 		if represented[class] {
 			continue
 		}
+		// Phase scope: the coverage floor only demands classes whose
+		// canonical phase is part of the operator's selection.
+		if !classAllowedForState(a.state, class) {
+			continue
+		}
 		t := newCoverageTask(class, a.state.DiscoveredEndpoints)
 		if plan.Get(t.ID) != nil {
 			t.ID += "-coverage"
@@ -251,7 +256,13 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	// The auth-session task completes on its dimension contract, not on the
 	// endpoint x class matrix (auth dimensions are tracked separately).
 	authLaneSettled := t.VulnClass == "auth" && authTaskComplete(a.state)
-	if st == TaskCompleted && t.Origin == "auto" && t.VulnClass != "" && !authLaneSettled && a.state != nil &&
+	// Exploratory whole-target lanes (novel discovery, content spoofing,
+	// broken-link verification): the engine cannot mechanically verify the
+	// exploration itself, so a CONCRETE, non-vague note describing what was
+	// exercised is accepted as completion evidence.
+	exploratorySettled := t.WholeTarget && VulnClassExploratory(t.VulnClass) &&
+		!isVagueDispositionReason(notes) && len(notes) >= 40
+	if st == TaskCompleted && t.Origin == "auto" && t.VulnClass != "" && !authLaneSettled && !exploratorySettled && a.state != nil &&
 		!taskCoverageComplete(a.state, t) {
 		return tools.Result{Error: fmt.Sprintf(
 			"task %q (%s) needs coverage evidence before completion: every discovered endpoint must be tested for %s (engine-verified). Continue testing the class, or mark status 'skipped' with a concrete justification if it is genuinely not applicable to this target.",

@@ -17,6 +17,9 @@ import (
 	"time"
 
 	"github.com/go-pdf/fpdf"
+
+	"github.com/xalgord/xalgorix/v4/internal/methodology"
+	"github.com/xalgord/xalgorix/v4/internal/reporting"
 )
 
 type reportPalette struct {
@@ -500,31 +503,17 @@ func validIPv4(ip string) bool {
 	return true
 }
 
-// methodologyPhaseNames maps phase number to name for report display.
-var methodologyPhaseNames = map[int]string{
-	1:  "Deep Reconnaissance & Attack Surface Mapping",
-	2:  "Manual Vulnerability Discovery",
-	3:  "Directory & File Discovery",
-	4:  "CORS & Cookie Analysis",
-	5:  "Authentication & Session Testing",
-	6:  "Injection Testing",
-	7:  "SSRF Testing",
-	8:  "IDOR & Broken Access Control",
-	9:  "API & GraphQL Testing",
-	10: "File Upload Testing",
-	11: "Deserialization & RCE",
-	12: "Race Conditions & Business Logic",
-	13: "Subdomain Takeover",
-	14: "Open Redirect Testing",
-	15: "Email Security Testing",
-	16: "Cloud & Infrastructure",
-	17: "WebSocket Testing",
-	18: "CMS-Specific Testing",
-	19: "Broken Link Hijacking & Content Spoofing",
-	20: "Exploit Verification",
-	21: "Novel Vulnerability Discovery",
-	22: "Final Report",
-}
+// methodologyPhaseNames maps phase number to name for report display. It
+// is derived from the canonical internal/methodology registry so the
+// localized report renderer can never drift from the PDF generator, the
+// agent planner, or the webui phase list.
+var methodologyPhaseNames = func() map[int]string {
+	m := make(map[int]string, methodology.PhaseCount)
+	for _, p := range methodology.Phases {
+		m[p.ID] = p.Name
+	}
+	return m
+}()
 
 // generateReport creates a professional PDF pentest report for a scan.
 func (s *Server) generateReport(scan *ScanRecord) (string, error) {
@@ -888,23 +877,38 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 		"with tool access to terminal, browser, and specialized security utilities."), "", "L", false)
 	pdf.Ln(4)
 
-	// Determine which phases were executed
-	executedPhases := scan.Phases
-	allPhases := len(executedPhases) == 0 // empty = all phases
-	for phaseNum := 1; phaseNum <= 22; phaseNum++ {
-		name, ok := methodologyPhaseNames[phaseNum]
-		if !ok {
-			continue
+	// Honest methodology disposition: the per-phase rows come from the same
+	// derived state as internal/reporting (engine-evidence phase_status with
+	// a worked-ledger fallback for legacy records) — the operator's
+	// selection alone is never presented as execution.
+	rows := reporting.MethodologyRows(&reporting.Scan{
+		Phases:       scan.Phases,
+		PhasesWorked: scan.PhasesWorked,
+		PhaseStatus:  scan.PhaseStatus,
+		PhaseReasons: scan.PhaseReasons,
+	})
+	statusLabel := func(status string) string {
+		switch status {
+		case reporting.MethodologyStatusCompleted:
+			return tr("COMPLETED")
+		case reporting.MethodologyStatusExecuted:
+			return tr("EXECUTED")
+		case reporting.MethodologyStatusNotApplicable:
+			return tr("NOT APPLICABLE")
+		case reporting.MethodologyStatusBlocked:
+			return tr("BLOCKED")
+		case reporting.MethodologyStatusNotSelected:
+			return tr("NOT SELECTED")
+		case reporting.MethodologyStatusSelected:
+			return tr("SELECTED")
+		default:
+			return tr("PENDING")
 		}
-		executed := allPhases
-		if !allPhases {
-			for _, p := range executedPhases {
-				if p == phaseNum {
-					executed = true
-					break
-				}
-			}
-		}
+	}
+	for _, p := range rows {
+		executed := p.Status == reporting.MethodologyStatusCompleted || p.Status == reporting.MethodologyStatusExecuted
+		blocked := p.Status == reporting.MethodologyStatusBlocked
+		settled := p.Status == reporting.MethodologyStatusNotApplicable || p.Status == reporting.MethodologyStatusNotSelected
 		rowY := pdf.GetY()
 		if rowY > 270 {
 			pdf.AddPage()
@@ -914,7 +918,7 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 			rowY = pdf.GetY()
 		}
 		bgColor := darkBg
-		if phaseNum%2 == 0 {
+		if p.Num%2 == 0 {
 			bgColor = sectionBg
 		}
 		if executed {
@@ -922,31 +926,39 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 		}
 		drawRect(10, rowY, 190, 7, bgColor)
 		// Status indicator
-		if executed {
+		switch {
+		case executed:
 			drawRect(10, rowY, 3, 7, teal)
 			drawRect(14, rowY+1.5, 4, 4, teal)
-		} else {
+		case blocked:
+			drawRect(10, rowY, 3, 7, coral)
+			drawRect(14, rowY+1.5, 4, 4, coral)
+		default:
 			drawRect(14, rowY+1.5, 4, 4, gray)
 		}
 		pdf.SetXY(22, rowY)
 		pdf.SetFont("Helvetica", "", 8)
-		if executed {
+		switch {
+		case executed || blocked:
 			setColor(white)
-		} else {
+		default:
 			setColor(gray)
 		}
-		status := tr("SKIPPED")
-		if executed {
-			status = tr("SELECTED")
+		label := fmt.Sprintf(tr("Phase %d: %s"), p.Num, tr(p.Name))
+		if p.Reason != "" && !settled {
+			label += " — " + p.Reason
 		}
-		pdf.CellFormat(145, 7, fmt.Sprintf(tr("Phase %d: %s"), phaseNum, tr(name)), "", 0, "L", false, 0, "")
+		pdf.CellFormat(145, 7, label, "", 0, "L", false, 0, "")
 		pdf.SetFont("Helvetica", "B", 7)
-		if executed {
+		switch {
+		case executed:
 			setColor(teal)
-		} else {
+		case blocked:
+			setColor(coral)
+		default:
 			setColor(gray)
 		}
-		pdf.CellFormat(25, 7, status, "", 1, "R", false, 0, "")
+		pdf.CellFormat(25, 7, statusLabel(p.Status), "", 1, "R", false, 0, "")
 	}
 
 	// Legend
@@ -956,10 +968,13 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 	pdf.SetX(10)
 	drawRect(12, pdf.GetY()+1, 3, 3, teal)
 	pdf.SetX(18)
-	pdf.CellFormat(30, 5, tr("= Executed"), "", 0, "L", false, 0, "")
-	drawRect(50, pdf.GetY()+1, 3, 3, gray)
-	pdf.SetX(56)
-	pdf.CellFormat(30, 5, tr("= Skipped"), "", 1, "L", false, 0, "")
+	pdf.CellFormat(40, 5, tr("= Completed / Executed"), "", 0, "L", false, 0, "")
+	drawRect(56, pdf.GetY()+1, 3, 3, gray)
+	pdf.SetX(62)
+	pdf.CellFormat(45, 5, tr("= Not applicable / Not selected"), "", 0, "L", false, 0, "")
+	drawRect(112, pdf.GetY()+1, 3, 3, coral)
+	pdf.SetX(118)
+	pdf.CellFormat(30, 5, tr("= Blocked"), "", 1, "L", false, 0, "")
 
 	// ─── RECONNAISSANCE FINDINGS ─────────────────────────
 	recon := collectReconReportSummary(scan.Events)

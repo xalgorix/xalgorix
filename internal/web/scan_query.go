@@ -143,20 +143,23 @@ func toReportingScan(scan *ScanRecord) *pdfreport.Scan {
 		}
 	}
 	return &pdfreport.Scan{
-		ID:          scan.ID,
-		Name:        scan.Name,
-		Target:      scan.Target,
-		StartedAt:   scan.StartedAt,
-		FinishedAt:  scan.FinishedAt,
-		Status:      scan.Status,
-		CompanyName: scan.CompanyName,
-		LogoPath:    scan.LogoPath,
-		Phases:      scan.Phases,
-		Iterations:  scan.Iterations,
-		ToolCalls:   scan.ToolCalls,
-		TotalTokens: scan.TotalTokens,
-		Vulns:       vulns,
-		Events:      events,
+		ID:           scan.ID,
+		Name:         scan.Name,
+		Target:       scan.Target,
+		StartedAt:    scan.StartedAt,
+		FinishedAt:   scan.FinishedAt,
+		Status:       scan.Status,
+		CompanyName:  scan.CompanyName,
+		LogoPath:     scan.LogoPath,
+		Phases:       scan.Phases,
+		PhasesWorked: scan.PhasesWorked,
+		PhaseStatus:  scan.PhaseStatus,
+		PhaseReasons: scan.PhaseReasons,
+		Iterations:   scan.Iterations,
+		ToolCalls:    scan.ToolCalls,
+		TotalTokens:  scan.TotalTokens,
+		Vulns:        vulns,
+		Events:       events,
 	}
 }
 

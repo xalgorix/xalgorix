@@ -56,9 +56,18 @@ type Scan struct {
 	CompanyName string
 	LogoPath    string
 	Phases      []int
-	Iterations  int
-	ToolCalls   int
-	TotalTokens int
-	Vulns       []Vuln
-	Events      []Event
+	// PhasesWorked lists phases the engine observed concrete work for.
+	PhasesWorked []int
+	// PhaseStatus is the authoritative derived per-phase disposition
+	// ("completed"/"active"/"pending"/"blocked"/"not_applicable"/
+	// "not_selected") keyed by decimal phase id.
+	PhaseStatus map[string]string
+	// PhaseReasons carries the auditable per-phase reason (N-A evidence,
+	// blocked cause).
+	PhaseReasons map[string]string
+	Iterations   int
+	ToolCalls    int
+	TotalTokens  int
+	Vulns        []Vuln
+	Events       []Event
 }

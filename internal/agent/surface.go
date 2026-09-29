@@ -112,6 +112,18 @@ func isWebSocketPath(path string) bool {
 	return strings.HasPrefix(lp, "/ws") || strings.Contains(lp, "/websocket") || strings.Contains(lp, "/socket")
 }
 
+// isWebSocketEndpoint reports WebSocket surface evidence from the full
+// endpoint string (ws://wss:// schemes, socket.io references) in addition to
+// the path shape.
+func isWebSocketEndpoint(endpoint, path string) bool {
+	lpe := strings.ToLower(strings.TrimSpace(endpoint))
+	if strings.Contains(lpe, "ws://") || strings.Contains(lpe, "wss://") ||
+		strings.Contains(lpe, "socket.io") {
+		return true
+	}
+	return isWebSocketPath(path)
+}
+
 var uploadPathKeywords = []string{"upload", "import", "attach", "avatar", "media", "photo", "image", "document", "file"}
 
 func isUploadPath(path string) bool {
@@ -255,7 +267,7 @@ func deriveEndpointFeatures(se *SurfaceEndpoint, state *ScanState) []string {
 	if isGraphQLPath(path) {
 		features = append(features, "graphql")
 	}
-	if isWebSocketPath(path) {
+	if isWebSocketEndpoint(se.Endpoint, path) {
 		features = append(features, "websocket")
 	}
 	if isUploadPath(path) {
@@ -358,13 +370,15 @@ func primaryMethod(methods []string) string {
 // parseSurfacePath extracts the path portion of a URL-ish endpoint string.
 func parseSurfacePath(value string) (string, bool) {
 	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
-		if cut := strings.Index(value, "://"); cut > 0 {
-			rest := value[cut+3:]
-			if slash := strings.Index(rest, "/"); slash >= 0 {
-				return rest[slash:], true
+	for _, scheme := range []string{"http://", "https://", "ws://", "wss://"} {
+		if strings.HasPrefix(value, scheme) {
+			if cut := strings.Index(value, "://"); cut > 0 {
+				rest := value[cut+3:]
+				if slash := strings.Index(rest, "/"); slash >= 0 {
+					return rest[slash:], true
+				}
+				return "/", true
 			}
-			return "/", true
 		}
 	}
 	if strings.HasPrefix(value, "/") {

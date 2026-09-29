@@ -54,22 +54,16 @@ func TestAutoPlanDependencyGraph(t *testing.T) {
 		t.Errorf("idor deps = %v, want recon+auth-session", idor.DependsOn)
 	}
 
-	// verify depends on the test tasks; report depends on verify
-	verify := p.Get("verify")
-	if verify == nil {
-		t.Fatal("missing verify task")
-		return
+	// Phase 20 (exploit verification) and Phase 22 (final report) are
+	// DERIVED states — verification runs inline via the deterministic
+	// verifiers and the hypothesis ledger, reporting is the terminal
+	// lifecycle. The plan must NOT carry permanently-pending fake tasks
+	// for them.
+	if p.Get("verify") != nil {
+		t.Error("plan must not carry a fake verify task (Phase 20 is a derived verification state)")
 	}
-	if len(verify.DependsOn) == 0 {
-		t.Error("verify should depend on the test tasks")
-	}
-	report := p.Get("report")
-	if report == nil {
-		t.Fatal("missing report task")
-		return
-	}
-	if !dependsOn(report, "verify") {
-		t.Error("report should depend on verify")
+	if p.Get("report") != nil {
+		t.Error("plan must not carry a fake report task (Phase 22 is the terminal reporting state)")
 	}
 
 	// Endpoint grounding: test tasks should mention the discovered endpoints.
@@ -321,10 +315,6 @@ func TestReconcilePlan(t *testing.T) {
 	reconcilePlan(state)
 	if state.Plan.Get("test-sqli").Status != TaskCompleted {
 		t.Error("test-sqli should complete after exact coverage on every discovered endpoint")
-	}
-	// verify/report stay pending (they complete via finish, not coverage).
-	if state.Plan.Get("verify").Status == TaskCompleted {
-		t.Error("verify should not auto-complete from coverage evidence")
 	}
 }
 

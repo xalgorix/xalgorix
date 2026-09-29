@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/xalgord/xalgorix/v4/internal/methodology"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 )
 
@@ -242,36 +243,79 @@ func isReconReportOnlyPhaseSelection(phases []int) bool {
 	return true
 }
 
+// firstClassToolClass maps first-class deterministic tools to the canonical
+// vulnerability class they exercise. The plan/applicability layer is the
+// PRIMARY phase enforcement (excluded phases generate no obligations); this
+// map is only the backstop for tools the model can invoke directly.
+var firstClassToolClass = map[string]string{
+	"verify_sqli":           "sqli",
+	"verify_ssti":           "ssti",
+	"verify_xss":            "xss",
+	"verify_path_traversal": "path_traversal",
+	"verify_csrf":           "csrf",
+	"verify_xxe":            "xxe",
+	"authz_matrix":          "idor",
+}
+
 func (a *Agent) shouldBlockForPhaseRestriction(toolName string, toolArgs map[string]string) (bool, string) {
-	if !isReconReportOnlyPhaseSelection(a.allowedPhases) {
+	if len(a.allowedPhases) == 0 {
 		return false, ""
 	}
 
-	lowerTool := strings.ToLower(toolName)
-	if lowerTool == "report_vulnerability" {
-		return true, "report_vulnerability is out of scope for a reconnaissance/report-only scan. Record recon findings in notes and finish with a recon-focused summary instead."
-	}
-
-	combined := lowerTool
-	for _, value := range toolArgs {
-		combined += " " + strings.ToLower(value)
-	}
-
-	blockedPatterns := []string{
-		"sqlmap", "dalfox", "nuclei", "nikto", "xsstrike", "commix",
-		"tplmap", "ssrfmap", "msfconsole", "metasploit", "searchsploit",
-		"exploit-db", "wpscan", "joomscan",
-		"union select", "<script", "alert(", "sleep(", "pg_sleep",
-		"waitfor delay", "../etc/passwd", "/etc/passwd", "169.254.169.254",
-		"__proto__", "%0d%0a", "jndi:", "burp collaborator",
-	}
-	for _, pattern := range blockedPatterns {
-		if strings.Contains(combined, pattern) {
-			return true, fmt.Sprintf("Blocked %q because this scan is limited to reconnaissance and reporting. Allowed recon includes DNS records, IP resolution, ports, services, HTTP metadata, technologies, URLs, and non-exploit evidence collection.", pattern)
+	// Recon/report-only scans keep their stricter historical contract.
+	if isReconReportOnlyPhaseSelection(a.allowedPhases) {
+		lowerTool := strings.ToLower(toolName)
+		if lowerTool == "report_vulnerability" {
+			return true, "report_vulnerability is out of scope for a reconnaissance/report-only scan. Record recon findings in notes and finish with a recon-focused summary instead."
 		}
+
+		combined := lowerTool
+		for _, value := range toolArgs {
+			combined += " " + strings.ToLower(value)
+		}
+
+		blockedPatterns := []string{
+			"sqlmap", "dalfox", "nuclei", "nikto", "xsstrike", "commix",
+			"tplmap", "ssrfmap", "msfconsole", "metasploit", "searchsploit",
+			"exploit-db", "wpscan", "joomscan",
+			"union select", "<script", "alert(", "sleep(", "pg_sleep",
+			"waitfor delay", "../etc/passwd", "/etc/passwd", "169.254.169.254",
+			"__proto__", "%0d%0a", "jndi:", "burp collaborator",
+		}
+		for _, pattern := range blockedPatterns {
+			if strings.Contains(combined, pattern) {
+				return true, fmt.Sprintf("Blocked %q because this scan is limited to reconnaissance and reporting. Allowed recon includes DNS records, IP resolution, ports, services, HTTP metadata, technologies, URLs, and non-exploit evidence collection.", pattern)
+			}
+		}
+		return false, ""
 	}
 
-	return false, ""
+	// General phase-restriction backstop: a first-class tool whose class
+	// belongs to an excluded methodology phase does not run. Terminal
+	// commands are deliberately NOT classified here — the plan is the
+	// main authority and a payload-regex wall would be brittle.
+	lowerTool := strings.ToLower(toolName)
+	toolClass := ""
+	switch lowerTool {
+	case "verify_oob", "verify_timing", "probe_hypothesis":
+		toolClass = strings.TrimSpace(toolArgs["vuln_class"])
+		if toolClass == "" {
+			toolClass = strings.TrimSpace(toolArgs["class"])
+		}
+	default:
+		toolClass = firstClassToolClass[lowerTool]
+	}
+	if toolClass == "" {
+		return false, ""
+	}
+	def, ok := LookupVulnClass(toolClass)
+	if !ok {
+		return false, ""
+	}
+	if methodology.Allows(a.allowedPhases, def.Phase) {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%s exercises the %s lane (methodology phase %d), which is not part of this scan's selected phases. Do not run excluded-phase methodology: work the selected phases or record the excluded lane's disposition.", toolName, def.ID, def.Phase)
 }
 
 func (a *Agent) shouldBlockForActivityPolicy(toolName string, toolArgs map[string]string) (bool, string) {

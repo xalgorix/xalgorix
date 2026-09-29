@@ -1,0 +1,90 @@
+[
+  {
+    "id": 1,
+    "name": "Deep Reconnaissance & Attack Surface Mapping"
+  },
+  {
+    "id": 2,
+    "name": "Manual Vulnerability Discovery"
+  },
+  {
+    "id": 3,
+    "name": "Directory & File Discovery"
+  },
+  {
+    "id": 4,
+    "name": "CORS & Cookie Analysis"
+  },
+  {
+    "id": 5,
+    "name": "Authentication & Session Testing"
+  },
+  {
+    "id": 6,
+    "name": "Injection Testing"
+  },
+  {
+    "id": 7,
+    "name": "SSRF / Server-Side Request & XML External Entity Testing"
+  },
+  {
+    "id": 8,
+    "name": "IDOR & Broken Access Control"
+  },
+  {
+    "id": 9,
+    "name": "API & GraphQL Testing"
+  },
+  {
+    "id": 10,
+    "name": "File Upload Testing"
+  },
+  {
+    "id": 11,
+    "name": "Deserialization & RCE"
+  },
+  {
+    "id": 12,
+    "name": "Race Conditions & Business Logic"
+  },
+  {
+    "id": 13,
+    "name": "Subdomain Takeover"
+  },
+  {
+    "id": 14,
+    "name": "Open Redirect Testing"
+  },
+  {
+    "id": 15,
+    "name": "Email Security Testing"
+  },
+  {
+    "id": 16,
+    "name": "Cloud & Infrastructure"
+  },
+  {
+    "id": 17,
+    "name": "WebSocket Testing"
+  },
+  {
+    "id": 18,
+    "name": "CMS-Specific Testing"
+  },
+  {
+    "id": 19,
+    "name": "Broken Link Hijacking & Content Spoofing"
+  },
+  {
+    "id": 20,
+    "name": "Exploit Verification"
+  },
+  {
+    "id": 21,
+    "name": "Novel Vulnerability Discovery"
+  },
+  {
+    "id": 22,
+    "name": "Final Report"
+  }
+]

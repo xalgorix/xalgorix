@@ -339,6 +339,11 @@ type ScanState struct {
 	// FormsObserved: HTML form evidence appeared in a tool result, which
 	// activates parameter-discovery applicability.
 	FormsObserved bool
+	// ExternalReferences records external hosts referenced by trusted
+	// in-scope pages (href=/src= links in HTTP/browser/crawl results) —
+	// the broken-link-hijacking / content-spoofing applicability signal.
+	// Reference existence is a SIGNAL, never a vulnerability claim.
+	ExternalReferences map[string]bool
 	// ── Auth coverage dimensions (auth_coverage.go) ──
 	// AuthCoverage maps each applicable auth dimension to its state:
 	// "" (pending), "complete" (engine-detected evidence), "not_applicable",
@@ -418,6 +423,7 @@ func NewScanState() *ScanState {
 		SkillLoadFailures:          make(map[string]int),
 		ReconHostDispositions:      make(map[string]string),
 		AuthCoverage:               make(map[string]string),
+		ExternalReferences:         make(map[string]bool),
 	}
 }
 
@@ -642,6 +648,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolResult, hookClientRouteWorkflow)
 	reg.Register(OnToolResult, hookOASTVerificationWorkflow)
 	reg.Register(OnToolResult, hookResultRepeatTracker)
+	reg.Register(OnToolResult, hookExternalReferenceTracker)
 	reg.Register(OnToolResult, hookReportVulnerabilityTracker)
 	reg.Register(OnFinishAttempt, hookFinishGatekeeper)
 	// Registered AFTER the gatekeeper so its coverage BlockReason wins when both
@@ -1250,6 +1257,83 @@ func detectedVulnClasses(text string) []string {
 		strings.Contains(text, "prototype pollution") {
 		classes = append(classes, "prototype-pollution")
 	}
+	// GraphQL: a request against a GraphQL surface (introspection query,
+	// operation document, or a route request naming graphql).
+	if strings.Contains(text, "__schema") || strings.Contains(text, "introspectionquery") ||
+		strings.Contains(text, "graphql") {
+		classes = append(classes, "graphql")
+	}
+	// WebSocket: deliberate ws-surface interaction.
+	if strings.Contains(text, "websocket") || strings.Contains(text, "ws://") ||
+		strings.Contains(text, "wss://") || strings.Contains(text, "socket.io") {
+		classes = append(classes, "websocket")
+	}
+	// File upload: multipart upload traffic against a target.
+	if strings.Contains(text, "multipart/form-data") || strings.Contains(text, "file=@") ||
+		strings.Contains(text, "upload-file") || strings.Contains(text, "-f \"file") ||
+		strings.Contains(text, "-f 'file") || strings.Contains(text, "--form file") {
+		classes = append(classes, "file-upload")
+	}
+	// Open redirect: URL-valued redirect parameters in a request.
+	for _, marker := range []string{
+		"redirect_uri=http", "redirect=http", "next=http", "returnurl=http",
+		"return_to=http", "returnurl=https", "return_to=https", "continue=http",
+		"dest=http", "destination=http", "callback=http", "goto=http", "target=http",
+	} {
+		if strings.Contains(text, marker) {
+			classes = append(classes, "open-redirect")
+			break
+		}
+	}
+	// CORS: deliberate cross-origin probes / policy inspection.
+	if strings.Contains(text, "access-control-allow-origin") ||
+		strings.Contains(text, "origin: http") || strings.Contains(text, "origin: https") ||
+		strings.Contains(text, "origin: null") || strings.Contains(text, "access-control-request") {
+		classes = append(classes, "cors")
+	}
+	// Cookie analysis: inspection of cookie attributes / session behavior.
+	if strings.Contains(text, "httponly") || strings.Contains(text, "samesite") ||
+		strings.Contains(text, "set-cookie:") {
+		classes = append(classes, "cookie-security")
+	}
+	// Deserialization: serialized-payload gadget probes.
+	if strings.Contains(text, "ysoserial") || strings.Contains(text, "phpggc") ||
+		strings.Contains(text, "pickle.loads") || strings.Contains(text, "unserialize(") ||
+		strings.Contains(text, "objectinputstream") {
+		classes = append(classes, "deserialization")
+	}
+	// Race conditions: deliberate concurrency-abuse tooling.
+	if strings.Contains(text, "turbo intruder") || strings.Contains(text, "last-byte") ||
+		strings.Contains(text, "race condition") || strings.Contains(text, "concurrent identical") {
+		classes = append(classes, "race-conditions")
+	}
+	// Subdomain takeover: takeover-check tooling against in-scope records.
+	if strings.Contains(text, "can-i-take-over-xyz") || strings.Contains(text, "subjack") ||
+		strings.Contains(text, "nuclei takeover") || strings.Contains(text, "dangling cname") {
+		classes = append(classes, "subdomain-takeover")
+	}
+	// Email security: mail posture inspection (records alone are never
+	// findings; this only marks the lane exercised).
+	if strings.Contains(text, "v=spf1") || strings.Contains(text, "dmarc") ||
+		strings.Contains(text, "dkim") || strings.Contains(text, "mx record") {
+		classes = append(classes, "email-security")
+	}
+	// Cloud posture: cloud-service inspection against the target.
+	if strings.Contains(text, "s3api") || strings.Contains(text, "aws s3") ||
+		strings.Contains(text, "gcloud") || strings.Contains(text, "kubectl") ||
+		strings.Contains(text, "imds") || strings.Contains(text, "cloud metadata") {
+		classes = append(classes, "cloud-config")
+	}
+	if strings.Contains(text, "s3.amazonaws.com") || strings.Contains(text, "storage.googleapis.com") ||
+		strings.Contains(text, "blob.core.windows.net") || strings.Contains(text, "firebaseio.com") {
+		classes = append(classes, "cloud-storage")
+	}
+	// CMS: CMS-specific tooling against the fingerprinted target.
+	if strings.Contains(text, "wpscan") || strings.Contains(text, "wp-content") ||
+		strings.Contains(text, "wp-json") || strings.Contains(text, "joomscan") ||
+		strings.Contains(text, "droopescan") {
+		classes = append(classes, "cms-security")
+	}
 	return classes
 }
 
@@ -1537,35 +1621,11 @@ func hookVerifierEvidenceBridge(state *ScanState, args map[string]string) HookRe
 	return HookResult{}
 }
 
+// normalizeCoverageClass resolves a class name/alias to its canonical ID via
+// the class registry (vuln_classes.go). The historical parallel switch here
+// was a second class taxonomy that silently disagreed with the planner's.
 func normalizeCoverageClass(class string) string {
-	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "sqli", "sql_injection", "sql-injection":
-		return "sqli"
-	case "xss", "cross_site_scripting", "cross-site-scripting":
-		return "xss"
-	case "ssti", "server_side_template_injection", "server-side-template-injection":
-		return "ssti"
-	case "xxe":
-		return "xxe"
-	case "ssrf":
-		return "ssrf"
-	case "cmdi", "command_injection", "command-injection", "rce":
-		return "cmdi"
-	case "path_traversal", "path-traversal", "lfi":
-		return "path_traversal"
-	case "crlf":
-		return "crlf"
-	case "idor", "bola", "bfla":
-		return "idor"
-	case "csrf":
-		return "csrf"
-	case "prototype-pollution", "prototype_pollution":
-		return "prototype-pollution"
-	case "parameter_mining", "parameter-mining", "param_mining":
-		return "parameter_mining"
-	default:
-		return ""
-	}
+	return CanonicalVulnClassID(class)
 }
 
 // extractEndpointFromCmd extracts a URL path from any command containing an HTTP URL.
@@ -2154,6 +2214,19 @@ func hookTechDetector(state *ScanState, args map[string]string) HookResult {
 		"graphql":    {"graphql", "introspectionquery", "__schema"},
 		"firebase":   {"firebaseapp", "firebase", "firestore"},
 		"cloudflare": {"cf-ray", "cloudflare"},
+		// CMS fingerprints (Phase 18 applicability, black-box observable).
+		"wordpress": {"wp-content", "wp-json", "wordpress", "wp-includes"},
+		"drupal":    {"drupal", "sites/all/", "drupal.org"},
+		"joomla":    {"joomla", "/components/com_"},
+		"magento":   {"magento", "magentosite"},
+		"ghost":     {"ghost-content-api", "ghost-sdk", "ghost(__"},
+		// Cloud/infrastructure fingerprints (Phase 16 applicability). A
+		// plain CDN (cloudflare) is deliberately NOT cloud evidence.
+		"aws":        {"x-amz", "amazonaws.com", "s3.amazonaws.com", "awsapis"},
+		"azure":      {"azurewebsites.net", "blob.core.windows.net", "x-ms-", ".azureedge.net"},
+		"gcp":        {"storage.googleapis.com", "run.app", "appspot.com", "cloud.google"},
+		"kubernetes": {"kubernetes", "x-kubernetes", "k8s.io"},
+		"cloudfront": {"cloudfront.net", "x-amz-cf-"},
 	}
 
 	detected := false
@@ -2555,6 +2628,9 @@ Execute your next tool call NOW.`, iter, minIter, coverageNote, scannerNote, ski
 
 	var missingClasses []string
 	for cls, hint := range mandatoryClasses {
+		if !classAllowedForState(state, cls) {
+			continue // excluded methodology phase: never demanded
+		}
 		if !state.VulnClassesTested[cls] {
 			missingClasses = append(missingClasses, hint)
 		}
@@ -2614,9 +2690,6 @@ func planFinishGate(state *ScanState, maxRejections int) HookResult {
 	var remaining []string
 	var invalidSkips []string
 	for _, task := range state.Plan.Tasks {
-		if task.ID == "verify" || task.ID == "report" {
-			continue
-		}
 		if task.Status == TaskPending || task.Status == TaskActive {
 			remaining = append(remaining, fmt.Sprintf("  • [%s] phase %d — %s", task.ID, task.Phase, task.Title))
 			continue
@@ -3322,7 +3395,15 @@ func reconcilePlan(state *ScanState) {
 			// comprehensive predicate — the same definition the wave gate
 			// and the professional finish gate use. A single validated curl
 			// no longer closes recon while substantial applicable recon
-			// remains.
+			// remains. A PREREQUISITE recon task (restricted phase
+			// selection that excluded Phase 1) completes on the bounded
+			// evidence the selected lanes need, not the full contract.
+			if t.Prerequisite {
+				if state.ReconDone {
+					t.Status = TaskCompleted
+				}
+				continue
+			}
 			if ComprehensiveReconComplete(state) {
 				t.Status = TaskCompleted
 			}
@@ -3351,9 +3432,6 @@ func reconcilePlan(state *ScanState) {
 			if authTaskComplete(state) {
 				t.Status = TaskCompleted
 			}
-		case "verify", "report":
-			// Tail tasks complete via finish; leave pending until the model
-			// calls finish, which the gate consults.
 		default:
 			if taskCoverageComplete(state, t) {
 				t.Status = TaskCompleted
@@ -3461,6 +3539,53 @@ func hookReportVulnerabilityTracker(state *ScanState, args map[string]string) Ho
 		return HookResult{
 			Nudge: "The reporting gate rejected this candidate. Do not resubmit the same claim with the same evidence. If a distinct informational finding is justified, submit one valid info report; otherwise record a note and call finish.",
 		}
+	}
+	return HookResult{}
+}
+
+// externalRefRe matches href=/src= attributes carrying absolute URLs.
+var externalRefRe = regexp.MustCompile(`(?i)\b(?:href|src)\s*=\s*["']?(https?://[^"'\s>]+)`)
+
+// hookExternalReferenceTracker (OnToolResult) records external hosts that
+// trusted in-scope pages reference (href=/src= links in HTTP/browser/crawl
+// results). This is the black-box applicability signal for the
+// broken-link-hijacking / content-spoofing lane (Phase 19): the reference
+// itself is only a signal — the methodology task verifies whether the
+// reference is dead/unclaimable, and never probes unrelated third-party
+// infrastructure beyond reachability.
+func hookExternalReferenceTracker(state *ScanState, args map[string]string) HookResult {
+	if state == nil || state.ScanContextID == "" {
+		return HookResult{}
+	}
+	toolName := strings.ToLower(strings.TrimSpace(args["tool_name"]))
+	switch toolName {
+	case "http_request", "send_request", "browser_action", "page_agent", "pageagent", "terminal_execute":
+	default:
+		return HookResult{}
+	}
+	output := args["output"]
+	if strings.TrimSpace(output) == "" || len(output) > 512*1024 {
+		return HookResult{}
+	}
+	scopeHosts := map[string]bool{}
+	for _, host := range normalizeActivityHosts(state.ScanTargets) {
+		scopeHosts[host] = true
+	}
+	if len(scopeHosts) == 0 {
+		return HookResult{} // no configured scope: cannot tell external from internal
+	}
+	for _, m := range externalRefRe.FindAllStringSubmatch(output, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		host := hostOfEndpoint(m[1])
+		if host == "" || scopeHosts[host] || isOASTCallbackURL(m[1]) {
+			continue
+		}
+		if state.ExternalReferences == nil {
+			state.ExternalReferences = make(map[string]bool)
+		}
+		state.ExternalReferences[host] = true
 	}
 	return HookResult{}
 }

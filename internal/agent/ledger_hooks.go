@@ -322,6 +322,9 @@ func seedParamHypotheses(state *ScanState, l *scanctx.LedgerStore) int {
 		}
 		for _, p := range params {
 			for _, class := range paramClassCandidates(p.Name) {
+				if !classAllowedForState(state, class) {
+					continue // excluded methodology phase: never seeded
+				}
 				if !seed(ep, p.Name, class) {
 					return seeded
 				}
@@ -331,6 +334,9 @@ func seedParamHypotheses(state *ScanState, l *scanctx.LedgerStore) int {
 	for _, se := range state.SeededSurface {
 		for _, name := range se.Params {
 			for _, class := range paramClassCandidates(name) {
+				if !classAllowedForState(state, class) {
+					continue // excluded methodology phase: never seeded
+				}
 				if !seed(se.Path, name, class) {
 					return seeded
 				}

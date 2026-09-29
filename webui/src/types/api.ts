@@ -74,6 +74,8 @@ export interface ScanInstance {
   logo_path?: string;
   vulns?: VulnSummary[];
   current_phase?: number;
+  phase_status?: Record<string, string>;
+  phases_worked?: number[];
 }
 
 export interface SubScanSummary {
@@ -118,6 +120,13 @@ export interface ScanRecord {
   logo_path?: string;
   phases?: number[];
   current_phase?: number;
+  // phase_status is the authoritative per-phase disposition derived by the
+  // backend from engine evidence (plan tasks, hypothesis ledger, recon
+  // dimensions, terminal lifecycle): "completed" | "active" | "pending" |
+  // "blocked" | "not_applicable" | "not_selected", keyed by phase id.
+  phase_status?: Record<string, string>;
+  // phases_worked lists phases the engine observed concrete work for.
+  phases_worked?: number[];
   sub_scans?: SubScanSummary[];
   sub_scan_total?: number;
   sub_scan_completed?: number;

@@ -32,7 +32,12 @@ import { ScanStatusPill } from "@/components/scan-status-pill";
 import { SeverityBadge } from "@/components/severity-badge";
 import { Markdown } from "@/components/markdown";
 import { VerificationBadge } from "@/components/verification-badge";
-import { PhaseProgress, PHASES } from "@/components/phase-progress";
+import {
+  PhaseProgress,
+  PHASES,
+  phaseVisual,
+  PHASE_STATUS_LABEL,
+} from "@/components/phase-progress";
 import { CopyButton } from "@/components/copy-button";
 import { TokenUsageTab } from "@/components/token-usage";
 import { ErrorState, EmptyState } from "@/components/states";
@@ -348,29 +353,46 @@ export default function ScanDetailPage() {
               current={scan.current_phase}
               selected={scan.phases}
               status={scan.status}
+              phaseStatus={scan.phase_status}
+              worked={scan.phases_worked}
             />
             {/* Responsive phase-tile grid. Cells use a min-width
                 template so 22 short tiles flow into rows that fit the
                 viewport instead of cramming 5 wide cells into 800 px
                 of card space. */}
             <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-2">
-              {PHASES.map((p) => (
-                <div
-                  key={p.id}
-                  className={cn(
-                    "flex items-baseline gap-1.5 rounded-md border border-border bg-muted/20 px-2 py-1.5 text-[11px]",
-                    scan.current_phase === p.id &&
-                      "border-amber-400/50 text-amber-700 dark:text-amber-300",
-                  )}
-                >
-                  <span className="mono shrink-0 text-muted-foreground">
-                    {p.id}
-                  </span>
-                  <span className="truncate" title={p.name}>
-                    {p.name}
-                  </span>
-                </div>
-              ))}
+              {PHASES.map((p) => {
+                const visual = phaseVisual(p.id, {
+                  current: scan.current_phase,
+                  isRunning: scan.status === "running",
+                  phaseStatus: scan.phase_status,
+                  worked: scan.phases_worked,
+                });
+                return (
+                  <div
+                    key={p.id}
+                    title={`${p.id}. ${p.name} — ${PHASE_STATUS_LABEL[visual.status]}`}
+                    className={cn(
+                      "flex items-baseline gap-1.5 rounded-md border border-border bg-muted/20 px-2 py-1.5 text-[11px]",
+                      visual.status === "active" &&
+                        "border-amber-400/50 text-amber-700 dark:text-amber-300",
+                      visual.status === "completed" &&
+                        "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
+                      visual.status === "blocked" &&
+                        "border-rose-500/40 text-rose-700 dark:text-rose-300",
+                      visual.status === "not_applicable" &&
+                        "border-sky-500/30 text-sky-700/80 dark:text-sky-300/70",
+                    )}
+                  >
+                    <span className="mono shrink-0 text-muted-foreground">
+                      {p.id}
+                    </span>
+                    <span className="truncate" title={p.name}>
+                      {p.name}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </CardContent>
         </Card>

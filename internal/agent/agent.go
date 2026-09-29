@@ -1104,6 +1104,17 @@ func (a *Agent) SetDiscoveryMode(enabled bool) {
 	a.refreshPassiveReconGuard()
 }
 
+// CompletionOutcome returns the engine's honest terminal completion state
+// ("" while running; completed / completed_with_blocked_work / incomplete
+// once the finish gate releases the scan). The web layer consults this so a
+// finish-gate-exhausted scan is never recorded as full coverage.
+func (a *Agent) CompletionOutcome() string {
+	if a == nil || a.state == nil {
+		return ""
+	}
+	return a.state.CompletionStatus
+}
+
 // SetPhaseRestrictions configures the selected methodology phases for policy hooks.
 // An empty slice means the full methodology is allowed.
 func (a *Agent) SetPhaseRestrictions(phases []int) {

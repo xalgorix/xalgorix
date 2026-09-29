@@ -578,10 +578,17 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		// consumer parsed prose.
 		wsEvt.ResultMeta = evt.ToolResult.Metadata
 		// The plan's completed tasks are the richest per-phase work signal:
-		// merge their phases into the worked ledger whenever the plan changes.
-		if evt.ToolName == "update_plan" && sess.record != nil && sess.agent != nil {
+		// merge their phases into the worked ledger on EVERY result.
+		// reconcilePlan completes tasks automatically from coverage and
+		// deterministic-verifier evidence WITHOUT update_plan, so per-phase
+		// accounting must not depend on the model calling it.
+		if sess.record != nil && sess.agent != nil {
 			for _, phase := range sess.agent.PlanWorkedPhases() {
 				sess.record.markPhaseWorked(phase)
+			}
+			if dispositions := sess.agent.PhaseDispositions(); len(dispositions) > 0 {
+				sess.record.PhaseStatus = agent.PhaseStatusMap(dispositions)
+				sess.record.PhaseReasons = agent.PhaseReasonMap(dispositions)
 			}
 		}
 
@@ -671,11 +678,15 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		// single stray request). Reporting the max reached keeps progress
 		// honest and stable.
 		if sess.record != nil {
-			// Observed-work ledger: every phase the engine sees concrete evidence
-			// for is recorded as worked, independently of the monotonic current.
-			// A jump from 1 to 20 records {1, 20} - phases 2-19 were skipped
-			// past, not completed, and the UI can now say so.
-			sess.record.markPhaseWorked(phase)
+			// Observed-work ledger HONESTY: only phases inferred from TOOL
+			// ACTIVITY (engine-classified command/tool arguments) count as
+			// worked. Prose mentions ("moving to phase 20 now") and
+			// lifecycle events advance the monotonic CurrentPhase — pure
+			// narration — but never mark a phase as worked; authoritative
+			// per-phase completion comes from record.PhaseStatus.
+			if wsEvt.Type == "tool_call" {
+				sess.record.markPhaseWorked(phase)
+			}
 			if phase > sess.record.CurrentPhase {
 				sess.record.CurrentPhase = phase
 			}
@@ -1141,6 +1152,12 @@ func (s *Server) capturePlanDisposition(sess *scanSession) {
 	for _, phase := range sess.agent.PlanWorkedPhases() {
 		sess.record.markPhaseWorked(phase)
 	}
+	// Final authoritative dispositions: Phase 20 (verification) and 22
+	// (reporting) settle here alongside the task-derived phases.
+	if dispositions := sess.agent.PhaseDispositions(); len(dispositions) > 0 {
+		sess.record.PhaseStatus = agent.PhaseStatusMap(dispositions)
+		sess.record.PhaseReasons = agent.PhaseReasonMap(dispositions)
+	}
 }
 
 // finalizeScanSessionRecord saves the terminal or interrupted scan record to disk.
@@ -1177,6 +1194,15 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 	if sess.abortReason != "" {
 		sess.record.Completion = "partial"
 		sess.record.StopReason = sess.abortReason
+	} else if sess.agent != nil && sess.agent.CompletionOutcome() == agent.CompletionStatusIncomplete {
+		// The engine's honest terminal state: the finish gates released the
+		// scan through the bounded rejection ceiling while obligations
+		// remained (finish_gate_exhausted). Findings and the report are
+		// preserved, but the record must never read as full coverage.
+		sess.record.Completion = "partial"
+		if sess.record.StopReason == "" {
+			sess.record.StopReason = "finish_gate_exhausted"
+		}
 	}
 	// Final plan dispositions: the completion label alone cannot express what
 	// the assessment actually executed. A clean finish with 8 skipped and 2

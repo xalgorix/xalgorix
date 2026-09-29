@@ -483,6 +483,15 @@ func surfaceRevision(state *ScanState) string {
 	for _, f := range authFlowsObservedForState(state) {
 		fmt.Fprintf(&b, "|authflow:%s", f)
 	}
+	if state.CookieAuthObserved {
+		b.WriteString("|cookieauth=1")
+	}
+	extRefs := make([]string, 0, len(state.ExternalReferences))
+	for host := range state.ExternalReferences {
+		extRefs = append(extRefs, host)
+	}
+	sort.Strings(extRefs)
+	fmt.Fprintf(&b, "|extrefs=%d:%s", len(extRefs), strings.Join(extRefs, ","))
 	return b.String()
 }
 

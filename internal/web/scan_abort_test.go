@@ -258,9 +258,12 @@ func TestProcessEvent_SubAgentProviderPaused_PausesSession(t *testing.T) {
 	}
 }
 
-// A phase-mention jump (e.g. a "phase 20" note while the timeline is on
-// phase 1) must mark ONLY its endpoints as worked: phases 2-19 were skipped
-// past, not completed. Rendering every phase below current as complete was
+// A prose phase-mention jump (e.g. a "phase 20" note while the timeline is
+// on phase 1) is NARRATION ONLY: it may advance the monotonic CurrentPhase
+// (the progress cursor), but it must never mark any phase as worked. Worked
+// phases and authoritative phase_status come from engine evidence (tool
+// activity, completed plan tasks) — LLM prose never counts as methodology
+// execution, and rendering every phase below current as complete was
 // dishonest.
 func TestProcessEvent_PhaseJumpMarksOnlyWorkedPhases(t *testing.T) {
 	s := newTestServer(t, nil)
@@ -281,34 +284,24 @@ func TestProcessEvent_PhaseJumpMarksOnlyWorkedPhases(t *testing.T) {
 		server: s,
 	}
 
-	// Phase-1 evidence (target start maps to the first selected phase).
+	// Lifecycle event: narration cursor moves to the first selected phase.
 	s.processEvent(agent.Event{Type: "target_started", Content: "starting"}, sess)
-	// A phase-20 mention while the timeline is still on phase 1.
+	if sess.record.CurrentPhase != 1 {
+		t.Fatalf("CurrentPhase = %d, want 1 after target start", sess.record.CurrentPhase)
+	}
+	// A phase-20 prose mention while the timeline is still on phase 1.
 	s.processEvent(agent.Event{Type: "message", Content: "Moving to phase 20 for final reporting now."}, sess)
 
 	if sess.record.CurrentPhase != 20 {
 		t.Fatalf("CurrentPhase = %d, want 20", sess.record.CurrentPhase)
 	}
-	if len(sess.record.PhasesWorked) != 2 {
-		t.Fatalf("PhasesWorked = %v, want exactly [1 20]", sess.record.PhasesWorked)
+	// NEITHER the lifecycle event NOR the prose mention produced engine
+	// evidence: the worked ledger must stay empty.
+	if len(sess.record.PhasesWorked) != 0 {
+		t.Fatalf("PhasesWorked = %v, want empty: prose/lifecycle events must never mark work", sess.record.PhasesWorked)
 	}
-	for _, want := range []int{1, 20} {
-		found := false
-		for _, p := range sess.record.PhasesWorked {
-			if p == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("PhasesWorked = %v, want %d recorded as worked", sess.record.PhasesWorked, want)
-		}
-	}
-
-	// Intermediate phases must NOT be in the worked set.
-	for _, p := range sess.record.PhasesWorked {
-		if p > 1 && p < 20 {
-			t.Fatalf("phase %d was never worked but is in PhasesWorked = %v", p, sess.record.PhasesWorked)
-		}
+	if sess.record.PhaseStatus["20"] == "completed" {
+		t.Fatalf("phase_status[20] = %q, prose must never complete a phase", sess.record.PhaseStatus["20"])
 	}
 }
 

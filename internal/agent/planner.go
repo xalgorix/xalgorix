@@ -35,6 +35,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/xalgord/xalgorix/v4/internal/methodology"
 )
 
 // TaskStatus is the lifecycle state of a single planned task.
@@ -68,6 +70,18 @@ type Task struct {
 	// dispositions existed). Skipped-without-disposition remains readable for
 	// old persisted plans.
 	Disposition string `json:"disposition,omitempty"`
+	// Prerequisite marks a task as a TECHNICAL PREREQUISITE for the
+	// selected phases rather than a methodology obligation of its own
+	// phase: a restricted phase selection still needs bounded discovery
+	// (routes to find upload functionality, subdomains for takeover
+	// checks), but that work must never make its phase read as
+	// selected/executed methodology.
+	Prerequisite bool `json:"prerequisite,omitempty"`
+	// WholeTarget marks engine tasks whose class methodology is
+	// target-scoped (CORS policy, mail posture, CMS posture, ...): they
+	// complete on scan-level class evidence (VulnClassesTested) instead of
+	// the per-endpoint coverage matrix.
+	WholeTarget bool `json:"whole_target,omitempty"`
 }
 
 // Typed disposition values (Part 13). All map onto TaskSkipped for plan
@@ -290,6 +304,18 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 		return nil
 	}
 	classes := requiredCoverageClasses()
+	// Phase-scope filter: a restricted phase selection must not keep
+	// demanding engine obligations for excluded lanes (e.g. SQLi gaps on a
+	// file-upload-only scan).
+	if len(state.AllowedPhases) > 0 {
+		filtered := make([]string, 0, len(classes))
+		for _, c := range classes {
+			if classAllowedForSelection(state.AllowedPhases, c) {
+				filtered = append(filtered, c)
+			}
+		}
+		classes = filtered
+	}
 	var gaps []CoverageGap
 	// Per-endpoint × per-class gap detection. When no endpoints were discovered
 	// (pure black-box, no seeded surface), fall back to whole-target gaps for
@@ -348,32 +374,23 @@ var applicabilityExtraClasses = []string{
 	"auth-bypass",
 }
 
-// AutoPlanFromState builds the engine plan with the applicability layer
-// applied: the baseline floor from AutoPlan plus one task per extra class
-// that has at least one applicable endpoint, with the concrete endpoint list
-// in the task notes. Bounded and deterministic; classes with no applicable
-// endpoint are NOT scheduled (that is the point).
+// AutoPlanFromState builds the engine plan with BOTH the applicability layer
+// and the operator's phase selection applied: the baseline floor plus one
+// task per extra class that has at least one applicable endpoint, plus the
+// target-level obligations whose surface signals exist (CORS/cookies,
+// takeover, mail, cloud, CMS, external references, novel discovery).
+// Bounded and deterministic; classes with no applicable endpoint and phases
+// outside state.AllowedPhases are NOT scheduled — that is the point.
+//
+// An EMPTY AllowedPhases means the full methodology is allowed; a non-empty
+// selection keeps only its own lanes plus the bounded technical
+// prerequisites those lanes need (marked Prerequisite, never counted as the
+// prerequisite phase's own methodology work).
 func AutoPlanFromState(state *ScanState) *Plan {
 	if state == nil {
 		return NewPlan()
 	}
-	p := AutoPlan(state.DiscoveredEndpoints, state.DetectedTechs)
-	for _, class := range applicabilityExtraClasses {
-		eps := ApplicableEndpointsForClass(state, class)
-		if len(eps) == 0 {
-			continue
-		}
-		t := newCoverageTask(class, eps)
-		t.DependsOn = []string{"recon", "dirbust"}
-		if p.Get(t.ID) != nil {
-			t.ID += "-coverage"
-		}
-		if skill, ok := VulnClassSkill(class); ok {
-			t.Notes += " Load the methodology first: read_skill(name=" + strconv.Quote(skill) + ")."
-		}
-		p.add(t)
-	}
-	return p
+	return buildEnginePlan(state, state.DiscoveredEndpoints, state.DetectedTechs, phaseScopeFor(state.AllowedPhases))
 }
 
 // endpointTestedForClass reports whether this exact endpoint has coverage
@@ -525,6 +542,9 @@ func skipDispositionStillValid(state *ScanState, t *Task) bool {
 	case "auth-session":
 		return !authSurfaceExists(state) && !state.AuthContextAvailable
 	case "dirbust":
+		if t.Prerequisite {
+			return true // bounded prerequisite: a typed skip is a settled judgment
+		}
 		return false // content discovery always applies to web targets
 	}
 	if t.VulnClass != "" {
@@ -655,6 +675,13 @@ func taskCoverageComplete(state *ScanState, task *Task) bool {
 	if state == nil || task == nil || task.VulnClass == "" {
 		return false
 	}
+	// Whole-target classes (CORS policy, mail posture, CMS posture, ...)
+	// complete on scan-level evidence: their methodology is target-scoped,
+	// so a per-endpoint matrix would either demand meaningless duplicates
+	// or never close at all.
+	if task.WholeTarget {
+		return state.VulnClassesTested[task.VulnClass]
+	}
 	if task.Origin != "auto" && strings.TrimSpace(task.Endpoint) != "" {
 		return endpointTestedForClass(state, task.Endpoint, task.VulnClass)
 	}
@@ -718,12 +745,33 @@ func FormatGaps(gaps []CoverageGap) string {
 // endpoints may be empty (pure black-box): the plan then covers the methodology
 // phases as whole-target tasks, which the model refines once it discovers
 // surface. detectedTechs nudges the tech-specific classes (e.g. java → ssti).
+//
+// AutoPlan is the FULL-methodology entry (no phase restriction); the
+// phase-scoped variant is AutoPlanFromState, which consults
+// state.AllowedPhases and derives bounded technical prerequisites.
 func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
+	return buildEnginePlan(nil, endpoints, detectedTechs, phaseScopeFor(nil))
+}
+
+// buildEnginePlan is the single engine plan constructor. scope carries the
+// operator's phase selection (empty = full methodology). state may be nil
+// (bare AutoPlan): the applicability layer and target-level obligations then
+// contribute nothing, exactly like the historical AutoPlan behavior.
+//
+// Phase 20 (exploit verification) and Phase 22 (final report) are deliberately
+// NOT plan tasks: verification is performed inline by the deterministic
+// verifiers and the hypothesis ledger, and reporting is the terminal
+// lifecycle itself. They are DERIVED phase states (phase_disposition.go), so
+// the plan no longer carries permanently-pending fake tasks that the finish
+// gate ignores.
+func buildEnginePlan(state *ScanState, endpoints []string, detectedTechs map[string]bool, scope phaseScope) *Plan {
 	p := NewPlan()
 
-	// Phase 1-2: recon is a prerequisite for everything. Even with a seeded
+	// Phase 1: recon is a prerequisite for everything. Even with a seeded
 	// surface, live fingerprinting confirms the surface is reachable and
-	// extracts the tech stack that steers later tasks.
+	// extracts the tech stack that steers later tasks. On a restricted
+	// selection that EXCLUDES Phase 1, the task stays — as a bounded
+	// technical prerequisite, never as Phase 1 methodology.
 	recon := &Task{
 		ID:        "recon",
 		Title:     "Reconnaissance + technology fingerprint + endpoint inventory",
@@ -733,40 +781,57 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 		Status:    TaskPending,
 		Origin:    "auto",
 	}
+	if scope.restricted && !scope.allows(1) {
+		recon.Prerequisite = true
+		recon.Title = "Bounded prerequisite discovery (technical prerequisite for the selected phases)"
+		recon.Notes = prerequisiteProfileNotes(scope.allowed)
+	} else if scope.restricted {
+		recon.Notes = "Phase 1 is selected: run the comprehensive reconnaissance contract for the selected scope."
+	}
 	p.add(recon)
 
-	// Phase 3: directory/content discovery — ALWAYS present, step 2 of the
-	// chain. A seeded API surface (OpenAPI/HAR/docs) previously suppressed this
-	// task entirely, which left no early forcing function for hidden non-API
-	// paths (debug consoles, backups, admin panels — a production scan missed a
-	// Werkzeug console this way) and pushed the wordlist pass to finish-gate
-	// time, after all testing. With a seeded surface the task prescribes a
-	// bounded gap-driven pass instead of a broad crawl.
-	dirbustTitle := "Directory & file discovery (ffuf/gobuster) + hidden paths"
-	dirbustNotes := ""
-	if len(endpoints) > 0 {
-		dirbustTitle = "Bounded content discovery — gap-driven wordlist pass for hidden non-API paths"
-		dirbustNotes = "A seeded API surface is known; do NOT broad-crawl it. Run ONE bounded wordlist pass (ffuf -w common wordlist, -maxtime, -noninteractive) against the host root for hidden NON-API paths (debug consoles, admin panels, backups, source/config files), save and inspect the output, and fold any new live routes into the endpoint inventory."
+	// Phase 3: directory/content discovery — present for the full
+	// methodology, for a selected Phase 3, and as a bounded prerequisite when
+	// the selected testing phases need routes the inventory does not have
+	// yet. NOT present for pure domain-level selections ({1,22},
+	// {13,15,16}-only scans owe their own discovery, not a web wordlist).
+	dirbustWanted := scope.allows(3)
+	if !dirbustWanted && scope.restricted {
+		dirbustWanted = selectionNeedsRouteDiscovery(scope.allowed)
 	}
-	p.add(&Task{
-		ID:        "dirbust",
-		Title:     dirbustTitle,
-		Phase:     3,
-		VulnClass: "dirbusting",
-		Status:    TaskPending,
-		DependsOn: []string{"recon"},
-		Notes:     dirbustNotes,
-		Origin:    "auto",
-	})
+	if dirbustWanted {
+		dirbustTitle := "Directory & file discovery (ffuf/gobuster) + hidden paths"
+		dirbustNotes := ""
+		if len(endpoints) > 0 {
+			dirbustTitle = "Bounded content discovery — gap-driven wordlist pass for hidden non-API paths"
+			dirbustNotes = "A seeded API surface is known; do NOT broad-crawl it. Run ONE bounded wordlist pass (ffuf -w common wordlist, -maxtime, -noninteractive) against the host root for hidden NON-API paths (debug consoles, admin panels, backups, source/config files), save and inspect the output, and fold any new live routes into the endpoint inventory."
+		}
+		dirbust := &Task{
+			ID:        "dirbust",
+			Title:     dirbustTitle,
+			Phase:     3,
+			VulnClass: "dirbusting",
+			Status:    TaskPending,
+			DependsOn: []string{"recon"},
+			Notes:     dirbustNotes,
+			Origin:    "auto",
+		}
+		if scope.restricted && !scope.allows(3) {
+			dirbust.Prerequisite = true
+			dirbust.Title = "Bounded route/content discovery (technical prerequisite for the selected phases)"
+			dirbust.Notes = "Phase 3 is not selected, but the selected phases need route discovery: crawl links/forms and run ONE bounded keyword pass (ffuf/gobuster, -maxtime, common wordlist) for the routes those phases target. This is a technical prerequisite, not Phase 3 methodology — skip full content enumeration."
+		}
+		p.add(dirbust)
+	}
 
 	// Start with the full baseline coverage contract, then add specialized
-	// technology lanes such as Node.js prototype pollution or PHP LFI.
+	// technology lanes such as Node.js prototype pollution or PHP LFI. Every
+	// class lane is filtered by the phase selection.
 	classes := defaultVulnClasses(detectedTechs)
-
-	// Build per-class tasks. When endpoints are known, each class task lists
-	// the endpoint set in its Notes so the model tests them all; when unknown,
-	// the task is whole-target and the model refines after discovery.
 	for _, class := range classes {
+		if !scope.classAllowed(class) {
+			continue
+		}
 		t := newCoverageTask(class, endpoints)
 		// Step-by-step execution: testing (phases 5+) waits for recon AND
 		// content discovery (phase 3), so the attack surface is mapped before
@@ -778,59 +843,65 @@ func AutoPlan(endpoints []string, detectedTechs map[string]bool) *Plan {
 
 	// Phase 5: full authentication & session testing - always a complete lane,
 	// regardless of whether operator-supplied credentials exist.
-	authTitle := "Authentication & session testing (login bypass, JWT, session fixation)"
-	authNotes := "Test all authentication controls thoroughly - login bypass, JWT/session manipulation, weak credentials, registration flows. Include: token identity (two different logins must not mint identical/interchangeable tokens), token expiry enforcement (expired credentials must be rejected), and a bounded failed-login burst to check authentication rate limiting. Never skip or downgrade this task."
-	p.add(&Task{
-		ID:        "auth-session",
-		Title:     authTitle,
-		Phase:     5,
-		VulnClass: "auth",
-		Status:    TaskPending,
-		DependsOn: []string{"recon", "dirbust"},
-		Notes:     authNotes,
-		Origin:    "auto",
-	})
-
-	// Phase 8: IDOR / broken access control - always tested.
-	idorStatus := TaskPending
-	idorNotes := ""
-	p.add(&Task{
-		ID:        "idor",
-		Title:     "IDOR / broken access control (horizontal + vertical)",
-		Phase:     8,
-		VulnClass: "idor",
-		Status:    idorStatus,
-		DependsOn: []string{"recon", "auth-session"},
-		Notes:     idorNotes,
-		Origin:    "auto",
-	})
-
-	// Phase 20: exploit verification + Phase 22 report are the tail, depending
-	// on the test tasks completing.
-	testDeps := make([]string, 0, len(p.Tasks))
-	for _, t := range p.Tasks {
-		if t.VulnClass != "" && t.VulnClass != "dirbusting" && t.VulnClass != "auth" {
-			testDeps = append(testDeps, t.ID)
-		}
+	if scope.allows(5) {
+		authTitle := "Authentication & session testing (login bypass, JWT, session fixation)"
+		authNotes := "Test all authentication controls thoroughly - login bypass, JWT/session manipulation, weak credentials, registration flows. Include: token identity (two different logins must not mint identical/interchangeable tokens), token expiry enforcement (expired credentials must be rejected), and a bounded failed-login burst to check authentication rate limiting. Never skip or downgrade this task."
+		p.add(&Task{
+			ID:        "auth-session",
+			Title:     authTitle,
+			Phase:     5,
+			VulnClass: "auth",
+			Status:    TaskPending,
+			DependsOn: []string{"recon", "dirbust"},
+			Notes:     authNotes,
+			Origin:    "auto",
+		})
 	}
-	p.add(&Task{
-		ID:        "verify",
-		Title:     "Exploit verification — re-test every candidate finding (Phase 20)",
-		Phase:     20,
-		VulnClass: "",
-		Status:    TaskPending,
-		DependsOn: testDeps,
-		Origin:    "auto",
-	})
-	p.add(&Task{
-		ID:        "report",
-		Title:     "Final report — summarize verified findings + remediation (Phase 22)",
-		Phase:     22,
-		VulnClass: "",
-		Status:    TaskPending,
-		DependsOn: []string{"verify"},
-		Origin:    "auto",
-	})
+
+	// Phase 8: IDOR / broken access control - always tested (when selected).
+	if scope.allows(8) {
+		p.add(&Task{
+			ID:        "idor",
+			Title:     "IDOR / broken access control (horizontal + vertical)",
+			Phase:     8,
+			VulnClass: "idor",
+			Status:    TaskPending,
+			DependsOn: []string{"recon", "auth-session"},
+			Notes:     "",
+			Origin:    "auto",
+		})
+	}
+
+	// Applicability extras: one task per extra class that has at least one
+	// applicable endpoint, with the concrete endpoint list in the task notes.
+	// Bounded and deterministic; classes with no applicable endpoint are NOT
+	// scheduled (that is the point).
+	if state != nil {
+		for _, class := range applicabilityExtraClasses {
+			if !scope.classAllowed(class) {
+				continue
+			}
+			eps := ApplicableEndpointsForClass(state, class)
+			if len(eps) == 0 {
+				continue
+			}
+			t := newCoverageTask(class, eps)
+			t.DependsOn = []string{"recon", "dirbust"}
+			if p.Get(t.ID) != nil {
+				t.ID += "-coverage"
+			}
+			if skill, ok := VulnClassSkill(class); ok {
+				t.Notes += " Load the methodology first: read_skill(name=" + strconv.Quote(skill) + ")."
+			}
+			p.add(t)
+		}
+		// Target-level obligations (whole-target classes with observed
+		// surface signals): CORS/cookie analysis, subdomain takeover, mail,
+		// cloud, CMS, broken-link/content-spoofing, bounded novel
+		// discovery. Phases whose surface does not exist never appear —
+		// their disposition is not_applicable.
+		appendTargetObligations(state, p, scope)
+	}
 
 	return p
 }
@@ -874,30 +945,49 @@ func isVagueDispositionReason(note string) bool {
 	return false
 }
 
-// classPhase maps a vuln class to its methodology phase.
+// classPhase maps a vuln class to its canonical methodology phase by
+// resolving the class registry (vuln_classes.go) — the ONLY class→phase
+// mapping in the codebase. Unknown classes return 0: they must never
+// silently fall back to Phase 6 the way the historical switch did (every
+// unknown class became "injection").
 func classPhase(class string) int {
-	switch class {
-	case "sqli", "xss", "ssti", "cmdi", "crlf":
-		return 6 // injection testing
-	case "ssrf":
-		return 7
-	case "xxe":
-		return 7
-	case "idor", "prototype-pollution":
-		return 8
-	case "csrf":
-		return 5
-	case "parameter_mining":
-		return 4
-	case "path_traversal", "lfi":
-		return 6
-	case "dirbusting":
-		return 3
-	case "auth":
-		return 5
-	default:
-		return 6
+	def, ok := LookupVulnClass(class)
+	if !ok {
+		return 0
 	}
+	return def.Phase
+}
+
+// classAllowedForSelection reports whether a class's canonical phase is part
+// of an operator phase selection. An EMPTY selection allows everything (the
+// full methodology). Unknown classes are conservatively excluded under a
+// restriction: an unclassifiable lane cannot be placed in the selection.
+func classAllowedForSelection(selection []int, class string) bool {
+	if len(selection) == 0 {
+		return true
+	}
+	def, ok := LookupVulnClass(class)
+	if !ok {
+		return false
+	}
+	return methodology.Allows(selection, def.Phase)
+}
+
+// classAllowedForState is classAllowedForSelection over the scan's state.
+func classAllowedForState(state *ScanState, class string) bool {
+	if state == nil {
+		return true
+	}
+	return classAllowedForSelection(state.AllowedPhases, class)
+}
+
+// phaseAllowedForState reports whether a phase is inside the scan's
+// selection (empty selection = full methodology).
+func phaseAllowedForState(state *ScanState, phase int) bool {
+	if state == nil {
+		return true
+	}
+	return methodology.Allows(state.AllowedPhases, phase)
 }
 
 // truncList joins a slice, truncating to n items with a "+N more" suffix.

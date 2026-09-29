@@ -49,13 +49,10 @@ func scanCompletionAssessment(state *ScanState) (string, []string) {
 	}
 	var reasons []string
 
-	// Plan: pending/active tasks are unfinished work (verify/report complete
-	// via the finish itself and never count).
+	// Plan: pending/active tasks are unfinished work. (Phase 20/22 are no
+	// longer plan tasks — verification and reporting are derived states.)
 	if state.Plan != nil {
 		for _, t := range state.Plan.Tasks {
-			if t.ID == "verify" || t.ID == "report" {
-				continue
-			}
 			if t.Status == TaskPending || t.Status == TaskActive {
 				reasons = append(reasons, fmt.Sprintf("plan task %q (phase %d) %s", t.ID, t.Phase, t.Status))
 			}
@@ -219,6 +216,11 @@ func scanTelemetrySummary(state *ScanState, status string, reasons []string) str
 	// Worked phases.
 	if phases := planWorkedPhasesFor(state); len(phases) > 0 {
 		fmt.Fprintf(&b, "worked phases: %v\n", phases)
+	}
+
+	// Phase dispositions (derived, authoritative per-phase state).
+	if block := FormatPhaseDispositions(ComputePhaseDispositions(state)); block != "" {
+		fmt.Fprintf(&b, "%s\n", block)
 	}
 
 	// Completion.

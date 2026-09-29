@@ -545,14 +545,22 @@ type ScanRecord struct {
 	// phase 1 - marks only its endpoints, so consumers can distinguish phases
 	// actually touched from phases merely skipped past. Rendering every earlier
 	// phase as complete was dishonest.
-	PhasesWorked     []int            `json:"phases_worked,omitempty"`
-	CurrentPhase     int              `json:"current_phase,omitempty"`
-	SubScans         []SubScanSummary `json:"sub_scans,omitempty"`
-	SubScanTotal     int              `json:"sub_scan_total,omitempty"`
-	SubScanCompleted int              `json:"sub_scan_completed,omitempty"`
-	SubScanRunning   int              `json:"sub_scan_running,omitempty"`
-	SubScanRemaining int              `json:"sub_scan_remaining,omitempty"`
-	WorkStarted      bool             `json:"work_started,omitempty"` // positive proof that an agent session was admitted
+	PhasesWorked []int `json:"phases_worked,omitempty"`
+	CurrentPhase int   `json:"current_phase,omitempty"`
+	// PhaseStatus is the authoritative derived per-phase disposition
+	// ("completed" | "active" | "pending" | "blocked" | "not_applicable"
+	// | "not_selected"), keyed by decimal phase id. It is derived from
+	// engine evidence — completed plan tasks, typed dispositions, the
+	// hypothesis ledger, and the terminal lifecycle — never from LLM
+	// prose or from "the current phase number is past N".
+	PhaseStatus      map[string]string `json:"phase_status,omitempty"`
+	PhaseReasons     map[string]string `json:"phase_reasons,omitempty"`
+	SubScans         []SubScanSummary  `json:"sub_scans,omitempty"`
+	SubScanTotal     int               `json:"sub_scan_total,omitempty"`
+	SubScanCompleted int               `json:"sub_scan_completed,omitempty"`
+	SubScanRunning   int               `json:"sub_scan_running,omitempty"`
+	SubScanRemaining int               `json:"sub_scan_remaining,omitempty"`
+	WorkStarted      bool              `json:"work_started,omitempty"` // positive proof that an agent session was admitted
 }
 
 // QueueState persists scan queue state for recovery after restart

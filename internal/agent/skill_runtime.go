@@ -108,6 +108,21 @@ var techSkillQueries = map[string]string{
 	"cloudflare": "cloudflare",
 }
 
+// techSkillPhase maps a detected technology to the methodology phase its
+// default skill query belongs to, so phase-restricted scans never recommend
+// excluded-lane methodology. cloudflare (WAF/CDN bypass) is deliberately
+// unphased: it is cross-cutting.
+var techSkillPhase = map[string]int{
+	"php":      6,
+	"nodejs":   6,
+	"java":     6,
+	"python":   6,
+	"ruby":     6,
+	"aspnet":   6,
+	"graphql":  9,
+	"firebase": 16,
+}
+
 // recommendedSkillsForState derives loadable methodology suggestions from
 // detected technologies and WAF presence. A skill is suggested only when it
 // (a) resolves to a real catalog entry, (b) has not been successfully loaded,
@@ -129,13 +144,24 @@ func recommendedSkillsForState(state *ScanState) []skillRecommendation {
 		out = append(out, skillRecommendation{Skill: skill, Reason: reason})
 	}
 	for tech := range state.DetectedTechs {
-		if query, ok := techSkillQueries[tech]; ok {
-			add(query, "detected "+tech+" stack")
+		query, ok := techSkillQueries[tech]
+		if !ok {
+			continue
 		}
+		// Phase scope: never recommend methodology for an excluded lane
+		// (e.g. the GraphQL skill when Phase 9 is out of selection).
+		if phase, phased := techSkillPhase[tech]; phased && !phaseAllowedForState(state, phase) {
+			continue
+		}
+		add(query, "detected "+tech+" stack")
 	}
 	if state.WAFDetected {
-		add("xss", "WAF bypass payloads for the detected firewall")
-		add("sql injection", "WAF bypass payloads for the detected firewall")
+		if classAllowedForState(state, "xss") {
+			add("xss", "WAF bypass payloads for the detected firewall")
+		}
+		if classAllowedForState(state, "sqli") {
+			add("sql injection", "WAF bypass payloads for the detected firewall")
+		}
 	}
 	// Task-driven recommendations: the next READY plan lane names the
 	// methodology the root needs now, so skill loading follows the work
@@ -144,7 +170,7 @@ func recommendedSkillsForState(state *ScanState) []skillRecommendation {
 	// primary discovery path for class methodology.
 	if state.Plan != nil {
 		for _, t := range state.Plan.NextTasks(3) {
-			if t.VulnClass == "" {
+			if t.VulnClass == "" || !classAllowedForState(state, t.VulnClass) {
 				continue
 			}
 			if query, ok := VulnClassSkill(t.VulnClass); ok && query != "" {
@@ -175,8 +201,8 @@ func hookLaneSkillGate(state *ScanState, args map[string]string) HookResult {
 	var next *Task
 	var skill string
 	for _, t := range state.Plan.NextTasks(3) {
-		if strings.TrimSpace(t.VulnClass) == "" {
-			continue
+		if strings.TrimSpace(t.VulnClass) == "" || !classAllowedForState(state, t.VulnClass) {
+			continue // excluded methodology phase: never demanded
 		}
 		candidate, ok := VulnClassSkill(t.VulnClass)
 		if !ok || candidate == "" {
