@@ -82,9 +82,18 @@ func dispositionForPhase(state *ScanState, phase int, surfaceKnown bool) PhaseDi
 		}
 	}
 	if len(tasks) == 0 {
-		// Selected but no obligation was generated. Before the surface is
-		// mapped this is pending (never a premature N/A); afterwards the
-		// absence of an obligation IS the not-applicable evidence.
+		// No obligation was generated — but real work may still have
+		// happened under this phase (an LLM-authored plan, or lanes the
+		// model exercised without an engine task). Engine coverage evidence
+		// outranks the obligation's absence.
+		if ev := phaseCoverageEvidenceClasses(state, phase); len(ev) > 0 {
+			d.Status = PhaseCompleted
+			d.Reason = "engine coverage evidence: " + strings.Join(ev, ", ") + " exercised"
+			return d
+		}
+		// Before the surface is mapped this is pending (never a premature
+		// N/A); afterwards the absence of an obligation IS the
+		// not-applicable evidence.
 		if !surfaceKnown {
 			d.Status = PhasePending
 			d.Reason = "surface not yet mapped"
@@ -130,11 +139,37 @@ func dispositionForPhase(state *ScanState, phase int, surfaceKnown bool) PhaseDi
 	case completed > 0:
 		d.Status = PhaseCompleted
 	default:
-		// Only justified N/A dispositions remain.
+		// Only justified N/A dispositions remain — but classes of this
+		// phase may still carry real coverage evidence (the lane was
+		// exercised, e.g. verify_xxe proved the parser safe, and the task
+		// was then dispositioned N/A). Evidence outranks the skip label.
+		if ev := phaseCoverageEvidenceClasses(state, phase); len(ev) > 0 {
+			d.Status = PhaseCompleted
+			d.Reason = "engine coverage evidence: " + strings.Join(ev, ", ") + " exercised; remaining lanes dispositioned not_applicable"
+			return d
+		}
 		d.Status = PhaseNotApplicable
 		d.Reason = phaseNotApplicableReason(state, phase)
 	}
 	return d
+}
+
+// phaseCoverageEvidenceClasses returns the canonical classes of a phase
+// that carry scan-level coverage evidence (exercised via the coverage
+// matrix, deterministic verifiers, or detected payloads), sorted.
+func phaseCoverageEvidenceClasses(state *ScanState, phase int) []string {
+	if state == nil {
+		return nil
+	}
+	var classes []string
+	for _, def := range vulnClassRegistry {
+		if def.Phase != phase || !state.VulnClassesTested[def.ID] {
+			continue
+		}
+		classes = append(classes, def.ID)
+	}
+	sort.Strings(classes)
+	return classes
 }
 
 // verificationDisposition derives Phase 20 (Exploit Verification) from the

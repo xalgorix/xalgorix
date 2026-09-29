@@ -1637,11 +1637,17 @@ func extractEndpointFromCmd(cmd string) string {
 	// This handles all tools (curl, wget, sqlmap, nuclei, ffuf, etc.)
 	// and piped commands (echo "..." | curl -d @- https://target.com).
 
-	// Split on pipes first — extract from each segment
+	// Split on pipes first — extract from each segment. Scanner-side
+	// payload URLs (OAST callbacks, attacker-legend origins inside header
+	// values) are skipped so the extracted endpoint is the actual request
+	// target.
 	for _, segment := range strings.Split(cmd, "|") {
 		for _, token := range strings.Fields(segment) {
 			token = strings.Trim(token, "\"'`,;)(}{[]")
 			if !strings.HasPrefix(token, "http://") && !strings.HasPrefix(token, "https://") {
+				continue
+			}
+			if isScanArtifactURL(token) {
 				continue
 			}
 			if parsed, err := url.Parse(token); err == nil && parsed.Host != "" {
@@ -3470,8 +3476,12 @@ func extractPaths(blob string) []string {
 	var paths []string
 	for _, m := range endpointPathRe.FindAllString(blob, -1) {
 		// Skip obvious non-endpoints: schema namespaces, file extensions on
-		// static assets, and the w3.org SVG namespace that JS bundles embed.
+		// static assets, the w3.org SVG namespace that JS bundles embed, and
+		// scanner-side payload URLs (OAST callbacks, attacker legends).
 		if strings.Contains(m, "w3.org") || strings.Contains(m, "schemas.") {
+			continue
+		}
+		if isScanArtifactURL(m) {
 			continue
 		}
 		if strings.HasSuffix(m, ".css") || strings.HasSuffix(m, ".png") || strings.HasSuffix(m, ".ico") {

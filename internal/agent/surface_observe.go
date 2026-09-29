@@ -45,6 +45,12 @@ func RecordSurfaceObservation(state *ScanState, obs SurfaceObservation) {
 	if endpoint == "" {
 		return
 	}
+	// Probe-artifact URLs (OAST callbacks, attacker-legend origins from
+	// payload headers) are scanner-side traffic, never target surface:
+	// ingesting them pollutes the inventory and inflates obligations.
+	if isScanArtifactURL(endpoint) {
+		return
+	}
 	if m := strings.ToUpper(strings.TrimSpace(obs.Method)); m != "" {
 		recordEndpointMethod(state, endpoint, m)
 	}
@@ -142,7 +148,7 @@ func endpointProvenance(state *ScanState, endpoint string) []string {
 // surface is authoritative: real observed traffic defines the attack surface.
 func promoteDiscoveredEndpoint(state *ScanState, endpoint string) {
 	endpoint = strings.TrimSpace(endpoint)
-	if endpoint == "" || len(state.DiscoveredEndpoints) >= maxPromotedEndpoints {
+	if endpoint == "" || isScanArtifactURL(endpoint) || len(state.DiscoveredEndpoints) >= maxPromotedEndpoints {
 		return
 	}
 	want := map[string]bool{}

@@ -155,11 +155,10 @@ This engine tracks a STRUCTURAL task plan, not just your train of thought. A pla
     {"id":"recon","title":"Recon + fingerprint + endpoint inventory","phase":1,"depends_on":[]},
     {"id":"test-sqli","title":"Test all /api/* endpoints for SQL injection","phase":6,"vuln_class":"sqli","depends_on":["recon"]},
     {"id":"test-xss","title":"Test reflected/stored XSS on input params","phase":6,"vuln_class":"xss","depends_on":["recon"]},
-    {"id":"idor","title":"IDOR / broken access control on /api/users, /api/leads","phase":8,"vuln_class":"idor","depends_on":["recon"]},
-    {"id":"verify","title":"Exploit verification (Phase 20)","phase":20,"depends_on":["test-sqli","test-xss","idor"]},
-    {"id":"report","title":"Final report (Phase 22)","phase":22,"depends_on":["verify"]}
+    {"id":"idor","title":"IDOR / broken access control on /api/users, /api/leads","phase":8,"vuln_class":"idor","depends_on":["recon"]}
   ]</parameter>
   </function>
+- Do NOT add plan tasks for Phase 20 (verification) or Phase 22 (reporting): verification is performed inline via the deterministic verifiers and the hypothesis ledger, and reporting is the finish lifecycle itself. The engine derives both phases automatically — a hand-written verify/report task would just sit pending and block finish.
 
 - If you DON'T call build_plan, the engine auto-builds one from your endpoint inventory + detected techs. Either way the plan is tracked.
 
@@ -171,7 +170,7 @@ This engine tracks a STRUCTURAL task plan, not just your train of thought. A pla
   <parameter=notes>target has no login flow</parameter>
   </function>
 
-**Before finish:** every plan task must be completed or skipped (except verify/report, which ARE the finish step). The engine will block finish and list the remaining tasks if you try to finish early — do not argue with the gate, work or skip the listed tasks.
+**Before finish:** every plan task must be completed or skipped. The engine will block finish and list the remaining tasks if you try to finish early — do not argue with the gate, work or skip the listed tasks. Verification (Phase 20) and the final report (Phase 22) are handled by the engine itself — never as plan tasks.
 
 %s
 

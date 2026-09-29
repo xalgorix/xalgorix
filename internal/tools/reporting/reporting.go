@@ -922,6 +922,15 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// precision finish-gate sees the proven work as reported without requiring
 	// a separate add_hypothesis_evidence call. Best-effort; never blocks report.
 	ledgerNote := linkFindingToLedger(contextID, vuln.ID, strings.TrimSpace(args["hypothesis_id"]))
+	// Close the evidence loop even when the model forgot the hypothesis_id:
+	// matching open hypotheses (class family + endpoint) become reported.
+	if autoNote := autoLinkFindingToLedgerHypotheses(contextID, vuln, cls); autoNote != "" {
+		if ledgerNote != "" {
+			ledgerNote += "\n" + autoNote
+		} else {
+			ledgerNote = autoNote
+		}
+	}
 
 	msg := fmt.Sprintf("✅ Vulnerability reported: [%s] %s (%s | CVSS %.1f) — Verified: %v", vuln.ID, vuln.Title, strings.ToUpper(vuln.Severity), vuln.CVSS, vuln.Verified)
 	if upgraded {
@@ -1022,8 +1031,111 @@ func linkFindingToLedger(contextID, findingID, hypID string) string {
 	return fmt.Sprintf("🔗 Linked to ledger hypothesis %s (marked proven).", hypID)
 }
 
+// hypothesisClassesForReportClass maps a finding's report class to the
+// ledger hypothesis classes that share its root cause.
+var hypothesisClassesForReportClass = map[string][]string{
+	"rce":  {"rce", "cmdi", "deserialization"},
+	"sqli": {"sqli", "nosqli"},
+	"ssti": {"ssti"},
+	"xxe":  {"xxe"},
+	"lfi":  {"path_traversal", "lfi", "file_disclosure"},
+	"xss":  {"xss", "dom-xss"},
+	"csrf": {"csrf"},
+	"ssrf": {"ssrf"},
+	"idor": {"idor", "privilege-escalation"},
+}
+
+// hypothesisHasFindingLink reports whether a hypothesis already carries a
+// finding reference.
+func hypothesisHasFindingLink(h scanctx.Hypothesis) bool {
+	for _, ev := range h.Evidence {
+		if ev.Kind == scanctx.EvidenceFindingRef || strings.TrimSpace(ev.FindingID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// autoLinkFindingToLedgerHypotheses links open ledger hypotheses whose
+// class family and endpoint surface match a just-reported finding: proven
+// leads without a finding reference (and in-flight testing claims the
+// finding settles) become reported, so the precision finish gate no longer
+// strands them at exhaustion. Deliberately conservative: the class family
+// must match AND the endpoint keys must agree (or the hypothesis carries no
+// endpoint and is the single unambiguous family candidate).
+func autoLinkFindingToLedgerHypotheses(contextID string, vuln Vulnerability, cls string) string {
+	if contextID == "" {
+		return ""
+	}
+	sc := scanctx.Get(contextID)
+	if sc == nil || sc.Ledger == nil {
+		return ""
+	}
+	family, ok := hypothesisClassesForReportClass[cls]
+	if !ok || len(family) == 0 {
+		return ""
+	}
+	findingKey := strings.ToLower(dedupEndpointKeyForTarget(vuln.Target, vuln.Endpoint))
+	var linked []string
+	var endpointless []scanctx.Hypothesis
+	link := func(h scanctx.Hypothesis) {
+		sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
+			Kind:      scanctx.EvidenceFindingRef,
+			FindingID: vuln.ID,
+			Summary:   "Auto-linked to reported finding " + vuln.ID,
+		})
+		sc.Ledger.SetStatus(h.ID, scanctx.HypothesisProven, "Reported as "+vuln.ID)
+		linked = append(linked, h.ID)
+	}
+	for _, h := range sc.Ledger.All() {
+		if hypothesisHasFindingLink(h) {
+			continue
+		}
+		if h.Status != scanctx.HypothesisProven && h.Status != scanctx.HypothesisTesting {
+			continue
+		}
+		if !containsFold(family, h.VulnClass) {
+			continue
+		}
+		hypEndpoint := strings.TrimSpace(h.Endpoint)
+		if hypEndpoint == "" {
+			endpointless = append(endpointless, h)
+			continue
+		}
+		if findingKey != "" && strings.ToLower(dedupEndpointKeyForTarget(vuln.Target, hypEndpoint)) == findingKey {
+			link(h)
+		}
+	}
+	// A hypothesis without an endpoint is only linked when it is the single
+	// unambiguous family candidate, mirroring the unambiguity rule of the
+	// XSS evidence bridge.
+	if len(endpointless) == 1 && len(linked) == 0 {
+		link(endpointless[0])
+	}
+	if len(linked) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("🔗 Auto-linked ledger hypotheses %s to finding %s (proven).", strings.Join(linked, ", "), vuln.ID)
+}
+
+func containsFold(values []string, want string) bool {
+	for _, v := range values {
+		if strings.EqualFold(v, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func duplicateResult(contextID string, existing Vulnerability, msg, hypID string) tools.Result {
 	ledgerNote := linkFindingToLedger(contextID, existing.ID, hypID)
+	if autoNote := autoLinkFindingToLedgerHypotheses(contextID, existing, reportVulnClass(existing.Title, existing.Description, existing.CWE)); autoNote != "" {
+		if ledgerNote != "" {
+			ledgerNote += "\n" + autoNote
+		} else {
+			ledgerNote = autoNote
+		}
+	}
 	if ledgerNote != "" {
 		msg += "\n" + ledgerNote
 	}
@@ -1103,9 +1215,40 @@ func findDuplicateVulnerabilityWithRetry(existing []Vulnerability, title, descri
 			return vuln, fmt.Sprintf("⚠️ DUPLICATE: Same vulnerability type '%s' already reported on endpoint '%s' as %s ('%s'). Skipping.\nIf this is genuinely different, use a distinct endpoint or describe how it differs.",
 				vulnType, endpoint, vuln.ID, vuln.Title), true
 		}
+
+		// Cross-type root-cause equivalence for code execution: prose in one
+		// report can still reclassify its keyword-extracted type (observed in
+		// production: the same eval() RCE stored twice — one report titled
+		// "RCE", the other whose description mentioned SQL context and
+		// extracted as sqli). When BOTH findings carry concrete
+		// code-execution language on the same normalized endpoint of the same
+		// target, they are the same root cause regardless of the label.
+		if sameTarget && normalizedEndpoint != "" && normalizedEndpoint == existingEndpoint &&
+			codeExecutionSignal(title, description) && codeExecutionSignal(vuln.Title, vuln.Description) {
+			return vuln, fmt.Sprintf("⚠️ DUPLICATE: A code-execution finding is already reported on endpoint '%s' as %s ('%s'). Same root cause (arbitrary code/command execution on the same sink) — do not re-report; describe genuinely different sinks with a distinct endpoint.",
+				endpoint, vuln.ID, vuln.Title), true
+		}
 	}
 
 	return Vulnerability{}, "", false
+}
+
+// codeExecutionSignal reports whether a finding's text carries concrete
+// code/command-execution language (beyond generic impact inflation):
+// eval()/exec()/system()/popen() primitives, command output idioms, or an
+// explicit RCE/code-execution/class claim.
+func codeExecutionSignal(title, description string) bool {
+	lower := strings.ToLower(title + " " + description)
+	for _, marker := range []string{
+		"remote code execution", " rce", "rce)", "code execution", "command injection",
+		"os command", "eval(", "__import__", "system(", "popen(", "shell_exec",
+		"exec(", "uid=0", "uid=", "whoami", "commands as root", "arbitrary code",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return strings.HasPrefix(lower, "rce")
 }
 
 // findUpgradeableVulnerabilityIndex identifies an unverified candidate that a
@@ -3734,8 +3877,19 @@ func isSensitiveEndpointContext(lowerText, lowerProof string) bool {
 // extractVulnType extracts a canonical vulnerability type from title/description
 // for deduplication purposes. Returns empty string if type can't be determined.
 func extractVulnType(title, description string) string {
-	lower := strings.ToLower(title + " " + description)
+	// TITLE-FIRST: the class keyword in the title names the finding.
+	// Descriptions discuss context and routinely mention OTHER classes
+	// ("distinct from the SQL injection on /tokens..."), which
+	// reclassified a stored eval()-RCE as sqli and let its duplicate slip
+	// past the same-type dedup gate. Only when the title carries no class
+	// signal is the description consulted.
+	if t := extractVulnTypeFromText(strings.ToLower(title)); t != "" {
+		return t
+	}
+	return extractVulnTypeFromText(strings.ToLower(title + " " + description))
+}
 
+func extractVulnTypeFromText(lower string) string {
 	vulnTypes := []struct {
 		typeName string
 		keywords []string

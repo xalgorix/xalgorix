@@ -236,7 +236,7 @@ func distinctApplicationHosts(state *ScanState) []string {
 	seen := make(map[string]bool)
 	candidates := make([]string, 0, len(state.DiscoveredEndpoints)+len(state.DiscoveredHosts))
 	add := func(host string) {
-		if host == "" || seen[host] {
+		if host == "" || seen[host] || !hostOwesContentDiscovery(state, host) {
 			return
 		}
 		seen[host] = true
@@ -247,7 +247,8 @@ func distinctApplicationHosts(state *ScanState) []string {
 	}
 	// Bare hostnames surfaced by DNS/subdomain/crawl results (they may never
 	// appear as full URLs inside the inventory) still owe content-discovery
-	// dispositions — losing them was silently untested surface.
+	// dispositions — losing them was silently untested surface. Artifact and
+	// out-of-scope hosts are filtered by hostOwesContentDiscovery.
 	for host := range state.DiscoveredHosts {
 		add(host)
 	}

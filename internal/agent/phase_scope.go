@@ -17,6 +17,7 @@ package agent
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -127,6 +128,116 @@ func selectedPhaseList(selection []int) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ── Scan-artifact (probe payload) filtering ────────────────────────────────────
+//
+// The scanner's OWN attack traffic is not target surface: OAST callback
+// hosts, the attacker-legend origins used by methodology prompts
+// (https://evil.com in the CORS probe example), and similar payloads must
+// never enter the endpoint inventory or the discovered-host set. A real
+// production scan burned dozens of finish attempts because "content
+// discovery on <oast-host>" / "content discovery on evil.com" became recon
+// obligations — the model's probe payloads had been recorded as discovered
+// surface.
+
+// probeLegendHosts are the canonical attacker-legend hostnames our own
+// methodology prompt examples and payload conventions use. They are probe
+// payloads, never assessment targets.
+var probeLegendHosts = []string{
+	"evil.com", "www.evil.com", "evil.org",
+	"attacker.com", "attacker.example.com", "attacker.example",
+	"malicious.com", "localhost.com",
+}
+
+// isScanArtifactHost reports whether the host is a scanner-side payload
+// host (OAST callback or attacker legend), not target surface.
+func isScanArtifactHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(host, ".")))
+	if host == "" {
+		return false
+	}
+	if oastHostPattern.MatchString(host) {
+		return true
+	}
+	for _, legend := range probeLegendHosts {
+		if host == legend {
+			return true
+		}
+	}
+	return false
+}
+
+// isScanArtifactURL reports whether the URL points at scanner-side payload
+// infrastructure instead of the assessed target.
+func isScanArtifactURL(raw string) bool {
+	if isOASTCallbackURL(raw) {
+		return true
+	}
+	if host := hostOfEndpoint(raw); host != "" && isScanArtifactHost(host) {
+		return true
+	}
+	return false
+}
+
+// scopeRelatedHost reports whether a discovered host belongs to the
+// engagement scope: an explicit target, or a member of a target's
+// registrable-domain family (subdomains). External hosts that appear in
+// inventories are references (the Phase 19 signal), never wordlist
+// obligations. Port suffixes are tolerated on both sides.
+func scopeRelatedHost(state *ScanState, host string) bool {
+	if state == nil || host == "" {
+		return false
+	}
+	bare := strings.ToLower(strings.TrimSpace(host))
+	if h, _, err := net.SplitHostPort(bare); err == nil {
+		bare = h
+	}
+	if isScanArtifactHost(bare) {
+		return false
+	}
+	for _, t := range state.ScanTargets {
+		target := strings.ToLower(strings.TrimSpace(hostnameOfTarget(t)))
+		if target == "" {
+			continue
+		}
+		if target == bare || strings.TrimSuffix(target, ":80") == bare || strings.TrimSuffix(target, ":443") == bare {
+			return true
+		}
+		if th, _, err := net.SplitHostPort(target); err == nil && th == bare {
+			return true
+		}
+	}
+	suffixes := scopeDomainSuffixes(state)
+	if len(suffixes) == 0 {
+		return false
+	}
+	family := registrableDomain(bare)
+	if family == "" {
+		return false
+	}
+	for _, s := range suffixes {
+		if strings.EqualFold(s, family) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostOwesContentDiscovery reports whether a discovered host may be
+// demanded content discovery. With no domain scope configured (IP/local or
+// unknown targets) the historical behavior is preserved: every
+// non-artifact inventoried host owes a disposition. With a domain scope,
+// only in-scope-family hosts do — external references and probe artifacts
+// never become wordlist obligations.
+func hostOwesContentDiscovery(state *ScanState, host string) bool {
+	if host == "" || isScanArtifactHost(host) {
+		return false
+	}
+	if state == nil || len(scopeDomainSuffixes(state)) == 0 {
+		return true
+	}
+	return scopeRelatedHost(state, host)
 }
 
 // ── Target-level obligation signals ───────────────────────────────────────────
