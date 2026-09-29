@@ -106,6 +106,8 @@ docker run --rm -p 9137:9137 \
 
 Open `http://localhost:9137`. You **don't need an LLM key to start** — the dashboard launches without one; set the model + API key under **Settings → LLM** (it persists to the `/data` volume). If you don't pass `XALGORIX_USERNAME`/`XALGORIX_PASSWORD`, a random admin password is generated and printed to the container logs on first run.
 
+**Machine-to-machine API access** — give automation (your own backend, CI, scripts) a dedicated `Authorization: Bearer` token instead of dashboard credentials: set `XALGORIX_API_TOKEN` (or `XALGORIX_API_TOKENS` for a comma-separated rotation set). Machine tokens authorize `/api/*` routes and the scan-event WebSocket only — never the dashboard UI or operator-only settings routes — never create browser sessions, never interact with the dashboard login rate limiter, and are matched against stored SHA-256 digests with constant-time comparison. The human dashboard login (`XALGORIX_USERNAME` + `XALGORIX_PASSWORD_HASH`) keeps working unchanged alongside them.
+
 **Easiest — Docker Compose** (maps the port + a persistent volume for you):
 
 ```bash
