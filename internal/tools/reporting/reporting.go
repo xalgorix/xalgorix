@@ -3442,6 +3442,46 @@ func MergeVulnsToContext(srcContextID, dstContextID string) int {
 	return added
 }
 
+// SeedVulnsForContext inserts persisted vulnerabilities (reloaded from scan
+// records after a restart/resume) into the given context, skipping semantic
+// duplicates and renumbering ID collisions the same way MergeVulnsToContext
+// does. It exists so a wildcard parent's accumulation context can be rebuilt
+// without losing previously verified findings, and without re-attributing
+// them to a later child session.
+func SeedVulnsForContext(contextID string, vulns []Vulnerability) int {
+	if contextID == "" || len(vulns) == 0 {
+		return 0
+	}
+	dstStore := getStoreForContext(contextID)
+	dstStore.mu.Lock()
+	defer dstStore.mu.Unlock()
+
+	added := 0
+	seenIDs := make(map[string]bool, len(dstStore.vulns))
+	for _, v := range dstStore.vulns {
+		seenIDs[v.ID] = true
+	}
+	for _, v := range vulns {
+		if _, _, duplicate := findDuplicateVulnerability(dstStore.vulns, v.Title, v.Description, v.CVE, v.CWE, v.Target, v.Endpoint); duplicate {
+			continue
+		}
+		if seenIDs[v.ID] {
+			nextID := len(dstStore.vulns) + 1
+			for {
+				v.ID = fmt.Sprintf("XALG-%d", nextID)
+				if !seenIDs[v.ID] {
+					break
+				}
+				nextID++
+			}
+		}
+		dstStore.vulns = append(dstStore.vulns, v)
+		seenIDs[v.ID] = true
+		added++
+	}
+	return added
+}
+
 // GetVulnsJSON returns vulnerabilities as JSON for the active scan context.
 func GetVulnsJSON() string {
 	store := getStore()

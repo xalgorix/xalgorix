@@ -329,137 +329,61 @@ If you can't exploit it, report as INFO or don't report at all.
 `
 }
 
-// buildSubdomainScanInstruction builds an instruction for scanning a single subdomain
-// that was already discovered in Phase 1. Skips subdomain enumeration completely.
-// Includes fingerprint-first deduplication for handling thousands of similar subdomains.
-func buildSubdomainScanInstruction(subdomain, parentDomain, customInstruction string) string {
-	baseInstruction := `## SUBDOMAIN VULNERABILITY SCAN — SMART & EFFICIENT
+// buildWildcardChildContextInstruction describes the wildcard-child operating
+// context: what Phase 1 already covered (organization-wide discovery), what
+// must not be repeated, and the evidence-based host classification that
+// replaces the old superficial skip rules. It intentionally contains no
+// methodology of its own - methodology lives in buildAutonomousInstruction so
+// wildcard children and standalone scans can never drift apart.
+func buildWildcardChildContextInstruction(subdomain, parentDomain string) string {
+	return `## WILDCARD CHILD SESSION - TARGET: ` + subdomain + `
 
-You are an elite penetration tester. YOUR GOAL: Find REAL, EXPLOITABLE vulnerabilities with PROOF.
+This host (` + subdomain + `) is one target inside a wildcard engagement for ` + "`" + parentDomain + "`" + `. Organization-wide subdomain discovery ALREADY ran in a separate Phase 1 session, and every other discovered host receives its own full session. That split has exactly two consequences for you:
 
-## YOUR TARGET: ` + subdomain + ` (subdomain of ` + parentDomain + `)
+1. DO NOT repeat organization-wide enumeration: no subfinder/amass/findomain/assetfinder/certificate-transparency sweeps of the parent domain, and no DNS brute-force rediscovery of the sibling list. The inventory is fixed; you are responsible for THIS host.
+2. Everything else about a standalone assessment applies in full. Host-level reconnaissance IS required - port and service scanning, technology fingerprinting, content and endpoint discovery (robots.txt, sitemap.xml, well-known paths, directory brute-forcing, JavaScript endpoint extraction, historical/archived URLs), parameter discovery - followed by vulnerability testing, exploitation, and verification with the same rigor as if this host were the only target in the engagement.
 
-## ⚠️ CRITICAL: DO NOT ENUMERATE SUBDOMAINS
-This subdomain was already discovered during Phase 1. You MUST NOT:
-- Run subfinder, findomain, assetfinder, or any subdomain enumeration tool
-- Enumerate subdomains of this target
-- Run DNS brute-forcing or certificate transparency lookups
+Sibling hosts are covered by their own sessions. When a flow on THIS host genuinely depends on a sibling (SSO redirect, OAuth provider, shared API gateway), follow it - but attribute findings to the host you are testing.
 
-Focus ONLY on vulnerability testing of this specific host: ` + subdomain + `
+### NO SUPERFICIAL SKIPPING - EVIDENCE-BASED CLASSIFICATION ONLY
 
-## STEP 0: FINGERPRINT & DEDUPLICATION (MANDATORY FIRST STEP)
+None of the following observations is proof that a host has no testable attack surface:
+- Homepage returns HTTP 403/404/5xx - a 404 homepage can coexist with a functional API, an exposed administrative interface, or a vulnerable endpoint
+- Homepage redirects elsewhere - the destination may be only one path of many
+- Response body is small or looks generic
+- Homepage resembles another host, or its content hash matches - shared infrastructure and identical landing pages are NOT proof of identical security configuration
+- HTTPS fails or presents an invalid certificate - the host may be HTTP-only
+- The page looks like a default/parking page on the schemes you tried first
 
-Before doing ANY testing, you MUST determine what this subdomain actually hosts.
-Many subdomains (especially in large organizations) serve identical content — parking pages,
-default panels, redirects to the main site, or CDN mirrors. Do NOT waste time on duplicates.
+Before concluding this host has no testable surface, you MUST investigate: HTTP and HTTPS both, common and service-specific ports, robots.txt/sitemap.xml and well-known paths, obvious application roots (/api, /admin, /login, /graphql, /swagger, /.git), JavaScript-referenced endpoints, historical URLs (web archive), and any reconnaissance evidence already saved in this workspace.
 
-` + "`" + `bash` + "`" + `
-# Quick fingerprint — run ALL of these FIRST
-echo "=== FINGERPRINT: ` + subdomain + ` ==="
-
-# 1. Check if host resolves and responds
-curl -sI -m 10 --connect-timeout 5 https://` + subdomain + ` 2>/dev/null | head -20
-HTTP_CODE=$(curl -so /dev/null -w '%{http_code}' -m 10 https://` + subdomain + ` 2>/dev/null)
-echo "HTTP Status: $HTTP_CODE"
-
-# 2. Get page title and content hash (for dedup)
-TITLE=$(curl -sk -m 10 https://` + subdomain + ` 2>/dev/null | grep -oP '(?<=<title>)[^<]+' | head -1)
-echo "Title: $TITLE"
-
-BODY_HASH=$(curl -sk -m 10 https://` + subdomain + ` 2>/dev/null | md5sum | cut -d' ' -f1)
-echo "Content Hash: $BODY_HASH"
-
-BODY_SIZE=$(curl -sk -m 10 https://` + subdomain + ` 2>/dev/null | wc -c)
-echo "Content Size: $BODY_SIZE bytes"
-
-# 3. Check if it just redirects to main domain
-REDIRECT=$(curl -sk -m 10 -o /dev/null -w '%{redirect_url}' https://` + subdomain + ` 2>/dev/null)
-echo "Redirect: $REDIRECT"
-` + "`" + `
-
-### DECISION AFTER FINGERPRINT:
-
-**SKIP (call finish immediately) if ANY of these are true:**
-- HTTP status is 000 (host doesn't respond / timeout)
-- HTTP status is 403/404 and page is a generic error page
-- Page title is a parking/default page: "Domain Parking", "Coming Soon", "Under Construction", "Default Page", "Welcome to nginx", "Apache2 Default Page", "IIS Windows Server"  
-- Redirect goes to the MAIN domain (` + parentDomain + `) — same content, no point scanning twice
-- Content hash matches a previously scanned subdomain (note this in your findings)
-- Body size is 0 or very small (< 500 bytes) with no meaningful content
-
-If you determine this is a duplicate/parking/redirect subdomain, call finish with a note like:
-"Subdomain ` + subdomain + ` is a [parking page / redirect to main domain / identical to X]. No unique attack surface."
-
-**CONTINUE TESTING if:**
-- The subdomain has unique content (different title/hash from others)
-- It runs a different application or technology stack
-- It has a login page, API, admin panel, or unique functionality
-- It returns a different HTTP status or content than the parent domain
-
-## CORE RULE: DETECT → EXPLOIT → REPORT
-⚠️ NEVER report a vulnerability you haven't exploited. The report_vulnerability tool WILL REJECT reports without exploitation proof.
-
-## YOUR WORKFLOW (after passing fingerprint check):
-
-### Step 1: QUICK TECH FINGERPRINT
-- whatweb ` + subdomain + ` — identify technologies
-- nmap -sV -T2 --top-ports 100 ` + subdomain + ` — find open ports while respecting the active request-rate policy. If nmap errors with "Operation not permitted", a raw-socket/root requirement, or a dnet/socket failure (common in restricted containers), retry as an unprivileged TCP connect scan: nmap -sT -Pn -sV --top-ports 100 ` + subdomain + `, or use naabu (TCP connect, no raw sockets needed).
-- curl -sI https://` + subdomain + ` — check headers
-
-### Step 2: DISCOVER CONTENT  
-- ffuf/gobuster directory brute-forcing on this host
-- Crawl with katana/gospider for URLs and parameters
-- Check for robots.txt, sitemap.xml, .git exposure
-
-### Step 3: MANUAL VULNERABILITY TESTING
-- Test all discovered parameters MANUALLY first (curl with special chars, check reflections, test timing)
-- Only AFTER understanding how params are processed, consider using nuclei as a supplement
-- Analyze JavaScript files for API keys, endpoints, secrets
-
-### Step 4: EXPLOITATION & VERIFICATION (MANDATORY)
-For EVERY potential vulnerability:
-- SQLi: Confirm with time-based or extract data
-- XSS: Prove EXECUTION, not reflection — raw (un-encoded) payload in a text/html response that actually runs (browser execute_js alert/document.domain, screenshot, or OOB callback for blind/stored). Encoded reflection, JSON/text responses, and self-XSS are NOT XSS.
-- SSRF: Use a fresh OOB token with redirects explicitly disabled; require an origin-assessed non-scanner HTTP(S) interaction plus the exact oob_token, or internal-only data returned in-band by the target.
-- RCE: Execute id/whoami and show output
-
-### Step 5: REPORT (only after exploitation)
-Call report_vulnerability with exploitation_proof showing actual output.
-
-## FALSE POSITIVE REJECTION:
-- Missing headers = INFO only
-- Version disclosure = INFO unless specific CVE exploited
-- Open redirect alone = LOW (not medium or high)
-- CORS alone = LOW (needs credential theft for higher)
-- Scanner-only findings without manual verification = REJECTED
-- SSL/TLS issues = REJECTED (Do not report)
-- DNS configuration = REJECTED (Do not report)
-- Autodiscover/mail config disclosure = REJECTED (standard protocol, same as MX records)
-- MX/DNS/WHOIS public record data = REJECTED (public by design)
-- Standard mail ports visible = REJECTED (meant to be public)
-- Third-party hosting provider hostnames = NOT "internal infrastructure" — REJECT
-- If data is obtainable via dig/whois/nslookup, it is NOT a vulnerability
-
-## SAFE EXPLOITATION RULES:
-- NEVER delete data, drop tables, or modify production state
-- Use READ-ONLY exploitation only
-- Time-based tests are safe
-
-## UNIVERSAL EMAIL USAGE
-When you need email for any test, use the agentmail tool — NEVER use random/fake emails.
-
-## LOGIN/SIGNUP TESTING (ALWAYS use agentmail):
-1. FIRST: call ` + "`" + `agentmail` + "`" + ` action=list_inboxes to see your available emails and IDs
-2. Use your PRE-CREATED agentmail email addresses — NEVER create new inboxes
-3. If target has login/signup: use agentmail email + browser_action to test
-4. For signup with email verification: wait for email with ` + "`" + `agentmail` + "`" + ` action=wait_for_email inbox_id=YOUR_INBOX_ID
-5. After login: ` + "`" + `browser_action` + "`" + ` command=save_session for IDOR testing
-
-Be efficient. If this subdomain is a duplicate or uninteresting, finish fast and move on.
+When you finish, classify the host honestly in your final summary: fully tested / partially tested / unreachable (what you tried and what failed) / no testable attack surface found (with the investigation evidence that justifies the claim). Never present an unassessed host as tested.
 `
+}
 
-	if customInstruction != "" {
-		return baseInstruction + "\n\n## CUSTOM INSTRUCTIONS\n" + customInstruction
+// buildSubdomainScanInstruction builds the instruction for one discovered
+// wildcard child. The wildcard-specific context (no org-wide re-enumeration,
+// evidence-based classification) is prefixed to the SAME authoritative
+// methodology a standalone single-target scan receives - identical skills,
+// phases, verification standards, authentication guidance, and false-positive
+// gates - because both modes render from one shared implementation.
+func buildSubdomainScanInstruction(subdomain, parentDomain, customInstruction string, allowLocal bool) string {
+	return buildWildcardChildContextInstruction(subdomain, parentDomain) + "\n\n" +
+		buildAutonomousInstruction(subdomain, customInstruction, allowLocal)
+}
+
+// composeWildcardChildInstruction assembles the full Phase-2 child prompt the
+// same way runWildcardTarget applies it: the shared methodology plus the
+// wildcard-child context, the auto-resume continuation note, the operator
+// phase restrictions, and the activity policy. Extracted so parity between
+// the wildcard child prompt and the standalone prompt is testable without
+// running an agent session.
+func composeWildcardChildInstruction(subdomain, parentTarget, userInstruction string, allowLocal, subResumed bool, phases []int, reconMode, scanIntensity string) string {
+	instruction := buildSubdomainScanInstruction(subdomain, parentTarget, userInstruction, allowLocal)
+	if subResumed {
+		instruction += "\n\n## AUTO-RESUME\nRead existing notes and files in the current workspace first, then continue this subdomain scan from the last saved evidence instead of starting from scratch."
 	}
-	return baseInstruction
+	instruction += buildPhaseFilterInstruction(phases)
+	instruction += buildActivityPolicyInstruction(reconMode, scanIntensity)
+	return instruction
 }

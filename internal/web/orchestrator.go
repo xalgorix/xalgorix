@@ -925,8 +925,14 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 	// ── Stable parent reporting context for vuln accumulation ──
 	// All subdomain sessions merge their vulns into this context.
 	// It persists across the entire wildcard scan and is cleaned up at the end.
+	// The wildcard input is normalized independently from discovery: the
+	// registrable root drives enumeration while the exact operator-supplied
+	// host remains a mandatory assessment subject (see wildcard_target.go).
+	wt := parseWildcardTarget(target)
 	parentReportingCtxID := fmt.Sprintf("wc-%s-%s", req.InstanceID, sanitizeTarget(target))
-	reporting.ResetVulnerabilitiesForContext(parentReportingCtxID) // start clean
+	if !req.IsResume {
+		reporting.ResetVulnerabilitiesForContext(parentReportingCtxID) // start clean
+	}
 	defer func() {
 		// Final cleanup of the parent reporting context
 		reporting.CleanupContext(parentReportingCtxID)
@@ -947,7 +953,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			}
 		}
 		if len(subdomains) == 0 {
-			subdomains = s.collectSubdomains(scanDir, target, "")
+			subdomains = s.collectSubdomains(scanDir, wt.Root, "")
 		}
 		log.Printf("[AUTO-RESUME] Resuming wildcard scan for %s at subdomain index %d/%d (scanDir=%s)", target, resumeFromSubIndex, len(subdomains), scanDir)
 		s.broadcastToInstance(req.InstanceID, WSEvent{
@@ -969,7 +975,9 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		})
 
 		discoveryRatePolicy := agent.EffectiveRequestRatePolicy(scanCfg, req.Instruction)
-		discoveryInstruction := buildDiscoveryInstruction(target, req.ReconMode, discoveryRatePolicy)
+		// Organization-wide enumeration runs against the registrable root
+		// (www.example.com -> example.com), never the raw input string.
+		discoveryInstruction := buildDiscoveryInstruction(wt.Root, req.ReconMode, discoveryRatePolicy)
 		if req.Instruction != "" {
 			discoveryInstruction += "\n\n" + req.Instruction
 		}
@@ -1033,7 +1041,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		}
 
 		// Read discovered subdomains — use discovery context ID for notes fallback
-		subdomains = s.collectSubdomains(scanDir, target, discoveryCtxID)
+		subdomains = s.collectSubdomains(scanDir, wt.Root, discoveryCtxID)
 
 		// Now clean up the discovery notes (deferred from skipNotesCleanup)
 		if discoveryCtxID != "" {
@@ -1042,28 +1050,39 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		}
 	}
 
-	log.Printf("[INFO] Total subdomains found for %s: %d", target, len(subdomains))
+	// Mandatory inventory merge: the exact operator-supplied target (with its
+	// original scheme/port/path context when provided) and the authorized
+	// registrable root are ALWAYS assessment subjects. An empty or filtered
+	// discovery result can never remove them - this merge is the last word
+	// on inventory membership. It is order-stable, so resume indexes that
+	// were persisted against the earlier inventory remain valid.
+	subdomains = mergeWildcardInventory(subdomains, wt)
 
-	// Fallback: if discovery found 0 subdomains, scan the root domain itself
-	if len(subdomains) == 0 {
-		log.Printf("[INFO] No subdomains discovered for %s — falling back to root domain scan", target)
-		subdomains = []string{target}
-		s.broadcastToInstance(req.InstanceID, WSEvent{
-			Type:         "target_completed",
-			Content:      fmt.Sprintf("[PHASE 1] Discovery complete: found 0 subdomains. Falling back to root domain scan of %s.", target),
-			Target:       target,
-			TargetIndex:  idx + 1,
-			TotalTargets: total,
-		})
-	} else {
-		s.broadcastToInstance(req.InstanceID, WSEvent{
-			Type:         "target_completed",
-			Content:      fmt.Sprintf("[PHASE 1] Discovery complete: found %d subdomains. Now scanning each individually.", len(subdomains)),
-			Target:       target,
-			TargetIndex:  idx + 1,
-			TotalTargets: total,
-		})
+	if req.IsResume {
+		// Rebuild the parent accumulation context from the durable child
+		// records: previously verified findings must not disappear (nor be
+		// re-attributed to the first resumed child) after a restart.
+		if parentRecord == nil {
+			parentRecord, _ = loadScanRecordFromDir(scanDir)
+		}
+		if n := s.reseedWildcardParentVulnerabilities(parentReportingCtxID, req.InstanceID, parentRecord); n > 0 {
+			log.Printf("[AUTO-RESUME] Restored %d previously verified findings into parent reporting context for %s", n, target)
+			s.broadcastToInstance(req.InstanceID, WSEvent{
+				Type:    "message",
+				Target:  target,
+				Content: fmt.Sprintf("[AUTO-RESUME] Restored %d previously verified findings from completed host assessments.", n),
+			})
+		}
 	}
+
+	log.Printf("[INFO] Assessment inventory for %s: %d host(s) (supplied target %q, discovery root %q)", target, len(subdomains), wt.Assessment, wt.Root)
+	s.broadcastToInstance(req.InstanceID, WSEvent{
+		Type:         "target_completed",
+		Content:      fmt.Sprintf("[PHASE 1] Discovery complete: %d host(s) in the assessment inventory for %s (supplied target and authorized root domain always included). Now scanning each individually.", len(subdomains), target),
+		Target:       target,
+		TargetIndex:  idx + 1,
+		TotalTargets: total,
+	})
 
 	// A wildcard target is one user-visible scan, but every discovered live
 	// subdomain is intentionally expanded into a full agent session: coverage
@@ -1083,17 +1102,32 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			Content: fmt.Sprintf("⚠️ Explicit wildcard scan resource cap: scanning %d subdomains; %d additional candidates were discovered but not expanded into full LLM sessions.", wildcardLimit, skipped),
 		})
 	}
+	// Preserve per-child metadata (scan id, lifecycle timestamps, vuln/token
+	// counters, and any pre-restart "failed" outcome) when rebuilding the
+	// pending list: a resume rebuild that reset these would orphan the child
+	// scan records on disk, break a later vuln reseed, and re-brand a failed
+	// host assessment as finished.
+	existingChildren := make(map[string]SubScanSummary)
+	if parentRecord != nil {
+		for _, child := range parentRecord.SubScans {
+			if prev, ok := existingChildren[child.Target]; !ok || (child.ID != "" && prev.ID == "") {
+				existingChildren[child.Target] = child
+			}
+		}
+	}
 	pendingSubScans := make([]SubScanSummary, 0, len(subdomains))
 	resumeFromSubIndex = clampInt(resumeFromSubIndex, 0, len(subdomains))
 	for i, subdomain := range subdomains {
-		status := "pending"
+		child := existingChildren[subdomain]
+		child.Target = subdomain
+		child.Status = "pending"
 		if i < resumeFromSubIndex {
-			status = "finished"
+			child.Status = "finished"
+			if strings.EqualFold(strings.TrimSpace(existingChildren[subdomain].Status), "failed") {
+				child.Status = "failed"
+			}
 		}
-		pendingSubScans = append(pendingSubScans, SubScanSummary{
-			Target: subdomain,
-			Status: status,
-		})
+		pendingSubScans = append(pendingSubScans, child)
 	}
 	if parentRecord == nil {
 		parentRecord, _ = loadScanRecordFromDir(scanDir)
@@ -1128,7 +1162,11 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		CurrentPhase:   firstSelectedPhase(req.Phases),
 	})
 
-	saveWildcardProgress := func(nextIndex, runningIndex int, activeSubTarget, activeSubScanDir string) {
+	// lastOutcome is the outcome of the child dispatch just moved past ("" when
+	// not applicable). A failed or crashed host assessment must never be
+	// recorded as "finished": unfinished work stays identifiable in the
+	// parent inventory while the loop continues to the remaining hosts.
+	saveWildcardProgress := func(nextIndex, runningIndex int, activeSubTarget, activeSubScanDir, lastOutcome string) {
 		nextIndex = clampInt(nextIndex, 0, len(subdomains))
 		if parentRecord == nil {
 			parentRecord, _ = loadScanRecordFromDir(scanDir)
@@ -1157,6 +1195,9 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 				case i < nextIndex:
 					if child.Status == "" || child.Status == "pending" || child.Status == "running" {
 						child.Status = "finished"
+						if i == nextIndex-1 && lastOutcome != "" {
+							child.Status = lastOutcome
+						}
 					}
 					if child.FinishedAt == "" {
 						child.FinishedAt = time.Now().Format(time.RFC3339)
@@ -1246,8 +1287,12 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			break
 		}
 		log.Printf("[INFO] Starting subdomain %d/%d: %s (parent: %s)", j+1, len(subdomains), subdomain, target)
-		saveWildcardProgress(j, j, subdomain, subScanDir)
+		saveWildcardProgress(j, j, subdomain, subScanDir, "")
 
+		// childOutcome starts pessimistic: a session that panics or bails is
+		// recorded "failed" (identifiable, never "finished") and never
+		// terminates its siblings; a normal completion upgrades it.
+		childOutcome := "failed"
 		// Each subdomain gets its own isolated session wrapped in a panic guard
 		func() {
 			defer func() {
@@ -1257,12 +1302,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 				}
 			}()
 
-			scanInstruction := buildSubdomainScanInstruction(subdomain, target, req.Instruction)
-			if subResumed {
-				scanInstruction += "\n\n## AUTO-RESUME\nRead existing notes and files in the current workspace first, then continue this subdomain scan from the last saved evidence instead of starting from scratch."
-			}
-			scanInstruction += buildPhaseFilterInstruction(req.Phases)
-			scanInstruction += buildActivityPolicyInstruction(req.ReconMode, req.ScanIntensity)
+			scanInstruction := composeWildcardChildInstruction(subdomain, target, req.Instruction, scanCfg != nil && scanCfg.AllowLocalTargets, subResumed, req.Phases, req.ReconMode, req.ScanIntensity)
 
 			s.broadcastToInstance(req.InstanceID, WSEvent{
 				Type:           "target_started",
@@ -1316,6 +1356,15 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			if s.instanceInterrupted(req.InstanceID) {
 				wildcardStopped = true
 				return
+			}
+			// Propagate the child real outcome and per-host counters into the
+			// parent inventory so the record reflects what each host assessment
+			// actually produced. A session recorded "failed" by the engine
+			// stays "failed"; anything else counts as a completed assessment.
+			childOutcome = wildcardChildOutcome(subSess.record)
+			if subSess.record != nil && parentRecord != nil && j < len(parentRecord.SubScans) {
+				parentRecord.SubScans[j].VulnCount = len(subSess.record.Vulns)
+				parentRecord.SubScans[j].TotalTokens = subSess.record.TotalTokens
 			}
 
 			// Generate PDF for this subdomain if NEW vulnerabilities found
@@ -1377,7 +1426,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		if wildcardStopped {
 			break
 		}
-		saveWildcardProgress(j+1, -1, "", "")
+		saveWildcardProgress(j+1, -1, "", "", childOutcome)
 
 		// ── Cooldown between subdomain scans ──
 		// Prevents LLM API rate-limiting and gives GC time to reclaim memory.
@@ -1402,7 +1451,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 				parentRecord.StopReason = "user_stopped"
 			}
 		} else {
-			saveWildcardProgress(len(subdomains), -1, "", "")
+			saveWildcardProgress(len(subdomains), -1, "", "", "")
 			parentRecord.Status = "finished"
 		}
 		parentRecord.FinishedAt = time.Now().Format(time.RFC3339)
@@ -1593,19 +1642,30 @@ DO NOT resolve hosts. DO NOT verify liveness. DO NOT scan for vulnerabilities. C
 
 // collectSubdomains reads discovered subdomains from all known file locations and agent notes.
 // contextID is used for context-aware notes lookup; if empty, falls back to global notes.
-func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
+// collectSubdomains reads discovered subdomains from all known file locations
+// and agent notes, AGGREGATING every source instead of letting one preferred
+// file mask the others: a dnsx "live" list can be a strict subset of the
+// passive lists when resolution flakes, so stopping at the first non-empty
+// file silently dropped candidates. root is the registrable discovery domain
+// (public-suffix aware, from parseWildcardTarget); contextID is used for
+// context-aware notes lookup, falling back to global notes when empty.
+func (s *Server) collectSubdomains(scanDir, root, contextID string) []string {
 	seen := make(map[string]bool)
 	var subdomains []string
 
-	// Normalize target to root domain — strip www. prefix so "www.zooptos.com" → "zooptos.com"
-	// This ensures api.zooptos.com matches when user entered www.zooptos.com
-	rootTarget := strings.TrimPrefix(target, "www.")
+	// The discovery root arrives pre-normalized (www.example.com ->
+	// example.com; www.example.co.uk -> example.co.uk). No www-prefix or
+	// first-label trimming happens here.
+	rootTarget := strings.ToLower(strings.TrimSpace(root))
+	if rootTarget == "" {
+		return nil
+	}
 
 	// ansiRegex strips ANSI escape codes (color, cursor, etc.) from tool output.
 	// Tools like dnsx emit sequences like \x1b[35m that corrupt domain matching.
 	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-	// Helper: extract valid subdomains from a file (must be subdomains of the target)
+	// Helper: extract valid subdomains from a file (must be subdomains of the root)
 	extractFromFile := func(path string) []string {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -1626,7 +1686,7 @@ func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
 			if len(parts) > 0 {
 				domain := strings.TrimRight(parts[0], "/.,;:")
 				domain = strings.ToLower(domain)
-				// Accept: exact root domain OR any subdomain of root domain
+				// Accept: exact root domain OR any subdomain of the root domain
 				if strings.Contains(domain, ".") && (domain == rootTarget || strings.HasSuffix(domain, "."+rootTarget)) && !seen[domain] {
 					seen[domain] = true
 					found = append(found, domain)
@@ -1723,7 +1783,7 @@ func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
 						found = append(found, m)
 					}
 				}
-				// Also check bare rootTarget (e.g., "bild.tv" itself)
+				// Also check bare rootTarget (e.g., "example.com" itself)
 				if !seen[rootTarget] {
 					seen[rootTarget] = true
 					found = append(found, rootTarget)
@@ -1743,20 +1803,19 @@ func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
 		"resolved_subdomains.txt", "httpx_output.txt", "dnsx_output.txt",
 	}
 
-	// Layer 1: Check exact files in scan directory
+	// Layer 1: exact files in the scan directory — ALL of them, aggregated.
+	// A preferred "live" file must not mask other valid discovery sources.
 	for _, name := range subdomainFileNames {
 		path := filepath.Join(scanDir, name)
 		if found := extractFromFile(path); len(found) > 0 {
 			subdomains = append(subdomains, found...)
-			if name == "live_subdomains.txt" || name == "live_resolved.txt" {
-				break
-			}
 		}
 	}
 
-	// Layer 1.25: Check workspace and terminal workdir — agents run commands here,
-	// so ./passive_subfinder.txt etc. land in these directories, NOT in scanDir.
-	if len(subdomains) == 0 {
+	// Layer 1.25: workspace and terminal workdir — agents run commands here,
+	// so ./passive_subfinder.txt etc. land in these directories, NOT scanDir.
+	// Aggregated in addition to Layer 1 (never masked by it).
+	{
 		checkDirs := []string{}
 		if wd := terminal.GetWorkDir(); wd != "" && wd != scanDir {
 			checkDirs = append(checkDirs, wd)
@@ -1772,14 +1831,32 @@ func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
 					subdomains = append(subdomains, found...)
 				}
 			}
-			if len(subdomains) > 0 {
-				break
-			}
 		}
 	}
 
-	// Layer 1.5: Check /tmp — agents often save recon files here
+	// Layer 2: walk the scan directory tree for nested matching files. The
+	// callback continues after every match, so every matching file
+	// contributes candidates.
+	_ = filepath.WalkDir(scanDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		base := filepath.Base(path)
+		for _, name := range subdomainFileNames {
+			if base == name {
+				if found := extractFromFile(path); len(found) > 0 {
+					subdomains = append(subdomains, found...)
+				}
+			}
+		}
+		return nil
+	})
+
+	// Layers 3+ are last-resort fallbacks, intentionally guarded: /tmp and the
+	// home directory can hold leftovers from unrelated scans, and global
+	// notes span sessions. They only contribute when nothing else did.
 	if len(subdomains) == 0 {
+		// Layer 2.5: /tmp — agents sometimes save recon files here
 		for _, name := range subdomainFileNames {
 			path := filepath.Join("/tmp", name)
 			if found := extractFromFile(path); len(found) > 0 {
@@ -1789,8 +1866,8 @@ func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
 		}
 	}
 
-	// Layer 1.75: Check home directory — some agents write to ~/
 	if len(subdomains) == 0 {
+		// Layer 2.75: home directory — some agents write to ~/
 		if homeDir, err := os.UserHomeDir(); err == nil && homeDir != scanDir {
 			for _, name := range subdomainFileNames {
 				path := filepath.Join(homeDir, name)
@@ -1802,27 +1879,8 @@ func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
 		}
 	}
 
-	// Layer 2: Walk scan directory tree for any matching files
 	if len(subdomains) == 0 {
-		_ = filepath.WalkDir(scanDir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			base := filepath.Base(path)
-			for _, name := range subdomainFileNames {
-				if base == name {
-					if found := extractFromFile(path); len(found) > 0 {
-						subdomains = append(subdomains, found...)
-						return nil
-					}
-				}
-			}
-			return nil
-		})
-	}
-
-	// Layer 3: Parse agent notes for subdomain data (context-aware)
-	if len(subdomains) == 0 {
+		// Layer 3: parse agent notes for subdomain data (context-aware)
 		var allNotes map[string]string
 		if contextID != "" {
 			allNotes = notes.GetAllNotesForContext(contextID)
@@ -1847,7 +1905,7 @@ func (s *Server) collectSubdomains(scanDir, target, contextID string) []string {
 	}
 
 	if len(subdomains) == 0 {
-		log.Printf("[WARN] No subdomains found after all fallback layers for target: %s (rootTarget: %s)", target, rootTarget)
+		log.Printf("[WARN] No subdomains found after all fallback layers for discovery root: %s", rootTarget)
 	}
 
 	// Shuffle so scan order is randomized — avoids predictable patterns
