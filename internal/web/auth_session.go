@@ -331,10 +331,24 @@ func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 					next.ServeHTTP(w, r)
 					return
 				}
-				// Valid token, but the route is not authorized for machine
-				// clients (dashboard pages or operator-only APIs): fall
-				// through to the standard session flow. A service token can
-				// never silently authorize the dashboard.
+				if isMachineAPIPath(path) {
+					// Valid token on an operator-only API route (settings,
+					// auth profiles, chat): the credential is fine, the ROUTE is
+					// forbidden for machine clients. Answer with 403 and an
+					// explicit reason. This previously fell through to the
+					// session flow and ended as a generic 401, indistinguishable
+					// from a bad token - API clients (and their operators)
+					// diagnosed a working credential as a rejected token.
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error": "Machine API tokens are not authorized for this route",
+					})
+					return
+				}
+				// Valid token on a dashboard page route: fall through to the
+				// standard session flow. A service token can never silently
+				// authorize the dashboard.
 			case machineAuthInvalid:
 				// A presented credential that matches no configured token:
 				// fail loudly with a generic 401. Never fall back to cookie

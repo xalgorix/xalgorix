@@ -184,7 +184,10 @@ func TestMachineToken_BearerRequestsSkipCSRFButCookiesKeepIt(t *testing.T) {
 }
 
 // The machine token must not authorize operator-only routes (settings, LLM
-// auth profiles, chat) even though it is valid.
+// auth profiles, chat) even though it is valid. The rejection is 403 - the
+// credential is valid, the ROUTE is forbidden for machine clients - so
+// clients never misread a working token as rejected (a 401 here was
+// indistinguishable from an invalid token).
 func TestMachineToken_OperatorRoutesDenied(t *testing.T) {
 	h := machineAuthHarness(apiTokenCfg("tok-a"))
 	for _, path := range []string{
@@ -194,8 +197,12 @@ func TestMachineToken_OperatorRoutesDenied(t *testing.T) {
 		"/api/auth/profiles/api-key",
 		"/api/chat",
 	} {
-		if w := doReq(h, "GET", path, "Bearer tok-a"); w.Code != http.StatusUnauthorized {
+		w := doReq(h, "GET", path, "Bearer tok-a")
+		if w.Code != http.StatusForbidden {
 			t.Fatalf("machine token must not authorize operator-only route %s, got %d", path, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "not authorized for this route") {
+			t.Fatalf("rejection of %s must state the route restriction, got: %s", path, w.Body.String())
 		}
 	}
 }
@@ -375,5 +382,32 @@ func TestMachineToken_RejectionBodyIsGeneric(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil || parsed.Error != "Invalid API token" {
 		t.Fatalf("rejection body must be a generic JSON error, got %q err=%v", parsed.Error, err)
+	}
+}
+
+// A valid machine token on an operator-only API route (the settings surface
+// and friends) must fail with 403 + an explicit route-forbidden reason - NOT
+// a generic 401 that a client cannot distinguish from a bad credential.
+func TestMachineToken_DenylistedRouteIsForbiddenNotUnauthorized(t *testing.T) {
+	resetAuthStateForTest()
+	h := machineAuthHarness(apiTokenCfg("tok-a"))
+	for _, path := range []string{"/api/settings/environment", "/api/auth/profiles", "/api/chat"} {
+		w := doReq(h, "GET", path, "Bearer tok-a")
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("valid machine token on %s => %d, want 403", path, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "not authorized for this route") {
+			t.Fatalf("403 body must state the route restriction explicitly, got: %s", w.Body.String())
+		}
+	}
+	// Control: the same token on an ordinary API route still works.
+	if w := doReq(h, "GET", "/api/scans", "Bearer tok-a"); w.Code != http.StatusOK {
+		t.Fatalf("valid machine token on /api/scans => %d, want 200", w.Code)
+	}
+	// Control: an INVALID token on the denylisted route still reports 401
+	// (credential problem), not 403 (authorization problem).
+	w := doReq(h, "GET", "/api/settings/environment", "Bearer not-a-token")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid machine token on denylisted route => %d, want 401", w.Code)
 	}
 }
