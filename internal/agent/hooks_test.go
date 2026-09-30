@@ -450,6 +450,52 @@ func TestWorkTracker_EndpointInventory(t *testing.T) {
 
 // ── hookFinishGatekeeper tests ───────────────────────────────────────────────
 
+// TestPlanFinishGateGuidanceMatchesTypedDispositions: the finish-gate
+// rejection must teach exactly what updatePlanTool accepts. The old guidance
+// ("Call update_plan with status 'skipped'") steered the model into calls the
+// coverage-floor validator rejects — a production scan's endgame burned its
+// remaining tool calls following those directions (bare skips duplicate-
+// suppressed, note-less typed dispositions rejected) and the scan ended in
+// finish-gate exhaustion instead of a settled plan.
+func TestPlanFinishGateGuidanceMatchesTypedDispositions(t *testing.T) {
+	state := NewScanState()
+	plan := NewPlan()
+	if !plan.add(&Task{
+		ID:        "test-ssrf",
+		Title:     "Test for ssrf",
+		Phase:     7,
+		VulnClass: "ssrf",
+		Status:    TaskPending,
+		Origin:    "auto",
+	}) {
+		t.Fatal("failed to add task")
+	}
+	state.Plan = plan
+	state.PlanBuilt = true
+
+	result := planFinishGate(state, 3)
+	if !result.Block {
+		t.Fatal("expected the finish gate to block with a pending task")
+	}
+	reason := result.BlockReason
+	for _, want := range []string{
+		"not_applicable",
+		"blocked_unreachable",
+		"concrete reason note",
+		"REJECTED",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("finish-gate guidance missing %q: %s", want, reason)
+		}
+	}
+	// The old message's bare-'skipped' steering is gone: every typed
+	// disposition it names must carry a note, so the guidance must not
+	// instruct a bare 'skipped' call.
+	if strings.Contains(reason, "status 'skipped' for ") {
+		t.Errorf("finish-gate guidance still steers toward a bare 'skipped': %s", reason)
+	}
+}
+
 func TestFinishGatekeeper_BlocksLowIteration(t *testing.T) {
 	state := NewScanState()
 	state.Iteration = 2

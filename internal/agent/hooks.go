@@ -2723,8 +2723,13 @@ func planFinishGate(state *ScanState, maxRejections int) HookResult {
 		return HookResult{
 			Block: true,
 			BlockReason: fmt.Sprintf("Your scan plan still has %d unfinished task(s):\n%s\n\n"+
-				"Complete or skip each before finishing. Call update_plan with status 'skipped' for "+
-				"tasks that don't apply to this target (e.g. no auth surface → skip 'auth-session').",
+				"Complete or skip each before finishing. For tasks that don't apply to this target, "+
+				"call update_plan with a TYPED disposition AND a concrete reason note: status "+
+				"'not_applicable' (or 'blocked_missing_auth', 'blocked_missing_second_identity', "+
+				"'blocked_unreachable', 'blocked_policy', 'exhausted', 'superseded') plus notes naming "+
+				"the absent surface (e.g. 'no XML input surface exists', 'no authentication surface to "+
+				"test'). A bare 'skipped' status, and a typed status without a concrete note, are both "+
+				"REJECTED by the coverage contract — testing the class is the only other path.",
 				len(remaining), list),
 		}
 	}
