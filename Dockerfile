@@ -120,7 +120,23 @@ ENV DEBIAN_FRONTEND=noninteractive
 # metapackages pull their full tool set. Covers the web/app-pentest domains the
 # agent uses plus general coverage, and adds the package managers required for
 # runtime auto-install (go/cargo/pipx/npm) and Chromium for browser DAST.
-RUN apt-get update && apt-get install -y \
+#
+# Kali rolling mirrors periodically serve size-mismatched (mid-sync) package
+# indexes through CDN edges ("File has unexpected size … Mirror sync in
+# progress?"), failing `apt-get update` with exit 100 even though the same
+# index is consistent minutes later — release builds died on this race
+# twice, 40 minutes apart. Retry the index fetch with backoff instead of
+# failing the whole container build on a mirror sync.
+RUN set -eux; \
+    ok=0; \
+    for i in 1 2 3 4 5; do \
+      if apt-get -o Acquire::Retries=3 update; then ok=1; break; fi; \
+      echo "apt index fetch failed (mirror sync?); retry $i/5 in 45s"; \
+      rm -rf /var/lib/apt/lists/*; \
+      sleep 45; \
+    done; \
+    [ "$ok" = "1" ]; \
+    apt-get install -y \
       kali-linux-headless \
       kali-tools-information-gathering \
       kali-tools-web \
