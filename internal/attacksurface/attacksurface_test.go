@@ -32,26 +32,28 @@ func TestParseOpenAPIJSON_V3(t *testing.T) {
 	    "/login": {"post": {}}
 	  }
 	}`
-	res := ParseBytes([]byte(spec), "openapi.json")
-	if res == nil {
-		t.Fatal("expected a result")
-	}
-	res.finalize()
-	if e := findEndpoint(res, "GET", "/users/{id}"); e == nil {
-		t.Fatal("missing GET /users/{id}")
+	// Deref-bearing assertions live inside the non-nil branch so the nil
+	// check is structurally visible to the analyzer (staticcheck SA5011).
+	if res := ParseBytes([]byte(spec), "openapi.json"); res != nil {
+		res.finalize()
+		if e := findEndpoint(res, "GET", "/users/{id}"); e == nil {
+			t.Fatal("missing GET /users/{id}")
+		} else {
+			if !contains(e.Params, "id") || !contains(e.Params, "expand") {
+				t.Fatalf("params = %v, want id+expand", e.Params)
+			}
+			if !strings.HasPrefix(e.Path, "https://api.example.com/v1") {
+				t.Fatalf("base URL not applied: %s", e.Path)
+			}
+		}
+		if findEndpoint(res, "POST", "/login") == nil {
+			t.Fatal("missing POST /login")
+		}
+		if len(res.Notes) == 0 {
+			t.Fatal("expected a security-scheme note")
+		}
 	} else {
-		if !contains(e.Params, "id") || !contains(e.Params, "expand") {
-			t.Fatalf("params = %v, want id+expand", e.Params)
-		}
-		if !strings.HasPrefix(e.Path, "https://api.example.com/v1") {
-			t.Fatalf("base URL not applied: %s", e.Path)
-		}
-	}
-	if findEndpoint(res, "POST", "/login") == nil {
-		t.Fatal("missing POST /login")
-	}
-	if len(res.Notes) == 0 {
-		t.Fatal("expected a security-scheme note")
+		t.Fatal("expected a result")
 	}
 }
 
@@ -111,26 +113,26 @@ func TestParseHAR_ExtractsEndpointsAndAuth(t *testing.T) {
 	    }}
 	  ]}
 	}`
-	res := ParseBytes([]byte(har), "capture.har")
-	if res == nil {
+	if res := ParseBytes([]byte(har), "capture.har"); res != nil {
+		res.finalize()
+		if findEndpoint(res, "GET", "/api/orders") == nil {
+			t.Fatal("missing GET /api/orders")
+		}
+		if res.AuthHeaders["Authorization"] != "Bearer eyJreal.token.here" {
+			t.Fatalf("Authorization not harvested: %v", res.AuthHeaders)
+		}
+		if res.AuthHeaders["Cookie"] != "session=abc123" {
+			t.Fatalf("Cookie not harvested: %v", res.AuthHeaders)
+		}
+		if _, ok := res.AuthHeaders["Accept"]; ok {
+			t.Fatal("Accept must NOT be treated as auth")
+		}
+		// URL query must be stripped from the stored path.
+		if e := findEndpoint(res, "GET", "/api/orders"); e != nil && strings.Contains(e.Path, "?") {
+			t.Fatalf("query not stripped: %s", e.Path)
+		}
+	} else {
 		t.Fatal("expected HAR result")
-	}
-	res.finalize()
-	if findEndpoint(res, "GET", "/api/orders") == nil {
-		t.Fatal("missing GET /api/orders")
-	}
-	if res.AuthHeaders["Authorization"] != "Bearer eyJreal.token.here" {
-		t.Fatalf("Authorization not harvested: %v", res.AuthHeaders)
-	}
-	if res.AuthHeaders["Cookie"] != "session=abc123" {
-		t.Fatalf("Cookie not harvested: %v", res.AuthHeaders)
-	}
-	if _, ok := res.AuthHeaders["Accept"]; ok {
-		t.Fatal("Accept must NOT be treated as auth")
-	}
-	// URL query must be stripped from the stored path.
-	if e := findEndpoint(res, "GET", "/api/orders"); e != nil && strings.Contains(e.Path, "?") {
-		t.Fatalf("query not stripped: %s", e.Path)
 	}
 }
 
@@ -153,19 +155,19 @@ func TestParsePostman(t *testing.T) {
 	    }}
 	  ]
 	}`
-	res := ParseBytes([]byte(coll), "collection.json")
-	if res == nil {
+	if res := ParseBytes([]byte(coll), "collection.json"); res != nil {
+		res.finalize()
+		if findEndpoint(res, "GET", "/users/1") == nil {
+			t.Fatal("missing nested GET /users/1")
+		}
+		if findEndpoint(res, "POST", "/login") == nil {
+			t.Fatal("missing POST /login (string url form)")
+		}
+		if res.AuthHeaders["X-Api-Key"] != "k-secret-123" {
+			t.Fatalf("X-Api-Key not harvested: %v", res.AuthHeaders)
+		}
+	} else {
 		t.Fatal("expected postman result")
-	}
-	res.finalize()
-	if findEndpoint(res, "GET", "/users/1") == nil {
-		t.Fatal("missing nested GET /users/1")
-	}
-	if findEndpoint(res, "POST", "/login") == nil {
-		t.Fatal("missing POST /login (string url form)")
-	}
-	if res.AuthHeaders["X-Api-Key"] != "k-secret-123" {
-		t.Fatalf("X-Api-Key not harvested: %v", res.AuthHeaders)
 	}
 }
 
@@ -204,24 +206,24 @@ func TestParseBurp(t *testing.T) {
     <request base64="true"><![CDATA[` + b64 + `]]></request>
   </item>
 </items>`
-	res := ParseBytes([]byte(xmlDoc), "burp.xml")
-	if res == nil {
+	if res := ParseBytes([]byte(xmlDoc), "burp.xml"); res != nil {
+		res.finalize()
+		if e := findEndpoint(res, "GET", "/api/account"); e == nil {
+			t.Fatalf("missing GET /api/account: %+v", res.Endpoints)
+		} else if !contains(e.Params, "ref") {
+			t.Fatalf("query param not extracted: %v", e.Params)
+		}
+		if res.AuthHeaders["Authorization"] != "Bearer burp.tok.123" {
+			t.Fatalf("Authorization not harvested from raw request: %v", res.AuthHeaders)
+		}
+		if res.AuthHeaders["Cookie"] != "sid=xyz" {
+			t.Fatalf("Cookie not harvested: %v", res.AuthHeaders)
+		}
+		if _, ok := res.AuthHeaders["Accept"]; ok {
+			t.Fatal("Accept must not be auth")
+		}
+	} else {
 		t.Fatal("expected Burp result")
-	}
-	res.finalize()
-	if e := findEndpoint(res, "GET", "/api/account"); e == nil {
-		t.Fatalf("missing GET /api/account: %+v", res.Endpoints)
-	} else if !contains(e.Params, "ref") {
-		t.Fatalf("query param not extracted: %v", e.Params)
-	}
-	if res.AuthHeaders["Authorization"] != "Bearer burp.tok.123" {
-		t.Fatalf("Authorization not harvested from raw request: %v", res.AuthHeaders)
-	}
-	if res.AuthHeaders["Cookie"] != "sid=xyz" {
-		t.Fatalf("Cookie not harvested: %v", res.AuthHeaders)
-	}
-	if _, ok := res.AuthHeaders["Accept"]; ok {
-		t.Fatal("Accept must not be auth")
 	}
 }
 

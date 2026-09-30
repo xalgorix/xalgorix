@@ -38,12 +38,14 @@ func TestParseAPKScansNativeLibraries(t *testing.T) {
 		"res/drawable/icon.png":       []byte("\x89PNG not scanned"),
 	})
 
-	res := parseAPK(apk)
-	if res == nil {
+	// The nil result is handled in the else branch so every deref below sits
+	// inside a branch where res is provably non-nil (staticcheck SA5011).
+	if res := parseAPK(apk); res != nil {
+		if len(res.BaseURLs) == 0 && len(res.Endpoints) == 0 {
+			t.Fatalf("native library was not scanned: %+v", res)
+		}
+	} else {
 		t.Fatal("parseAPK returned nil for a valid APK")
-	}
-	if len(res.BaseURLs) == 0 && len(res.Endpoints) == 0 {
-		t.Fatalf("native library was not scanned: %+v", res)
 	}
 }
 
@@ -57,12 +59,12 @@ func TestParseAPKDescendsIntoSplitBundle(t *testing.T) {
 		"toc.pb":                 []byte("table of contents"),
 	})
 
-	res := parseAPK(bundle)
-	if res == nil {
+	if res := parseAPK(bundle); res != nil {
+		if len(res.BaseURLs) == 0 && len(res.Endpoints) == 0 {
+			t.Fatalf("split bundle yielded nothing — nested APK not parsed: %+v", res)
+		}
+	} else {
 		t.Fatal("parseAPK returned nil for a split bundle")
-	}
-	if len(res.BaseURLs) == 0 && len(res.Endpoints) == 0 {
-		t.Fatalf("split bundle yielded nothing — nested APK not parsed: %+v", res)
 	}
 }
 
