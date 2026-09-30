@@ -18,6 +18,8 @@ import type {
   ScanRecord,
   ScanRequest,
   ScanSchedule,
+  SettingsBackup,
+  SettingsImportResult,
   StatusResponse,
   VersionInfo,
   WSEvent,
@@ -349,6 +351,28 @@ export const api = {
     http<EnvironmentSettings>("/api/settings/environment", {
       method: "POST",
       json: { values },
+    }),
+
+  // Settings backup & migration. Export is a file download (not JSON
+  // consumption), so it goes through fetch directly with the same
+  // same-origin credentials and 401 handling as http().
+  exportSettings: async (): Promise<Blob> => {
+    const res = await fetch("/api/settings/export", { credentials: "same-origin" });
+    if (!res.ok) {
+      if (res.status === 401) dispatchAuthExpired();
+      throw new HttpError({
+        status: res.status,
+        statusText: res.statusText,
+        body: await res.text().catch(() => ""),
+        data: null,
+      });
+    }
+    return res.blob();
+  },
+  importSettings: (backup: SettingsBackup) =>
+    http<SettingsImportResult>("/api/settings/import", {
+      method: "POST",
+      json: backup,
     }),
 
   reportUrl: (scanId: string) => `/api/report/${scanId}`,

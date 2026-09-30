@@ -321,6 +321,19 @@ export function useUpdateEnvironmentSettings() {
   });
 }
 
+export function useImportSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.importSettings,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.environmentSettings });
+      qc.invalidateQueries({ queryKey: qk.llmSettings });
+      qc.invalidateQueries({ queryKey: qk.authProfiles });
+      qc.invalidateQueries({ queryKey: qk.version });
+    },
+  });
+}
+
 export function useQueueResume() {
   const qc = useQueryClient();
   return useMutation({

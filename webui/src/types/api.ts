@@ -555,3 +555,32 @@ export interface FindingsSummaryResponse {
   as_of: string;
   etag: string;
 }
+
+/**
+ * Settings backup & migration (GET/POST /api/settings/export|import).
+ * The backup carries plaintext secrets — the export route is operator-only.
+ */
+export interface SettingsBackup {
+  version: number;
+  exported_at: string;
+  env: Record<string, string>;
+  profiles?: Array<Record<string, unknown>>;
+  llm_keys?: Array<{
+    provider_id: string;
+    api_key: string;
+    header_style?: string;
+    base_url?: string;
+  }>;
+}
+
+export interface SettingsImportResult {
+  ok: boolean;
+  env_applied: number;
+  env_skipped?: string[];
+  profiles_applied: number;
+  profile_warnings?: string[];
+  llm_keys_applied: number;
+  llm_key_warnings?: string[];
+  restart_required?: boolean;
+  general_warnings?: string[];
+}

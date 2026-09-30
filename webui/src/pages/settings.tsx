@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Search, RefreshCw, Trash2, CheckCircle2, AlertTriangle } from "lucide-react";
 import {
@@ -39,7 +39,9 @@ import {
   useUpdateLLMSettings,
   useUpdateRateLimit,
   useAuthStatus,
+  useImportSettings,
 } from "@/api/queries";
+import { api } from "@/api/client";
 import { useAuth } from "@/store/auth";
 import type {
   AuthProfile,
@@ -47,6 +49,8 @@ import type {
   EnvironmentSettings,
   EnvironmentVariableSetting,
   LLMSettingsRequest,
+  SettingsBackup,
+  SettingsImportResult,
 } from "@/types/api";
 import OAuthModal from "./settings/oauth-modal";
 import { syncLanguageFromServer, useI18n } from "@/i18n";
@@ -1293,6 +1297,7 @@ export default function SettingsPage() {
             />
           ) : (
             <div className="space-y-4">
+              <BackupMigrationCard onRestartRequired={setEnvRestartRequired} />
               <Card>
                 <CardContent className="space-y-4 p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1794,4 +1799,111 @@ function maskedAPIKeyLabel(profile: AuthProfile): string {
 function maskedTokenLabel(profile: AuthProfile): string {
   if (profile.accessToken) return profile.accessToken;
   return "(no token)";
+}
+
+// Backup & migration: export the full configuration (environment variables,
+// LLM auth profiles, provider keys — secrets in cleartext, operator-session
+// only) to a JSON file, or merge a previous backup into this install.
+// Import never destroys anything absent from the file.
+function BackupMigrationCard({
+  onRestartRequired,
+}: {
+  onRestartRequired: (required: boolean) => void;
+}) {
+  const { t } = useI18n();
+  const importSettings = useImportSettings();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [summary, setSummary] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onExport() {
+    setError(null);
+    setSummary(null);
+    try {
+      const blob = await api.exportSettings();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "xalgorix-settings-backup.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Export failed");
+    }
+  }
+
+  async function onImportFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    setError(null);
+    setSummary(null);
+    if (!file) return;
+    try {
+      const backup = JSON.parse(await file.text()) as SettingsBackup;
+      const counts = [
+        `${Object.keys(backup.env ?? {}).length} env vars`,
+        `${backup.profiles?.length ?? 0} profiles`,
+        `${backup.llm_keys?.length ?? 0} provider keys`,
+      ].join(", ");
+      if (!window.confirm(`${t("settings.backup.confirm")}\n${counts}`)) return;
+      const res: SettingsImportResult = await importSettings.mutateAsync(backup);
+      const bits = [
+        `${res.env_applied} env vars`,
+        `${res.profiles_applied} profiles`,
+        `${res.llm_keys_applied} provider keys`,
+      ];
+      if (res.env_skipped?.length) bits.push(`skipped: ${res.env_skipped.join(", ")}`);
+      if (res.profile_warnings?.length) bits.push(`profile issues: ${res.profile_warnings.join("; ")}`);
+      if (res.llm_key_warnings?.length) bits.push(`key issues: ${res.llm_key_warnings.join("; ")}`);
+      if (res.general_warnings?.length) bits.push(res.general_warnings.join("; "));
+      if (res.restart_required) {
+        bits.push("restart required for some changes");
+        onRestartRequired(true);
+      }
+      setSummary(bits.join(" | "));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Import failed");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{t("settings.backup.title")}</CardTitle>
+        <CardDescription>{t("settings.backup.desc")}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2 sm:flex-row sm:items-center sm:flex-wrap">
+        <Button variant="outline" size="sm" onClick={onExport}>
+          {t("settings.backup.export")}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => fileRef.current?.click()}
+          disabled={importSettings.isPending}
+        >
+          {importSettings.isPending ? "Importing..." : t("settings.backup.import")}
+        </Button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={onImportFile}
+        />
+        {summary && (
+          <span className="text-xs text-success" role="status">
+            {summary}
+          </span>
+        )}
+        {error && (
+          <span className="text-xs text-destructive" role="alert">
+            {error}
+          </span>
+        )}
+      </CardContent>
+    </Card>
+  );
 }

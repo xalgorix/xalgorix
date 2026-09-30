@@ -1171,6 +1171,10 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/settings/llm/keys", s.handleProviderKeys)
 	mux.HandleFunc("/api/settings/llm/test-route", s.handleTestRoute)
 	mux.HandleFunc("/api/settings/environment", s.handleEnvironmentSettings)
+	// Operator-only backup & migration (the export carries plaintext
+	// secrets, hence the denylisted settings prefix).
+	mux.HandleFunc("/api/settings/export", s.handleSettingsExport)
+	mux.HandleFunc("/api/settings/import", s.handleSettingsImport)
 	// Scoped LLM key-pool API: machine tokens may manage exactly this knob
 	// (masked reads only); the full settings surface stays operator-only.
 	mux.HandleFunc("/api/pool", s.handleKeyPool)
