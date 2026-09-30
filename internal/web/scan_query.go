@@ -43,6 +43,40 @@ func vulnToSummary(v reporting.Vulnerability) VulnSummary {
 	}
 }
 
+// metadataBool reads a boolean tool-result metadata flag.
+func metadataBool(metadata map[string]any, key string) bool {
+	v, ok := metadata[key]
+	if !ok {
+		return false
+	}
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return strings.EqualFold(strings.TrimSpace(b), "true")
+	}
+	return false
+}
+
+// removeVulnSummariesByID removes every record row carrying the given
+// finding ID. Used when the reporting store replaced an unverified
+// candidate IN PLACE (an upgrade): the record must mirror the replacement
+// instead of accumulating the stale candidate next to the upgrade — the
+// pentest-ground v4.6.123 run stored the same finding ID twice this way.
+func removeVulnSummariesByID(vulns *[]VulnSummary, id string) {
+	if id == "" || len(*vulns) == 0 {
+		return
+	}
+	kept := (*vulns)[:0]
+	for _, v := range *vulns {
+		if v.ID == id {
+			continue
+		}
+		kept = append(kept, v)
+	}
+	*vulns = kept
+}
+
 func metadataString(metadata map[string]any, key string) (string, bool) {
 	if metadata == nil {
 		return "", false

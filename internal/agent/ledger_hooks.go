@@ -715,18 +715,32 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 		return HookResult{}
 	}
 	// hookFinishGatekeeper has already incremented FinishAttempts for this
-	// attempt. Give the model a few chances to report, then get out of the way.
+	// attempt. Give the model a few chances to close the in-flight claims.
+	// After that, settle the stale TESTING claims with the typed terminal
+	// disposition (exhausted) instead of silently getting out of the way:
+	// a single stuck claim otherwise rides the gate into the full
+	// finish-attempt ceiling and the whole scan terminates incomplete
+	// (observed in production: one testing hypothesis cost 500+ iterations
+	// and drove finish_gate_exhausted). The conversion is auditable and the
+	// work stays resumable; proven-but-unreported leads keep their honest
+	// completion reasons.
 	if state.FinishAttempts > 3 {
+		if l := ledgerForState(state); l != nil {
+			for _, h := range l.All() {
+				if h.Status != scanctx.HypothesisTesting || !hypothesisBelongsToOwner(h, ownerForGate(state)) {
+					continue
+				}
+				l.SetStatus(h.ID, scanctx.HypothesisExhausted,
+					"auto-dispositioned: claimed but not closed across repeated finish attempts; work preserved for resume")
+			}
+		}
 		return HookResult{}
 	}
 	l := ledgerForState(state)
 	if l == nil {
 		return HookResult{}
 	}
-	owner := ""
-	if state.DelegatedAgent {
-		owner = state.DelegatedAgentID
-	}
+	owner := ownerForGate(state)
 	unreported := provenUnreportedHypothesesForOwner(l, owner)
 	inProgress := testingHypothesesForOwner(l, owner)
 	// Lane completion (Part 15): a specialist's lane is exhausted only when
@@ -751,6 +765,15 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 		BlockReason: "⚠️ LEDGER WORK INCOMPLETE — " + strings.Join(reasons, "; ") +
 			". File and link every proven finding; close every testing hypothesis as proven or rejected with evidence; claim and settle every lane-assigned hypothesis (or hand it back with update_hypothesis). Then continue through the remaining assigned lane rather than stopping after the first bug.",
 	}
+}
+
+// ownerForGate resolves the ledger-scope owner for the finish gate: the
+// delegated specialist's id, or "" for the root coordinator.
+func ownerForGate(state *ScanState) string {
+	if state != nil && state.DelegatedAgent {
+		return state.DelegatedAgentID
+	}
+	return ""
 }
 
 // assignedUnclaimedHypothesesForOwner returns queued hypotheses soft-assigned

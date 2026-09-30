@@ -606,6 +606,14 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 				} else {
 					vs := vulnToSummary(latest)
 					vs.SourceScanID = sess.id
+					// In-place upgrade: the reporting store replaced the
+					// unverified candidate (same finding ID) with the
+					// verified evidence. Mirror the replacement in the
+					// record instead of accumulating the stale candidate
+					// next to the upgrade.
+					if metadataBool(evt.ToolResult.Metadata, "upgraded") {
+						removeVulnSummariesByID(&sess.record.Vulns, vulnID)
+					}
 					log.Printf("[VULN] Latest vuln: %s %s (CVSS %.1f)", vs.Severity, vs.Title, vs.CVSS)
 
 					// Severity filter is a DISPLAY/BROADCAST gate, NOT a
