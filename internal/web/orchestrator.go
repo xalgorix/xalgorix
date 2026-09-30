@@ -1093,13 +1093,24 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		wildcardLimit = scanCfg.MaxWildcardSubdomains
 	}
 	if wildcardLimit > 0 && len(subdomains) > wildcardLimit {
-		skipped := len(subdomains) - wildcardLimit
-		subdomains = subdomains[:wildcardLimit]
-		log.Printf("[wildcard] Explicitly capped full subdomain scans at %d; skipping %d candidates (XALGORIX_MAX_WILDCARD_SUBDOMAINS)", wildcardLimit, skipped)
+		// The cap applies to DISCOVERED candidates. Mandatory subjects (the
+		// exact operator-supplied target and the authorized root) always
+		// survive it - an explicit resource limit must never drop the host
+		// the operator actually asked for. Order-stable and idempotent
+		// across a resume rebuild.
+		kept := subdomains[:wildcardLimit:wildcardLimit]
+		for _, entry := range subdomains[wildcardLimit:] {
+			if isMandatoryWildcardEntry(entry, wt) {
+				kept = append(kept, entry)
+			}
+		}
+		skipped := len(subdomains) - len(kept)
+		subdomains = kept
+		log.Printf("[wildcard] Explicitly capped full subdomain scans at %d; skipping %d discovered candidates (XALGORIX_MAX_WILDCARD_SUBDOMAINS); mandatory targets retained", len(kept), skipped)
 		s.broadcastToInstance(req.InstanceID, WSEvent{
 			Type:    "message",
 			Target:  target,
-			Content: fmt.Sprintf("⚠️ Explicit wildcard scan resource cap: scanning %d subdomains; %d additional candidates were discovered but not expanded into full LLM sessions.", wildcardLimit, skipped),
+			Content: fmt.Sprintf("⚠️ Explicit wildcard scan resource cap: scanning %d host(s) (mandatory targets retained); %d additional discovered candidates were not expanded into full LLM sessions.", len(subdomains), skipped),
 		})
 	}
 	// Preserve per-child metadata (scan id, lifecycle timestamps, vuln/token

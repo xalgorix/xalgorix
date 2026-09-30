@@ -432,3 +432,17 @@ func TestWildcardChildInstruction_EquivalentConfigurationToStandalone(t *testing
 		t.Fatal("wildcard child prompt must carry the wildcard context prefix")
 	}
 }
+
+func TestIsMandatoryWildcardEntry(t *testing.T) {
+	wt := parseWildcardTarget("www.example.com")
+	for _, entry := range []string{"www.example.com", "example.com", "https://www.example.com:8443/app"} {
+		if !isMandatoryWildcardEntry(entry, wt) {
+			t.Errorf("entry %q must be mandatory for target www.example.com", entry)
+		}
+	}
+	for _, entry := range []string{"api.example.com", "other.com", ""} {
+		if isMandatoryWildcardEntry(entry, wt) {
+			t.Errorf("entry %q must NOT be mandatory for target www.example.com", entry)
+		}
+	}
+}

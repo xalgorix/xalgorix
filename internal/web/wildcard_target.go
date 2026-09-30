@@ -254,3 +254,16 @@ func wildcardChildOutcome(rec *ScanRecord) string {
 	}
 	return "finished"
 }
+
+// isMandatoryWildcardEntry reports whether an inventory entry is one of the
+// mandatory assessment subjects for this target (the exact operator-supplied
+// host or the authorized registrable root). The explicit wildcard resource cap
+// never trims these: the operator asked for this host, so it is assessed even
+// when the discovered candidate list exceeds the configured limit.
+func isMandatoryWildcardEntry(entry string, wt wildcardTarget) bool {
+	h := wildcardHostOf(entry)
+	if h == "" {
+		return false
+	}
+	return h == wildcardHostOf(wt.Assessment) || h == wildcardHostOf(wt.Root)
+}
