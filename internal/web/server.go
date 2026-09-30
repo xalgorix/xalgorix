@@ -1171,6 +1171,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/settings/llm/keys", s.handleProviderKeys)
 	mux.HandleFunc("/api/settings/llm/test-route", s.handleTestRoute)
 	mux.HandleFunc("/api/settings/environment", s.handleEnvironmentSettings)
+	// Scoped LLM key-pool API: machine tokens may manage exactly this knob
+	// (masked reads only); the full settings surface stays operator-only.
+	mux.HandleFunc("/api/pool", s.handleKeyPool)
 	mux.HandleFunc("/api/queue/status", s.handleQueueStatus)
 	mux.HandleFunc("/api/queue/resume", s.handleQueueResume)
 	mux.HandleFunc("/api/queue/clear", s.handleQueueClear)
