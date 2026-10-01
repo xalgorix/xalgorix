@@ -1,6 +1,9 @@
 package web
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"log"
+)
 
 func knownPlanCounters(present bool, total, completed, skipped, unfinished int) (*int, *int, *int, *int) {
 	if !present && total == 0 {
@@ -69,6 +72,10 @@ func (s *Server) mirrorScanIntegrity(instanceID string, rec *ScanRecord) {
 	if inst := s.instances[instanceID]; inst != nil {
 		inst.mu.Lock()
 		applyRecordIntegrityLocked(inst, rec)
+		// Child and discovery sessions do not own the coordinator's outcome.
+		if rec.ScanMode != "wildcard" && rec.StopReason != "" && !isInterruptedInstanceStatus(inst.Status) {
+			inst.StopReason = rec.StopReason
+		}
 		inst.mu.Unlock()
 	}
 }
@@ -76,7 +83,7 @@ func (s *Server) mirrorScanIntegrity(instanceID string, rec *ScanRecord) {
 func (s *Server) hydrateTerminalIntegrity(inst *ScanInstance) {
 	inst.mu.RLock()
 	id := inst.ID
-	need := isTerminalScanStatus(inst.Status) && (inst.Completion == "" || !inst.PlanPresent)
+	need := isTerminalScanStatus(inst.Status) && (inst.Completion == "" || !inst.PlanPresent || (inst.Completion == "partial" && inst.StopReason == ""))
 	inst.mu.RUnlock()
 	if !need {
 		return
@@ -85,11 +92,44 @@ func (s *Server) hydrateTerminalIntegrity(inst *ScanInstance) {
 	if rec == nil || !isTerminalScanStatus(rec.Status) {
 		return
 	}
+	s.reconcileTerminalStopReason(rec)
 	inst.mu.Lock()
+	recoveredReason := false
 	if isTerminalScanStatus(inst.Status) {
 		applyRecordIntegrityLocked(inst, rec)
+		if inst.StopReason == "" && rec.StopReason != "" {
+			inst.StopReason = rec.StopReason
+			recoveredReason = true
+		}
 	}
 	inst.mu.Unlock()
+	if recoveredReason {
+		if err := s.persistExactInstanceSnapshot(inst); err != nil {
+			log.Printf("[checkpoint] terminal outcome reconciliation failed: %v", err)
+		}
+	}
+}
+
+// Reconcile missing terminal facts only when one physical root record proves
+// the immutable instance identity. Multiple root records are ambiguous.
+func (s *Server) reconcileTerminalStopReason(rec *ScanRecord) {
+	if rec == nil || !isTerminalScanStatus(rec.Status) || rec.Completion != "partial" || rec.StopReason != "" || rec.ScanMode == "wildcard" {
+		return
+	}
+	var owned *ScanRecord
+	for _, entry := range s.findAllScanSummaries() {
+		if entry.rec.InstanceID != rec.InstanceID || entry.rec.ParentTarget != "" {
+			continue
+		}
+		if owned != nil {
+			return
+		}
+		physical := entry.rec
+		owned = &physical
+	}
+	if owned != nil && isTerminalScanStatus(owned.Status) && owned.Completion == "partial" {
+		rec.StopReason = owned.StopReason
+	}
 }
 
 func (s *Server) initializeSessionCounters(sess *scanSession) {

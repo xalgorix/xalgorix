@@ -1014,7 +1014,10 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 				if target == "" {
 					continue
 				}
-				add(target, SubScanSummary{Target: target, Status: "pending"})
+				// Discovery establishes membership, not a later lifecycle state.
+				if children[normalizeScanTarget(target)] == nil {
+					add(target, SubScanSummary{Target: target, Status: "pending"})
+				}
 			}
 			continue
 		default:

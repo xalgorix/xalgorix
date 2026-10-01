@@ -1274,6 +1274,7 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 	s.capturePlanDisposition(sess)
 	sess.record.Status = "finished"
 	sess.record.FinishedAt = time.Now().Format(time.RFC3339)
+	s.mirrorScanIntegrity(sess.instanceID, sess.record)
 
 	// NOTE: merges are deferred to sess.cleanup() under safe.Recover boundaries
 	// to guarantee panic-safe persistence.

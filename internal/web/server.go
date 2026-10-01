@@ -2617,6 +2617,7 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "instance not found", http.StatusNotFound)
 			return
 		}
+		s.reconcileTerminalStopReason(rec)
 		s.attachWildcardSubScans(rec)
 		finalizeScanRecordForResponse(rec)
 		_ = json.NewEncoder(w).Encode(rec)

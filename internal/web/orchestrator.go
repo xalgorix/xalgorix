@@ -1154,9 +1154,9 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		child.Target = subdomain
 		child.Status = "pending"
 		if i < resumeFromSubIndex {
-			child.Status = "finished"
-			if strings.EqualFold(strings.TrimSpace(existingChildren[subdomain].Status), "failed") {
-				child.Status = "failed"
+			child.Status = existingChildren[subdomain].Status
+			if !isFinishedSubScanStatus(child.Status) {
+				child.Status = "finished"
 			}
 		}
 		pendingSubScans = append(pendingSubScans, child)
