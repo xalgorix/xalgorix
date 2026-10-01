@@ -218,8 +218,11 @@ func GetParentContext(childCtxID string) string {
 
 // vulnStore is a per-instance vulnerability list.
 type vulnStore struct {
-	mu    sync.RWMutex
-	vulns []Vulnerability
+	mu           sync.RWMutex
+	vulns        []Vulnerability
+	nextSequence int
+	persistPath  string
+	scanID       string
 }
 
 // getStoreByID returns the vulnerability store for a specific context ID.
@@ -896,6 +899,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	store = getStoreByID(contextID) // re-resolve in case of race
 	store.mu.Lock()
 	upgraded := false
+	previous := append([]Vulnerability(nil), store.vulns...)
 	upgradeFrom := ""
 	if idx := findUpgradeableVulnerabilityIndex(store.vulns, vuln); idx >= 0 {
 		upgradeFrom = store.vulns[idx].Title
@@ -907,8 +911,13 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 			store.mu.Unlock()
 			return duplicateResult(contextID, existing, msg, args["hypothesis_id"]), nil
 		}
-		vuln.ID = fmt.Sprintf("XALG-%d", len(store.vulns)+1)
+		vuln.ID = nextFindingIDLocked(store)
 		store.vulns = append(store.vulns, vuln)
+	}
+	if err := store.persistLocked(); err != nil {
+		store.vulns = previous
+		store.mu.Unlock()
+		return tools.Result{Error: "Finding could not be saved durably; preserve its evidence and retry after storage recovers."}, nil
 	}
 	store.mu.Unlock()
 
@@ -3305,6 +3314,7 @@ func ResetVulnerabilities() {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.vulns = nil
+	store.nextSequence = 0
 }
 
 // ResetVulnerabilitiesForContext clears vulns for a specific context ID.
@@ -3313,6 +3323,7 @@ func ResetVulnerabilitiesForContext(contextID string) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.vulns = nil
+	store.nextSequence = 0
 }
 
 // CleanupContext removes the store for a context that has been deactivated.

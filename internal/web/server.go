@@ -41,6 +41,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/sandbox"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/storage"
 	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/notes"
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
@@ -427,6 +428,7 @@ type ScanRequest struct {
 
 // WSEvent is a WebSocket message sent to clients.
 type WSEvent struct {
+	EventID        string            `json:"event_id,omitempty"`
 	Type           string            `json:"type"`
 	Content        string            `json:"content,omitempty"`
 	ToolName       string            `json:"tool_name,omitempty"`
@@ -494,18 +496,28 @@ type SubScanSummary struct {
 	TotalTokens int    `json:"total_tokens"`
 }
 
+type sessionUsage struct {
+	Tokens   int `json:"tokens"`
+	Progress int `json:"progress"`
+}
+
 // ScanRecord is a persisted scan result.
 type ScanRecord struct {
-	ID           string `json:"id"`
-	InstanceID   string `json:"instance_id,omitempty"` // parent queue/instance id returned by /api/scan
-	Name         string `json:"name,omitempty"`        // user-defined scan name
-	Target       string `json:"target"`
-	ParentTarget string `json:"parent_target,omitempty"` // parent domain for subdomain scans (wildcard mode)
-	StartedAt    string `json:"started_at"`
-	FinishedAt   string `json:"finished_at,omitempty"`
-	Status       string `json:"status"`                // saved, running, finished, stopped
-	StopReason   string `json:"stop_reason,omitempty"` // why scan stopped (error, user, watchdog, etc.)
-	Completion   string `json:"completion,omitempty"`  // "" / "full" / "partial": partial = terminated by a forced stop (loop limit, budget, unrecoverable error) — findings retained but the assessment is not complete
+	ID                 string                  `json:"id"`
+	InstanceID         string                  `json:"instance_id,omitempty"` // parent queue/instance id returned by /api/scan
+	Name               string                  `json:"name,omitempty"`        // user-defined scan name
+	Target             string                  `json:"target"`
+	ParentTarget       string                  `json:"parent_target,omitempty"` // parent domain for subdomain scans (wildcard mode)
+	StartedAt          string                  `json:"started_at"`
+	FinishedAt         string                  `json:"finished_at,omitempty"`
+	Status             string                  `json:"status"`                // saved, running, finished, stopped
+	StopReason         string                  `json:"stop_reason,omitempty"` // why scan stopped (error, user, watchdog, etc.)
+	Completion         string                  `json:"completion,omitempty"`  // "" / "full" / "partial": partial = terminated by a forced stop (loop limit, budget, unrecoverable error) — findings retained but the assessment is not complete
+	PlanPresent        bool                    `json:"plan_present,omitempty"`
+	AdmittedAt         string                  `json:"admitted_at,omitempty"`
+	ResumedAt          string                  `json:"resumed_at,omitempty"`
+	AssessmentProgress int                     `json:"assessment_progress,omitempty"`
+	UsageBySession     map[string]sessionUsage `json:"usage_by_session,omitempty"`
 	// Plan task dispositions at terminal time: the honest executed-vs-skipped
 	// record for the final root plan. Skips carry justifications but are not
 	// executed coverage; unfinished work is visible here instead of being
@@ -523,6 +535,7 @@ type ScanRecord struct {
 	ReconMode                string    `json:"recon_mode,omitempty"`                 // active or passive reconnaissance
 	ScanIntensity            string    `json:"scan_intensity,omitempty"`             // active or passive testing/scanning
 	Events                   []WSEvent `json:"events"`
+	EventsJournal            bool      `json:"events_journal,omitempty"`
 	// EventsTotal / EventsTruncated are RESPONSE-ONLY hints for the scan-detail
 	// view. GET /api/scans/{id} returns only a tail of the event log (the most
 	// recent detailEventTail events) so a scan with a multi-hundred-MB event log
@@ -602,27 +615,37 @@ type QueueState struct {
 
 // ScanInstance represents a running or completed scan instance.
 type ScanInstance struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name,omitempty"` // user-defined scan name
-	Targets        string   `json:"targets"`
-	ParentTarget   string   `json:"parent_target,omitempty"` // parent domain for subdomain scans
-	Status         string   `json:"status"`                  // saved, running, paused, finished, stopped
-	StartedAt      string   `json:"started_at"`
-	FinishedAt     string   `json:"finished_at,omitempty"`
-	StopReason     string   `json:"stop_reason,omitempty"` // why stopped (user, error, watchdog)
-	Iterations     int      `json:"iterations"`
-	ToolCalls      int      `json:"tool_calls"`
-	VulnCount      int      `json:"vuln_count"`
-	TotalTokens    int      `json:"total_tokens"`
-	ScanMode       string   `json:"scan_mode"`
-	Instruction    string   `json:"instruction,omitempty"`     // custom scan instructions for restart
-	SeverityFilter []string `json:"severity_filter,omitempty"` // severity filter for restart
-	Phases         []int    `json:"phases,omitempty"`          // selected methodology phases (empty = all)
-	ReconMode      string   `json:"recon_mode,omitempty"`      // active or passive reconnaissance
-	ScanIntensity  string   `json:"scan_intensity,omitempty"`  // active or passive testing/scanning
-	CompanyName    string   `json:"company_name,omitempty"`    // report branding: company name
-	LogoPath       string   `json:"logo_path,omitempty"`       // report branding: logo path
-	DiscordWebhook string   `json:"-"`                         // discord webhook (not exposed to API)
+	ID                  string                  `json:"id"`
+	Name                string                  `json:"name,omitempty"` // user-defined scan name
+	Targets             string                  `json:"targets"`
+	ParentTarget        string                  `json:"parent_target,omitempty"` // parent domain for subdomain scans
+	Status              string                  `json:"status"`                  // saved, running, paused, finished, stopped
+	StartedAt           string                  `json:"started_at"`
+	FinishedAt          string                  `json:"finished_at,omitempty"`
+	StopReason          string                  `json:"stop_reason,omitempty"` // why stopped (user, error, watchdog)
+	Completion          string                  `json:"completion,omitempty"`
+	PlanPresent         bool                    `json:"plan_present,omitempty"`
+	PlanTasksTotal      int                     `json:"plan_tasks_total,omitempty"`
+	PlanTasksCompleted  int                     `json:"plan_tasks_completed,omitempty"`
+	PlanTasksSkipped    int                     `json:"plan_tasks_skipped,omitempty"`
+	PlanTasksUnfinished int                     `json:"plan_tasks_unfinished,omitempty"`
+	AdmittedAt          string                  `json:"admitted_at,omitempty"`
+	ResumedAt           string                  `json:"resumed_at,omitempty"`
+	AssessmentProgress  int                     `json:"assessment_progress,omitempty"`
+	UsageBySession      map[string]sessionUsage `json:"usage_by_session,omitempty"`
+	Iterations          int                     `json:"iterations"`
+	ToolCalls           int                     `json:"tool_calls"`
+	VulnCount           int                     `json:"vuln_count"`
+	TotalTokens         int                     `json:"total_tokens"`
+	ScanMode            string                  `json:"scan_mode"`
+	Instruction         string                  `json:"instruction,omitempty"`     // custom scan instructions for restart
+	SeverityFilter      []string                `json:"severity_filter,omitempty"` // severity filter for restart
+	Phases              []int                   `json:"phases,omitempty"`          // selected methodology phases (empty = all)
+	ReconMode           string                  `json:"recon_mode,omitempty"`      // active or passive reconnaissance
+	ScanIntensity       string                  `json:"scan_intensity,omitempty"`  // active or passive testing/scanning
+	CompanyName         string                  `json:"company_name,omitempty"`    // report branding: company name
+	LogoPath            string                  `json:"logo_path,omitempty"`       // report branding: logo path
+	DiscordWebhook      string                  `json:"-"`                         // discord webhook (not exposed to API)
 	// Per-scan auth/whitebox/context, restored when a saved scan is started.
 	// Kept in-memory only (json:"-", like DiscordWebhook) so third-party
 	// credentials and token-bearing source URLs are never written to the
@@ -654,7 +677,6 @@ type ScanInstance struct {
 	chatCfg            *config.Config       // provider settings for post-scan chat (not exposed)
 	chatMessages       []llm.Message        // lightweight post-scan chat history (not exposed)
 	mu                 sync.RWMutex
-	lastSessionTokens  int  // tracks token count from current session for delta calculation
 	snapshotReady      bool // final queue event and session cleanup are complete; persistence may be retried safely
 	snapshotFinalizing bool // terminal status is not externally coherent until the final queue event is durably snapshotted
 }
@@ -2327,30 +2349,41 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	for _, inst := range s.instances {
 		inst.mu.RLock()
 		instances = append(instances, &ScanInstance{
-			ID:               inst.ID,
-			Name:             inst.Name,
-			Targets:          inst.Targets,
-			Status:           inst.Status,
-			StartedAt:        inst.StartedAt,
-			FinishedAt:       inst.FinishedAt,
-			Iterations:       inst.Iterations,
-			ToolCalls:        inst.ToolCalls,
-			VulnCount:        inst.VulnCount,
-			TotalTokens:      inst.TotalTokens,
-			ScanMode:         inst.ScanMode,
-			Instruction:      inst.Instruction,
-			SeverityFilter:   append([]string(nil), inst.SeverityFilter...),
-			Phases:           inst.Phases,
-			ReconMode:        inst.ReconMode,
-			ScanIntensity:    inst.ScanIntensity,
-			CompanyName:      inst.CompanyName,
-			LogoPath:         inst.LogoPath,
-			CurrentPhase:     inst.CurrentPhase,
-			SubScans:         cloneSubScanSummaries(inst.SubScans),
-			SubScanTotal:     inst.SubScanTotal,
-			SubScanCompleted: inst.SubScanCompleted,
-			SubScanRunning:   inst.SubScanRunning,
-			SubScanRemaining: inst.SubScanRemaining,
+			AssessmentProgress:  inst.AssessmentProgress,
+			ID:                  inst.ID,
+			Name:                inst.Name,
+			Targets:             inst.Targets,
+			Status:              inst.Status,
+			StartedAt:           inst.StartedAt,
+			FinishedAt:          inst.FinishedAt,
+			StopReason:          inst.StopReason,
+			WorkStarted:         inst.WorkStarted,
+			Completion:          inst.Completion,
+			PlanPresent:         inst.PlanPresent,
+			PlanTasksTotal:      inst.PlanTasksTotal,
+			PlanTasksCompleted:  inst.PlanTasksCompleted,
+			PlanTasksSkipped:    inst.PlanTasksSkipped,
+			PlanTasksUnfinished: inst.PlanTasksUnfinished,
+			AdmittedAt:          inst.AdmittedAt,
+			ResumedAt:           inst.ResumedAt,
+			Iterations:          inst.Iterations,
+			ToolCalls:           inst.ToolCalls,
+			VulnCount:           inst.VulnCount,
+			TotalTokens:         inst.TotalTokens,
+			ScanMode:            inst.ScanMode,
+			Instruction:         inst.Instruction,
+			SeverityFilter:      append([]string(nil), inst.SeverityFilter...),
+			Phases:              inst.Phases,
+			ReconMode:           inst.ReconMode,
+			ScanIntensity:       inst.ScanIntensity,
+			CompanyName:         inst.CompanyName,
+			LogoPath:            inst.LogoPath,
+			CurrentPhase:        inst.CurrentPhase,
+			SubScans:            cloneSubScanSummaries(inst.SubScans),
+			SubScanTotal:        inst.SubScanTotal,
+			SubScanCompleted:    inst.SubScanCompleted,
+			SubScanRunning:      inst.SubScanRunning,
+			SubScanRemaining:    inst.SubScanRemaining,
 		})
 		inst.mu.RUnlock()
 	}
@@ -2361,7 +2394,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	for _, inst := range instances {
 		if strings.EqualFold(strings.TrimSpace(inst.Status), "running") {
 			runningInstances++
-			if admissionMemoryUnreflected(inst.StartedAt, now) {
+			if admissionMemoryUnreflected(instanceAdmissionTime(inst), now) {
 				recentAdmissions++
 			}
 		}
@@ -2565,13 +2598,12 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			s.hydrateTerminalIntegrity(exact)
 			exact.mu.RLock()
 			events := append([]WSEvent(nil), exact.events...)
-			response := struct {
-				*ScanInstance
-				InstanceID string    `json:"instance_id"`
-				Events     []WSEvent `json:"events"`
-			}{ScanInstance: exact, InstanceID: exact.ID, Events: events}
+			response := instanceResponseLocked(exact)
+			response.InstanceID = exact.ID
+			response.Events = &events
 			_ = json.NewEncoder(w).Encode(response)
 			exact.mu.RUnlock()
 			return
@@ -2930,39 +2962,41 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 // scanSession isolates all per-scan state. Crashes in one session
 // cannot corrupt server-level state or leak into subsequent scans.
 type scanSession struct {
-	id                 string
-	target             string
-	parentTarget       string // parent domain for subdomain scans (wildcard mode)
-	scanDir            string
-	cfg                *config.Config
-	agent              *agent.Agent
-	events             chan agent.Event
-	record             *ScanRecord
-	recordTokenOffset  int
-	server             *Server
-	instruction        string
-	name               string
-	userInstruction    string
-	severityFilter     []string
-	discordWebhook     string
-	discoveryMode      bool
-	genReport          bool
-	resetState         bool
-	instanceID         string               // parent instance ID for multi-instance tracking
-	parentCtx          context.Context      // parent target context; canceled by exact stop
-	scanMode           string               // single, wildcard, dast — persisted so dashboard shows correct mode
-	sctx               *scanctx.ScanContext // per-session isolated state
-	companyName        string               // report branding: company name
-	logoPath           string               // report branding: logo path
-	phases             []int                // selected methodology phases
-	reconMode          string               // active or passive reconnaissance
-	scanIntensity      string               // active or passive testing/scanning
-	targetAuth         string               // per-scan authenticated-scanning material (see ScanRequest.TargetAuth)
-	targetAuthB        string               // per-scan second account for IDOR/BOLA (see ScanRequest.TargetAuthSecondary)
-	sourceRepo         string               // per-scan whitebox source repo/path (see ScanRequest.SourceRepo)
-	scanContext        string               // per-scan attack-surface context path (see ScanRequest.ScanContext)
-	codeScanMode       agent.CodeScanMode   // code-first scan mode (see ScanRequest.CodeScan)
-	allowLoopbackPorts []int                // per-scan loopback allowlist for provision scans (scope-guard exemption)
+	id                  string
+	target              string
+	parentTarget        string // parent domain for subdomain scans (wildcard mode)
+	scanDir             string
+	cfg                 *config.Config
+	agent               *agent.Agent
+	events              chan agent.Event
+	record              *ScanRecord
+	recordTokenOffset   int
+	lastSessionTokens   int
+	lastSessionProgress int
+	server              *Server
+	instruction         string
+	name                string
+	userInstruction     string
+	severityFilter      []string
+	discordWebhook      string
+	discoveryMode       bool
+	genReport           bool
+	resetState          bool
+	instanceID          string               // parent instance ID for multi-instance tracking
+	parentCtx           context.Context      // parent target context; canceled by exact stop
+	scanMode            string               // single, wildcard, dast — persisted so dashboard shows correct mode
+	sctx                *scanctx.ScanContext // per-session isolated state
+	companyName         string               // report branding: company name
+	logoPath            string               // report branding: logo path
+	phases              []int                // selected methodology phases
+	reconMode           string               // active or passive reconnaissance
+	scanIntensity       string               // active or passive testing/scanning
+	targetAuth          string               // per-scan authenticated-scanning material (see ScanRequest.TargetAuth)
+	targetAuthB         string               // per-scan second account for IDOR/BOLA (see ScanRequest.TargetAuthSecondary)
+	sourceRepo          string               // per-scan whitebox source repo/path (see ScanRequest.SourceRepo)
+	scanContext         string               // per-scan attack-surface context path (see ScanRequest.ScanContext)
+	codeScanMode        agent.CodeScanMode   // code-first scan mode (see ScanRequest.CodeScan)
+	allowLoopbackPorts  []int                // per-scan loopback allowlist for provision scans (scope-guard exemption)
 
 	// llmClient, when non-nil, is a pre-built llm.Client carrying
 	// a per-scan endpoint resolver derived from the originating
@@ -3163,7 +3197,7 @@ func (s *Server) saveScanRecordTo(rec *ScanRecord, scanDir string) {
 		log.Printf("Error: failed to marshal scan record: %v", err)
 		return
 	}
-	if err := os.WriteFile(filepath.Join(scanDir, "scan.json"), data, 0600); err != nil {
+	if err := storage.WriteAtomic(filepath.Join(scanDir, "scan.json"), data); err != nil {
 		log.Printf("Error: failed to save scan record to %s: %v", scanDir, err)
 		s.broadcast(WSEvent{Type: "error", Content: fmt.Sprintf("⚠️ Failed to save scan data: %v", err)})
 		return

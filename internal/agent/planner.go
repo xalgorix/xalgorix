@@ -304,13 +304,13 @@ func CoverageGaps(state *ScanState, discoveredEndpoints []string) []CoverageGap 
 		return nil
 	}
 	classes := requiredCoverageClasses()
-	// Phase-scope filter: a restricted phase selection must not keep
+	// Phase and delegated-lane filters must not keep
 	// demanding engine obligations for excluded lanes (e.g. SQLi gaps on a
 	// file-upload-only scan).
-	if len(state.AllowedPhases) > 0 {
+	if len(state.AllowedPhases) > 0 || state.DelegatedAgent {
 		filtered := make([]string, 0, len(classes))
 		for _, c := range classes {
-			if classAllowedForSelection(state.AllowedPhases, c) {
+			if classAllowedForState(state, c) {
 				filtered = append(filtered, c)
 			}
 		}
@@ -903,6 +903,24 @@ func buildEnginePlan(state *ScanState, endpoints []string, detectedTechs map[str
 		appendTargetObligations(state, p, scope)
 	}
 
+	if state != nil && state.DelegatedAgent {
+		lane := NewPlan()
+		for _, task := range p.Tasks {
+			if task.VulnClass != "" && classAllowedForState(state, task.VulnClass) {
+				lane.add(task)
+			}
+		}
+		for _, task := range lane.Tasks {
+			deps := task.DependsOn[:0]
+			for _, id := range task.DependsOn {
+				if lane.Get(id) != nil {
+					deps = append(deps, id)
+				}
+			}
+			task.DependsOn = deps
+		}
+		return lane
+	}
 	return p
 }
 
@@ -978,6 +996,24 @@ func classAllowedForState(state *ScanState, class string) bool {
 	if state == nil {
 		return true
 	}
+	if state.DelegatedAgent {
+		canonical := normalizeCoverageClass(class)
+		assigned := false
+		if state.LaneScoped {
+			for _, c := range state.AssignedClasses {
+				assigned = assigned || normalizeCoverageClass(c) == canonical
+			}
+		} else if state.Plan != nil {
+			// A custom delegated task has its own model-authored contract;
+			// it does not inherit the coordinator's entire assessment floor.
+			for _, t := range state.Plan.Tasks {
+				assigned = assigned || normalizeCoverageClass(t.VulnClass) == canonical
+			}
+		}
+		if !assigned {
+			return false
+		}
+	}
 	return classAllowedForSelection(state.AllowedPhases, class)
 }
 
@@ -998,19 +1034,12 @@ func truncList(items []string, n int) string {
 	return strings.Join(items[:n], ", ") + fmt.Sprintf(" … +%d more", len(items)-n)
 }
 
-// planBriefSkillsState is the optional state FormatPlan consults to avoid
-// recommending an already-loaded skill. agent.go sets it once; nil disables
-// the loaded-skill check (recommendations then always show).
-var planBriefSkillsState *ScanState
-
 // FormatPlanState is FormatPlan with the ScanState for skill-aware hints.
 // While reconnaissance is still owed, it appends the applicability-aware
 // dimension checklist so the brief shows exactly WHAT remains ("Recon 73%:
 // crawl ✓, JS analysis ✗") instead of an opaque pending task.
 func FormatPlanState(state *ScanState, p *Plan, gaps []CoverageGap) string {
-	planBriefSkillsState = state
-	defer func() { planBriefSkillsState = nil }()
-	brief := FormatPlan(p, gaps)
+	brief := formatPlan(state, p, gaps)
 	if state != nil && p != nil {
 		if rt := p.Get("recon"); rt != nil &&
 			(rt.Status == TaskPending || rt.Status == TaskActive) {
@@ -1026,6 +1055,10 @@ func FormatPlanState(state *ScanState, p *Plan, gaps []CoverageGap) string {
 // the next ready tasks, and any coverage gaps. Used as the per-iteration
 // "what to work on now" injection.
 func FormatPlan(p *Plan, gaps []CoverageGap) string {
+	return formatPlan(nil, p, gaps)
+}
+
+func formatPlan(state *ScanState, p *Plan, gaps []CoverageGap) string {
 	if p == nil || p.IsEmpty() {
 		return ""
 	}
@@ -1051,7 +1084,7 @@ func FormatPlan(p *Plan, gaps []CoverageGap) string {
 			// remember the catalog, and never loads more than the current
 			// lane's 1-3 skills.
 			if t.VulnClass != "" {
-				if skill, ok := VulnClassSkill(t.VulnClass); ok && skill != "" && !skillCovered(planBriefSkillsState, skill) {
+				if skill, ok := VulnClassSkill(t.VulnClass); ok && skill != "" && !skillCovered(state, skill) {
 					sb.WriteString(fmt.Sprintf("      methodology: read_skill(name=%q) before testing %s\n", skill, t.VulnClass))
 				}
 			}

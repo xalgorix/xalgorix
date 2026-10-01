@@ -269,6 +269,16 @@ func phaseNotApplicableReason(state *ScanState, phase int) string {
 // PhaseDispositions returns the derived per-phase dispositions for the
 // agent's scan (web/telemetry entry point).
 func (a *Agent) PhaseDispositions() map[int]PhaseDisposition {
+	if a != nil {
+		if snapshot := a.publishedAssessment.Load(); snapshot != nil {
+			result := make(map[int]PhaseDisposition, len(snapshot.Phases))
+			for phase, disposition := range snapshot.Phases {
+				disposition.TaskIDs = append([]string(nil), disposition.TaskIDs...)
+				result[phase] = disposition
+			}
+			return result
+		}
+	}
 	if a == nil || a.state == nil {
 		return nil
 	}

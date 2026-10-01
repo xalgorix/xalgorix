@@ -146,7 +146,6 @@ func (s *Server) registerSessionAgent(sess *scanSession, sctx *scanctx.ScanConte
 		inst.sctx = sctx
 		inst.agent = agnt
 		inst.scanDir = sess.scanDir
-		inst.lastSessionTokens = 0
 		inst.WorkStarted = true
 		inst.mu.Unlock()
 		s.instancesMu.RUnlock()
@@ -314,12 +313,23 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	// 4. Initialize scan record. Resume paths preserve previously persisted
 	// events, vulnerabilities, counters, and sub-scan progress.
 	sess.record = s.scanRecordForSession(sess)
+	if err := prepareScanEventJournal(sess.scanDir, sess.record, sess.resetState); err != nil {
+		sess.abortReason = "checkpoint_write_failed"
+		log.Printf("[checkpoint] event journal unavailable: %v", err)
+		agnt.Stop()
+		return
+	}
 	s.saveScanRecordTo(sess.record, sess.scanDir)
 
 	if !sess.resetState && sess.record != nil {
-		if sess.record.Iterations > 0 {
-			agnt.SetInitialIteration(sess.record.Iterations)
+		var restoredFindings []reporting.Vulnerability
+		for _, summary := range sess.record.Vulns {
+			restoredFindings = append(restoredFindings, vulnFromSummary(summary))
 		}
+		agnt.SetResumeFindings(restoredFindings)
+		agnt.SetResumeBudget(sess.record.Iterations, sess.record.ToolCalls, sess.record.TotalTokens, sess.record.StartedAt)
+		// Emitted budget totals now include the already-spent lifetime.
+		sess.recordTokenOffset = 0
 		if sess.record.DelegationDeferNoted {
 			// The full-detail specialist-wave defer note already displayed
 			// before the restart; resumed defer notes stay compact.
@@ -329,6 +339,13 @@ func (s *Server) executeScanSession(sess *scanSession) {
 			agnt.SetResumeBriefing(briefing)
 		}
 	}
+
+	// Restore before selecting event baselines: the private ledger can be
+	// newer than the periodically saved record or exact instance snapshot.
+	if _, err := agnt.RestoreExecutionCheckpoint(); err == nil {
+		s.initializeSessionCounters(sess)
+	}
+	s.syncSessionAdmissionClocks(sess)
 
 	// 5. Event processing goroutine — drains events and broadcasts to WebSocket
 	done := make(chan struct{})
@@ -795,8 +812,10 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		}
 	}
 	if evt.TotalTokens > 0 {
-		sess.record.TotalTokens = sess.recordTokenOffset + evt.TotalTokens
+		sess.record.TotalTokens = max(sess.record.TotalTokens, sess.recordTokenOffset+evt.TotalTokens)
 	}
+	s.capturePlanDisposition(sess)
+	progress := sess.record.AssessmentProgress
 
 	// Update parent instance stats — ACCUMULATE across sessions (phases/subdomains),
 	// don't overwrite. Each subdomain scan creates a fresh scanSession with zeroed
@@ -814,11 +833,11 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 					inst.Iterations = inst.ToolCalls
 				}
 			}
-			if evt.TotalTokens > 0 {
-				// Tokens are cumulative within a session but reset between sessions,
-				// so we track the delta
-				inst.TotalTokens += evt.TotalTokens - inst.lastSessionTokens
-				inst.lastSessionTokens = evt.TotalTokens
+			accountSessionUsageLocked(inst, sess.id, evt.TotalTokens, progress)
+			sess.lastSessionTokens = max(sess.lastSessionTokens, evt.TotalTokens)
+			sess.lastSessionProgress = max(sess.lastSessionProgress, progress)
+			if sess.parentTarget == "" {
+				sess.record.UsageBySession = cloneSessionUsage(inst.UsageBySession)
 			}
 			// Vulns: route through effectiveVulnCount so the counter source
 			// is consistent across the scan lifecycle. While running, this
@@ -842,10 +861,26 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 	if len(savedEvt.Output) > 500 {
 		savedEvt.Output = savedEvt.Output[:500] + "..."
 	}
-	sess.record.Events = append(sess.record.Events, savedEvt)
+	if sess.record.EventsJournal {
+		savedEvt.EventID = fmt.Sprintf("%s:%d", sess.id, sess.record.EventsTotal+1)
+		wsEvt.EventID = savedEvt.EventID
+		if err := appendScanEventJournal(sess.scanDir, savedEvt); err != nil {
+			sess.abortReason = "checkpoint_write_failed"
+			log.Printf("[checkpoint] event append failed: %v", err)
+			if sess.agent != nil {
+				sess.agent.Stop()
+			}
+			return
+		}
+		sess.record.EventsTotal++
+		sess.record.Events = appendEventTail(sess.record.Events, savedEvt)
+		sess.record.EventsTruncated = sess.record.EventsTotal > len(sess.record.Events)
+	} else {
+		sess.record.Events = append(sess.record.Events, savedEvt)
+	}
 
 	// Periodically save scan record (every 10 events)
-	if len(sess.record.Events)%10 == 0 {
+	if max(sess.record.EventsTotal, len(sess.record.Events))%10 == 0 {
 		s.saveScanRecordTo(sess.record, sess.scanDir)
 	}
 
@@ -1169,6 +1204,8 @@ func (s *Server) capturePlanDisposition(sess *scanSession) {
 	}
 	sess.record.PlanTasksTotal, sess.record.PlanTasksCompleted,
 		sess.record.PlanTasksSkipped, sess.record.PlanTasksUnfinished = sess.agent.PlanDisposition()
+	sess.record.PlanPresent = sess.agent.HasPlan()
+	sess.record.AssessmentProgress = max(sess.record.AssessmentProgress, sess.agent.AssessmentProgress())
 	// Completed plan tasks carry explicit phase numbers - the richest
 	// per-phase work evidence (auth=5, business-logic=12, classes the command
 	// heuristics never see). Merge them into the worked ledger so terminal
@@ -1182,6 +1219,7 @@ func (s *Server) capturePlanDisposition(sess *scanSession) {
 		sess.record.PhaseStatus = agent.PhaseStatusMap(dispositions)
 		sess.record.PhaseReasons = agent.PhaseReasonMap(dispositions)
 	}
+	s.mirrorScanIntegrity(sess.instanceID, sess.record)
 }
 
 // finalizeScanSessionRecord saves the terminal or interrupted scan record to disk.
@@ -1193,6 +1231,7 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 	}
 	if instStatus, stopReason := s.instanceRunStatus(sess.instanceID); isInterruptedInstanceStatus(instStatus) {
 		sess.record.Status = instStatus
+		sess.record.Completion = "partial"
 		sess.record.StopReason = stopReason
 		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
 		s.capturePlanDisposition(sess)
@@ -1201,6 +1240,7 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 	}
 	if s.stopReq.Load() || (sess.parentCtx != nil && sess.parentCtx.Err() != nil) {
 		sess.record.Status = "stopped"
+		sess.record.Completion = "partial"
 		sess.record.StopReason = "server_shutdown"
 		sess.record.FinishedAt = time.Now().Format(time.RFC3339)
 		s.capturePlanDisposition(sess)

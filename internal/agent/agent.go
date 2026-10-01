@@ -166,6 +166,8 @@ type Event struct {
 	// AbortReason is a short machine-readable tag (e.g. "llm_no_tool_calls").
 	Aborted     bool
 	AbortReason string
+	// Resumable distinguishes external cancellation from a terminal outcome.
+	Resumable bool
 }
 
 // toolExecResult holds the result of an async tool execution.
@@ -227,8 +229,16 @@ type Agent struct {
 
 	// initialIter and resumeBriefing preserve iteration count and previous execution
 	// history when a scan is resumed/restarted across server restarts.
-	initialIter    int
-	resumeBriefing string
+	initialIter         int
+	resumeBriefing      string
+	assignedClasses     []string
+	laneScoped          bool
+	checkpointLoaded    bool
+	executionRestored   bool
+	terminalOutcome     atomic.Pointer[terminalCheckpoint]
+	resumeFindings      []reporting.Vulnerability
+	publishedAssessment atomic.Pointer[assessmentSnapshot]
+	livenessExpired     atomic.Bool
 
 	// deferNoteSuppressed restores the specialist-wave defer detail latch
 	// across server restarts: a resumed run emits only compact defer notes
@@ -596,6 +606,13 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 			a.registerChildAgent(subAgent)
 			defer a.unregisterChildAgent(subAgent)
 			subAgent.SetPhaseRestrictions(a.allowedPhases)
+			for _, profile := range defaultSpecialistProfiles {
+				if profile.Role == subName {
+					subAgent.laneScoped = true
+					subAgent.assignedClasses = append([]string(nil), profile.VulnClasses...)
+					break
+				}
+			}
 			subAgent.SetActivityPolicy(a.reconMode, a.scanIntensity, a.activityHosts)
 			subAgent.SetTargetAuth(a.targetAuth)
 			subAgent.SetTargetAuthSecondary(a.targetAuthB)
@@ -626,7 +643,9 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 						results.WriteString("\nCompleted: ")
 						results.WriteString(truncStr(evt.Content, 500))
 						results.WriteString("\n")
-						if evt.Aborted {
+						if evt.Resumable {
+							delegatedErr = context.Canceled
+						} else if evt.Aborted {
 							delegatedErr = fmt.Errorf("delegated agent aborted: %s", valueOr(evt.AbortReason, evt.Content))
 						}
 					}
@@ -1131,6 +1150,11 @@ func (a *Agent) specialistDisabled(role string) bool {
 // executed coverage), and unfinished work at terminal time is the visible
 // signal of an incomplete assessment.
 func (a *Agent) PlanDisposition() (total, completed, skipped, unfinished int) {
+	if a != nil {
+		if snapshot := a.publishedAssessment.Load(); snapshot != nil {
+			return snapshot.Total, snapshot.Completed, snapshot.Skipped, snapshot.Unfinished
+		}
+	}
 	if a == nil || a.state == nil || a.state.Plan == nil {
 		return 0, 0, 0, 0
 	}
@@ -1169,6 +1193,11 @@ func dedupeBatchCalls(calls []llm.ToolCall) []llm.ToolCall {
 // phase-mention parsing cannot see. Only completed tasks count; skips are
 // dispositions, not work.
 func (a *Agent) PlanWorkedPhases() []int {
+	if a != nil {
+		if snapshot := a.publishedAssessment.Load(); snapshot != nil {
+			return append([]int(nil), snapshot.WorkedPhases...)
+		}
+	}
 	if a == nil || a.state == nil || a.state.Plan == nil {
 		return nil
 	}
@@ -1196,6 +1225,11 @@ func (a *Agent) SetDiscoveryMode(enabled bool) {
 // once the finish gate releases the scan). The web layer consults this so a
 // finish-gate-exhausted scan is never recorded as full coverage.
 func (a *Agent) CompletionOutcome() string {
+	if a != nil {
+		if snapshot := a.publishedAssessment.Load(); snapshot != nil {
+			return snapshot.Completion
+		}
+	}
 	if a == nil || a.state == nil {
 		return ""
 	}
@@ -1495,7 +1529,7 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (r
 		hardTimeoutDuration = execChannelDegradedTimeout
 		degradedExecChannel = true
 	}
-	tcCtx, tcCancel := context.WithTimeout(a.ctx, hardTimeoutDuration+30*time.Second)
+	tcCtx, tcCancel := a.toolWaitContext(hardTimeoutDuration + 30*time.Second)
 	defer tcCancel()
 
 	for {
@@ -1515,6 +1549,12 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (r
 			a.touchActivity()
 
 		case <-tcCtx.Done():
+			if deadline, ok := a.scanDeadline(); ok && !time.Now().Before(deadline) {
+				if a.scanCtx != nil && a.scanCtx.Cancel != nil {
+					a.scanCtx.Cancel()
+				}
+				return tools.Result{Error: "Scan duration budget exhausted during tool execution"}, context.DeadlineExceeded
+			}
 			// Distinguish hard-timeout from parent cancellation. When the
 			// parent (a.ctx) is canceled, tcCtx.Err() is context.Canceled;
 			// when our own deadline elapses it is context.DeadlineExceeded.
@@ -1551,6 +1591,19 @@ func (a *Agent) Run(targets []string, instruction string) {
 	if a.stopped.Load() {
 		return
 	}
+	if _, err := a.RestoreExecutionCheckpoint(); err != nil {
+		a.stopForHook(HookResult{StopReason: "checkpoint_restore_failed", EmitMessage: "Scan stopped: execution checkpoint could not be restored safely; saved findings are preserved."})
+		return
+	}
+	if terminal := a.terminalOutcome.Load(); terminal != nil {
+		a.emit(Event{Type: "finished", Content: terminal.Content, Aborted: terminal.Aborted, AbortReason: terminal.Reason, TotalTokens: a.syncBudgetTokens()})
+		return
+	}
+	defer func() {
+		if err := a.saveExecutionCheckpoint(); err != nil {
+			log.Printf("[checkpoint] final save failed: %v", err)
+		}
+	}()
 	a.targets = targets // remember the scan targets so probe_hypothesis can resolve a base URL for a bare path
 	if a.scanCtx != nil && a.delegatedAgentID == "" {
 		a.scanCtx.SetTargets(targets)
@@ -1559,6 +1612,24 @@ func (a *Agent) Run(targets []string, instruction string) {
 	a.scanStart = time.Now()
 	if a.scanBudget != nil {
 		a.scanBudget.start()
+	}
+	stopSemanticWatchdog := a.startSemanticWatchdog()
+	defer stopSemanticWatchdog()
+	if deadline, ok := a.scanDeadline(); ok {
+		ctx, cancel := context.WithDeadline(a.ctx, deadline)
+		defer cancel()
+		a.ctx = ctx
+		a.client.SetContext(ctx)
+		stopCleanup := context.AfterFunc(ctx, func() {
+			if ctx.Err() == context.DeadlineExceeded && a.scanCtx != nil && a.scanCtx.Cancel != nil {
+				a.scanCtx.Cancel()
+			}
+		})
+		defer stopCleanup()
+		if !time.Now().Before(deadline) {
+			a.stopForHook(HookResult{StopReason: "resource_budget", EmitMessage: "Scan stopped: original duration budget is exhausted; saved findings are preserved."})
+			return
+		}
 	}
 	// Wire per-scan auth + whitebox source here (in the scan goroutine) so a
 	// slow git clone never blocks scan creation or the HTTP handler.
@@ -1591,7 +1662,9 @@ func (a *Agent) Run(targets []string, instruction string) {
 	}
 
 	// Initialize scan state for hooks (replaces 17+ local tracking variables)
-	a.state = NewScanState()
+	if a.state == nil {
+		a.state = NewScanState()
+	}
 	a.state.Iteration = a.initialIter
 	// A scan resumed after a server restart must not repeat the
 	// full-detail specialist-wave defer wall: the persisted record already
@@ -1609,6 +1682,8 @@ func (a *Agent) Run(targets []string, instruction string) {
 	a.state.ScanContextID = a.scanCtx.ID
 	a.state.DelegatedAgent = a.delegatedAgentID != ""
 	a.state.DelegatedAgentID = a.delegatedAgentID
+	a.state.LaneScoped = a.laneScoped
+	a.state.AssignedClasses = append([]string(nil), a.assignedClasses...)
 	a.state.BenchmarkIsolated = a.benchmarkIsolated
 	a.state.ProfessionalAssessment = !a.ctfMission
 	a.state.AuthContextKnown = true
@@ -1641,6 +1716,15 @@ func (a *Agent) Run(targets []string, instruction string) {
 	// state; derived once so every delegation path reads one flag.
 	a.state.DelegationEnabled = a.delegationEnabled()
 	a.resetPassiveReconGuardForRun()
+	if a.executionRestored {
+		a.resumePlanContext()
+	}
+	if !a.checkpointOrStop() {
+		return
+	}
+	if a.ownsAgentGraph {
+		a.agentGraph.ResumeCheckpointedWork()
+	}
 
 	// Helper to get current token count
 	tokenCount := func() int {
@@ -1668,6 +1752,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 			reason := fmt.Sprintf("%d shared agent iterations ≥ scan cap %d", a.scanBudget.iterationCount(), a.maxIter)
 			a.emit(Event{Type: "message", Content: "⏱️ Resource budget reached (" + reason + ") — stopping and finalizing. Findings reported so far are preserved.", TotalTokens: tokenCount()})
 			a.emit(Event{Type: "finished", Content: "Scan stopped: resource budget reached (" + reason + ").", TotalTokens: tokenCount(), Aborted: true, AbortReason: "resource_budget"})
+			return
+		}
+		if !a.checkpointOrStop() {
+			return
+		}
+		if a.stopForHook(a.semanticLivenessCheck()) {
 			return
 		}
 		if guardMsg := a.maybeCompletePassiveReconGuardAtIterationStart(iter); guardMsg != "" {
@@ -1760,7 +1850,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 		// enter the 25-attempt exponential backoff and keep a stopped scan alive
 		// for many minutes after its deadline.
 		if a.stopped.Load() || (a.ctx != nil && a.ctx.Err() != nil) {
-			a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+			a.emitContextStop()
 			return
 		}
 
@@ -1848,7 +1938,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 				if a.ctx != nil {
 					select {
 					case <-a.ctx.Done():
-						a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+						a.emitContextStop()
 						return
 					case <-time.After(backoff):
 					}
@@ -1886,7 +1976,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if a.ctx != nil {
 				select {
 				case <-a.ctx.Done():
-					a.emit(Event{Type: "finished", Content: "Scan stopped", TotalTokens: tokenCount()})
+					a.emitContextStop()
 					return
 				case <-time.After(backoff):
 				}
@@ -2041,6 +2131,9 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if allowedCalls > remaining {
 				allowedCalls = remaining
 			}
+		}
+		if !a.checkpointOrStop() {
+			return
 		}
 		if allowedCalls < requestedCalls {
 			a.emit(Event{Type: "message", Content: fmt.Sprintf("⏱️ Shared tool-call budget: executing %d of %d requested calls (scan cap %d reached).", allowedCalls, requestedCalls, maxToolCalls), TotalTokens: tokenCount()})
@@ -2221,10 +2314,9 @@ func (a *Agent) Run(targets []string, instruction string) {
 			}
 			if toolCallHook.EmitMessage != "" {
 				a.emit(Event{Type: "message", Content: toolCallHook.EmitMessage, TotalTokens: tokenCount()})
-				if strings.Contains(toolCallHook.EmitMessage, "Force finishing") || strings.Contains(toolCallHook.EmitMessage, "Loop limit reached") {
-					a.emit(Event{Type: "finished", Content: toolCallHook.EmitMessage, TotalTokens: tokenCount(), Aborted: true, AbortReason: "report_retry_limit"})
-					return
-				}
+			}
+			if a.stopForHook(toolCallHook) {
+				return
 			}
 			if toolCallHook.ForceSkip {
 				continue
@@ -2232,15 +2324,8 @@ func (a *Agent) Run(targets []string, instruction string) {
 
 			// ── Hook: OnStuckCheck (nudge/force-skip based on stuck counters) ──
 			stuckResult := a.hooks.Fire(OnStuckCheck, a.state, toolArgs)
-			if stuckResult.EmitMessage != "" {
-				if strings.Contains(stuckResult.EmitMessage, "Force finishing") || strings.Contains(stuckResult.EmitMessage, "Loop limit reached") {
-					content := stuckResult.EmitMessage
-					if content == "" || strings.Contains(content, "automated safety boundaries") {
-						content = "Scan completed: Loop limit reached — testing safely finalized with existing findings."
-					}
-					a.emit(Event{Type: "finished", Content: content, TotalTokens: tokenCount(), Aborted: true, AbortReason: "stuck_loop_limit"})
-					return
-				}
+			if a.stopForHook(stuckResult) {
+				return
 			}
 			if stuckResult.Nudge != "" {
 				a.msgMu.Lock()
@@ -2278,6 +2363,10 @@ func (a *Agent) Run(targets []string, instruction string) {
 				ToolResult:  result,
 				TotalTokens: tokenCount(),
 			})
+			if deadline, ok := a.scanDeadline(); ok && !time.Now().Before(deadline) {
+				a.stopForHook(HookResult{StopReason: "resource_budget", EmitMessage: "Scan stopped: duration budget exhausted during tool execution; saved findings are preserved."})
+				return
+			}
 
 			// ── Hook: OnToolResult (WAF detection, tech detection) ──
 			resultArgs := make(map[string]string, len(toolArgs)+2)
@@ -2299,6 +2388,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 				}
 			}
 			toolResultHook := a.hooks.Fire(OnToolResult, a.state, resultArgs)
+			if !a.checkpointOrStop() {
+				return
+			}
+			if a.stopForHook(toolResultHook) {
+				return
+			}
 			if toolResultHook.EmitMessage != "" {
 				a.emit(Event{Type: "message", Content: toolResultHook.EmitMessage, TotalTokens: tokenCount()})
 			}
@@ -2436,9 +2531,17 @@ func (a *Agent) Run(targets []string, instruction string) {
 	// hid the real cause (user stop, shutdown, watchdog kill, or upstream
 	// context cancellation) and made healthy scans look like they'd blown a cap.
 	var finishReason string
+	abortReason := ""
 	switch {
+	case a.ctx != nil && a.ctx.Err() != nil && (a.livenessExpired.Load() || a.semanticIdleRemaining() <= 0):
+		a.emitContextStop()
+		return
+	case a.ctx != nil && a.ctx.Err() == context.DeadlineExceeded:
+		finishReason = "Scan stopped: duration budget exhausted; saved findings are preserved."
+		abortReason = "resource_budget"
 	case a.maxIter > 0 && iter >= a.maxIter:
 		finishReason = fmt.Sprintf("Agent reached maximum iterations (%d)", a.maxIter)
+		abortReason = "resource_budget"
 	case a.stopped.Load():
 		finishReason = "Scan stopped"
 	case a.ctx != nil && a.ctx.Err() != nil:
@@ -2446,7 +2549,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 	default:
 		finishReason = "Scan ended"
 	}
-	a.emit(Event{Type: "finished", Content: finishReason, TotalTokens: tokenCount()})
+	a.emit(Event{Type: "finished", Content: finishReason, TotalTokens: tokenCount(), Aborted: abortReason != "", AbortReason: abortReason, Resumable: abortReason == ""})
 }
 
 // Stop signals the agent to stop and kills all running processes.
@@ -2505,6 +2608,12 @@ func (a *Agent) SendMessage(message string) (string, error) {
 }
 
 func (a *Agent) emit(evt Event) {
+	if evt.Type == "finished" && !evt.Resumable && a.checkpointLoaded {
+		a.terminalOutcome.Store(&terminalCheckpoint{evt.Content, evt.Aborted, evt.AbortReason})
+		if err := a.saveExecutionCheckpoint(); err != nil {
+			log.Printf("[checkpoint] terminal save failed: %v", err)
+		}
+	}
 	evt.AgentID = a.ID
 	evt.Timestamp = time.Now()
 	// Redact operator-supplied auth secrets from telemetry so credentials
@@ -2661,6 +2770,9 @@ func (a *Agent) SetScanContext(s string) { a.scanContext = strings.TrimSpace(s) 
 func (a *Agent) SetInitialIteration(iter int) {
 	if iter > 0 {
 		a.initialIter = iter
+		if a.scanBudget != nil && a.scanBudget.iterationCount() < iter {
+			a.scanBudget.iterations.Store(int64(iter))
+		}
 	}
 }
 

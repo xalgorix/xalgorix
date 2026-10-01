@@ -32,7 +32,7 @@ import (
 // The hardcoded fallback is only used when developers `go run` the package
 // without ldflags. It is a `var` (not `const`) precisely so ldflags can
 // rewrite it.
-var version = "4.6.131"
+var version = "4.6.132"
 
 const defaultWebPort = 9137
 

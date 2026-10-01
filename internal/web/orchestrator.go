@@ -175,6 +175,11 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		log.Printf("[scan] refusing dispatch %q with unreadable durable state: %v", instanceID, durErr)
 		return
 	}
+	if req.IsResume && durable != nil {
+		instance.TotalTokens = max(instance.TotalTokens, durable.TotalTokens)
+		instance.AssessmentProgress = max(instance.AssessmentProgress, durable.AssessmentProgress)
+		instance.UsageBySession = mergeSessionUsage(instance.UsageBySession, durable.UsageBySession)
+	}
 	s.instancesMu.Lock()
 	if existing := s.instances[instanceID]; existing != nil {
 		replaceableResumePlaceholder := req.IsResume && isReplaceableResumePlaceholder(existing)
@@ -195,6 +200,8 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		if existing.ToolCalls > instance.ToolCalls {
 			instance.ToolCalls = existing.ToolCalls
 		}
+		instance.AssessmentProgress = max(instance.AssessmentProgress, existing.AssessmentProgress)
+		instance.UsageBySession = mergeSessionUsage(instance.UsageBySession, existing.UsageBySession)
 		if len(existing.Vulns) > len(instance.Vulns) {
 			instance.Vulns = append([]VulnSummary(nil), existing.Vulns...)
 			instance.VulnCount = len(instance.Vulns)
@@ -415,7 +422,7 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 			inst.mu.RLock()
 			if inst.Status == "running" {
 				runningCount++
-				if admissionMemoryUnreflected(inst.StartedAt, now) {
+				if admissionMemoryUnreflected(instanceAdmissionTime(inst), now) {
 					recentAdmissions++
 				}
 			}
@@ -428,7 +435,12 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		instance.mu.Lock()
 		if canAdmit && instance.Status == "pending" {
 			instance.Status = "running"
-			instance.StartedAt = time.Now().Format(time.RFC3339)
+			instance.AdmittedAt = time.Now().Format(time.RFC3339Nano)
+			if instance.StartedAt == "" {
+				instance.StartedAt = instance.AdmittedAt
+			} else if req.IsResume {
+				instance.ResumedAt = instance.AdmittedAt
+			}
 			gotSlot = true
 			log.Printf("[ADMIT] Scan %s started (running: %d) — %s", instanceID, runningCount+1, reason)
 		}
@@ -722,6 +734,15 @@ func loadScanRecordFromDir(scanDir string) (*ScanRecord, bool) {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return nil, false
 	}
+	if rec.EventsJournal {
+		rec.Events = nil
+		total, _, err := walkEventJournal(scanDir, func(_ int, event WSEvent) { rec.Events = append(rec.Events, event) })
+		if err != nil {
+			return nil, false
+		}
+		rec.EventsTotal = total
+		rec.EventsTruncated = false
+	}
 	return &rec, true
 }
 
@@ -1011,7 +1032,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			discordWebhook:     req.DiscordWebhook,
 			discoveryMode:      true,
 			genReport:          false,
-			resetState:         true,
+			resetState:         !resumed,
 			instanceID:         req.InstanceID,
 			parentCtx:          ctx,
 			scanMode:           "wildcard",
@@ -1241,6 +1262,8 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 				if inst.ToolCalls > parentRecord.ToolCalls {
 					parentRecord.ToolCalls = inst.ToolCalls
 				}
+				parentRecord.AssessmentProgress = max(parentRecord.AssessmentProgress, inst.AssessmentProgress)
+				parentRecord.UsageBySession = cloneSessionUsage(inst.UsageBySession)
 				inst.mu.RUnlock()
 			}
 			s.saveScanRecordTo(parentRecord, scanDir)
@@ -1278,8 +1301,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			break
 		}
 
-		// Note: No parent context timeout check here. Each subdomain scan has its own
-		// agent-level timeout (2h). We let the stop button handle manual cancellation.
+		// Each child retains its configured duration and active recovery clocks.
 
 		// ── Memory & goroutine health check between subdomain scans ──
 		logMemStats(fmt.Sprintf("Before subdomain %d/%d: %s", j+1, len(subdomains), subdomain))
@@ -1481,6 +1503,8 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			if inst.ToolCalls > parentRecord.ToolCalls {
 				parentRecord.ToolCalls = inst.ToolCalls
 			}
+			parentRecord.AssessmentProgress = max(parentRecord.AssessmentProgress, inst.AssessmentProgress)
+			parentRecord.UsageBySession = cloneSessionUsage(inst.UsageBySession)
 			inst.mu.RUnlock()
 		}
 		s.saveScanRecordTo(parentRecord, scanDir)

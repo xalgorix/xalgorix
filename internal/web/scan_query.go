@@ -273,15 +273,11 @@ func walkScanDirs(root string, fn func(scanJSONPath string)) {
 func (s *Server) findAllScans() []scanEntry {
 	var results []scanEntry
 	walkScanDirs(s.dataDir, func(path string) {
-		data, err := os.ReadFile(path)
-		if err != nil {
+		rec, ok := loadScanRecordFromDir(filepath.Dir(path))
+		if !ok {
 			return
 		}
-		var rec ScanRecord
-		if json.Unmarshal(data, &rec) != nil {
-			return
-		}
-		results = append(results, scanEntry{dir: filepath.Dir(path), rec: rec})
+		results = append(results, scanEntry{dir: filepath.Dir(path), rec: *rec})
 	})
 	return results
 }
@@ -439,7 +435,7 @@ func (s *Server) persistedInstanceIDClaim(instanceID string) (string, bool) {
 	}
 	status := ""
 	claims := 0
-	for _, entry := range s.findAllScans() {
+	for _, entry := range s.findAllScanSummaries() {
 		if entry.rec.ParentTarget == "" && entry.rec.InstanceID == instanceID {
 			claims++
 			status = entry.rec.Status
@@ -469,7 +465,7 @@ func (s *Server) findScanByInstanceID(instanceID string) (string, *ScanRecord) {
 	}
 	var matchedDir string
 	var matched *ScanRecord
-	for _, entry := range s.findAllScans() {
+	for _, entry := range s.findAllScanSummaries() {
 		if entry.rec.ParentTarget != "" || entry.rec.InstanceID != instanceID {
 			continue
 		}
@@ -480,6 +476,11 @@ func (s *Server) findScanByInstanceID(instanceID string) (string, *ScanRecord) {
 		rec := entry.rec
 		matchedDir = entry.dir
 		matched = &rec
+	}
+	if matched != nil {
+		if detail, ok := s.loadScanRecordForDetail(matchedDir, detailEventTail); ok {
+			matched = detail
+		}
 	}
 	return matchedDir, matched
 }
@@ -539,6 +540,16 @@ func (s *Server) scanRecordFromInstance(inst *ScanInstance) *ScanRecord {
 		FinishedAt:               inst.FinishedAt,
 		Status:                   inst.Status,
 		StopReason:               inst.StopReason,
+		Completion:               inst.Completion,
+		PlanPresent:              inst.PlanPresent,
+		PlanTasksTotal:           inst.PlanTasksTotal,
+		PlanTasksCompleted:       inst.PlanTasksCompleted,
+		PlanTasksSkipped:         inst.PlanTasksSkipped,
+		PlanTasksUnfinished:      inst.PlanTasksUnfinished,
+		AdmittedAt:               inst.AdmittedAt,
+		ResumedAt:                inst.ResumedAt,
+		AssessmentProgress:       inst.AssessmentProgress,
+		UsageBySession:           cloneSessionUsage(inst.UsageBySession),
 		ScanMode:                 inst.ScanMode,
 		Instruction:              inst.Instruction,
 		SeverityFilter:           severityFilter,
@@ -842,6 +853,15 @@ func (s *Server) applyInstanceSnapshot(rec *ScanRecord, includeEvents bool) {
 		rec.TotalTokens = snapshot.TotalTokens
 	}
 	rec.WorkStarted = rec.WorkStarted || snapshot.WorkStarted
+	rec.AssessmentProgress = max(rec.AssessmentProgress, snapshot.AssessmentProgress)
+	if snapshot.UsageBySession != nil {
+		rec.UsageBySession = cloneSessionUsage(snapshot.UsageBySession)
+	}
+	if snapshot.PlanPresent && !isFinalScanStatus(rec.Status) {
+		rec.PlanPresent = true
+		rec.PlanTasksTotal, rec.PlanTasksCompleted = snapshot.PlanTasksTotal, snapshot.PlanTasksCompleted
+		rec.PlanTasksSkipped, rec.PlanTasksUnfinished = snapshot.PlanTasksSkipped, snapshot.PlanTasksUnfinished
+	}
 	for _, vuln := range snapshot.Vulns {
 		appendVulnSummaryUnique(&rec.Vulns, vuln)
 	}
@@ -1125,7 +1145,7 @@ func (s *Server) rebuildInstancesFromDisk() {
 		}
 	}
 
-	entries := s.findAllScans()
+	entries := s.findAllScanSummaries()
 	externalIdentityCounts := make(map[string]int)
 	for i := range entries {
 		entry := &entries[i]
@@ -1214,38 +1234,46 @@ func (s *Server) rebuildInstancesFromDisk() {
 			s.saveScanRecordTo(&entry.rec, entry.dir)
 		}
 
-		inst := &ScanInstance{
-			ID:               instID,
-			Name:             entry.rec.Name,
-			Targets:          entry.rec.Target,
-			ParentTarget:     entry.rec.ParentTarget,
-			Status:           entry.rec.Status,
-			StartedAt:        entry.rec.StartedAt,
-			FinishedAt:       entry.rec.FinishedAt,
-			StopReason:       entry.rec.StopReason,
-			Iterations:       entry.rec.Iterations,
-			ToolCalls:        entry.rec.ToolCalls,
-			VulnCount:        len(entry.rec.Vulns),
-			TotalTokens:      entry.rec.TotalTokens,
-			ScanMode:         entry.rec.ScanMode,
-			Instruction:      entry.rec.Instruction,
-			SeverityFilter:   entry.rec.SeverityFilter,
-			Phases:           entry.rec.Phases,
-			ReconMode:        entry.rec.ReconMode,
-			ScanIntensity:    entry.rec.ScanIntensity,
-			CompanyName:      entry.rec.CompanyName,
-			LogoPath:         entry.rec.LogoPath,
-			DiscordWebhook:   entry.rec.DiscordWebhook,
-			Vulns:            entry.rec.Vulns,
-			CurrentPhase:     entry.rec.CurrentPhase,
-			SubScans:         cloneSubScanSummaries(entry.rec.SubScans),
-			SubScanTotal:     entry.rec.SubScanTotal,
-			SubScanCompleted: entry.rec.SubScanCompleted,
-			SubScanRunning:   entry.rec.SubScanRunning,
-			SubScanRemaining: entry.rec.SubScanRemaining,
-			WorkStarted:      entry.rec.WorkStarted,
-			events:           append([]WSEvent(nil), entry.rec.Events...),
+		if detail, ok := s.loadScanRecordForDetail(entry.dir, detailEventTail); ok {
+			entry.rec.Events = detail.Events
 		}
+		inst := &ScanInstance{
+			AdmittedAt:         entry.rec.AdmittedAt,
+			ResumedAt:          entry.rec.ResumedAt,
+			AssessmentProgress: entry.rec.AssessmentProgress,
+			UsageBySession:     cloneSessionUsage(entry.rec.UsageBySession),
+			ID:                 instID,
+			Name:               entry.rec.Name,
+			Targets:            entry.rec.Target,
+			ParentTarget:       entry.rec.ParentTarget,
+			Status:             entry.rec.Status,
+			StartedAt:          entry.rec.StartedAt,
+			FinishedAt:         entry.rec.FinishedAt,
+			StopReason:         entry.rec.StopReason,
+			Iterations:         entry.rec.Iterations,
+			ToolCalls:          entry.rec.ToolCalls,
+			VulnCount:          len(entry.rec.Vulns),
+			TotalTokens:        entry.rec.TotalTokens,
+			ScanMode:           entry.rec.ScanMode,
+			Instruction:        entry.rec.Instruction,
+			SeverityFilter:     entry.rec.SeverityFilter,
+			Phases:             entry.rec.Phases,
+			ReconMode:          entry.rec.ReconMode,
+			ScanIntensity:      entry.rec.ScanIntensity,
+			CompanyName:        entry.rec.CompanyName,
+			LogoPath:           entry.rec.LogoPath,
+			DiscordWebhook:     entry.rec.DiscordWebhook,
+			Vulns:              entry.rec.Vulns,
+			CurrentPhase:       entry.rec.CurrentPhase,
+			SubScans:           cloneSubScanSummaries(entry.rec.SubScans),
+			SubScanTotal:       entry.rec.SubScanTotal,
+			SubScanCompleted:   entry.rec.SubScanCompleted,
+			SubScanRunning:     entry.rec.SubScanRunning,
+			SubScanRemaining:   entry.rec.SubScanRemaining,
+			WorkStarted:        entry.rec.WorkStarted,
+			events:             append([]WSEvent(nil), entry.rec.Events...),
+		}
+		applyRecordIntegrityLocked(inst, &entry.rec)
 		if inst.CurrentPhase == 0 {
 			inst.CurrentPhase = firstSelectedPhase(inst.Phases)
 		}

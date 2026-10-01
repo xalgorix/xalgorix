@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,13 +12,17 @@ import (
 // independent copies of each configured cap and could spend roughly 4x the
 // operator's requested tool/token budget.
 type scanBudget struct {
+	persistMu sync.Mutex
 	startOnce sync.Once
 	startedMu sync.RWMutex
 	startedAt time.Time
 
-	toolCalls  atomic.Int64
-	iterations atomic.Int64
-	tokens     atomic.Int64
+	toolCalls     atomic.Int64
+	iterations    atomic.Int64
+	tokens        atomic.Int64
+	progress      atomic.Int64
+	progressFacts map[string]bool // protected by persistMu
+	progressAt    time.Time       // protected by persistMu
 }
 
 func newScanBudget() *scanBudget { return &scanBudget{} }
@@ -44,6 +49,31 @@ func (b *scanBudget) elapsed() (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Since(started), true
+}
+
+// scanDeadline is shared by model requests, delegated work and tool waits.
+func (a *Agent) scanDeadline() (time.Time, bool) {
+	if a.cfg == nil || a.cfg.MaxDurationSec <= 0 {
+		return time.Time{}, false
+	}
+	started := a.scanStart
+	if a.scanBudget != nil {
+		a.scanBudget.startedMu.RLock()
+		started = a.scanBudget.startedAt
+		a.scanBudget.startedMu.RUnlock()
+	}
+	if started.IsZero() {
+		return time.Time{}, false
+	}
+	return started.Add(time.Duration(a.cfg.MaxDurationSec) * time.Second), true
+}
+
+func (a *Agent) toolWaitContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(timeout)
+	if scanDeadline, ok := a.scanDeadline(); ok && scanDeadline.Before(deadline) {
+		deadline = scanDeadline
+	}
+	return context.WithDeadline(a.ctx, deadline)
 }
 
 // reserveToolCalls atomically reserves up to requested calls beneath cap and

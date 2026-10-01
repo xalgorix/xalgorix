@@ -142,12 +142,16 @@ type ScanState struct {
 	ReconOnlyMode                bool
 	DelegatedAgent               bool
 	DelegatedAgentID             string
+	LaneScoped                   bool
+	AssignedClasses              []string
 	BenchmarkIsolated            bool
 	ProfessionalAssessment       bool // non-CTF scan: structural plan, not a fixed iteration quota, governs completion
 	AuthContextKnown             bool // engine evaluated operator/ingested auth before planning
 	AuthContextAvailable         bool // at least one legitimate account/session is available
 	AllowedPhases                []int
 	PassiveReconGuardActive      bool
+	PassiveReconGuardDone        bool
+	PassiveReconSourceKeys       map[string]bool
 	PassiveReconPassiveLookups   int
 	PassiveReconBlockedActive    int
 	// ScanDepth is the explicit depth mode: "deep" enforces the full-
@@ -239,6 +243,10 @@ type ScanState struct {
 	ConsecutiveSameResult       int // same result-output fingerprint back-to-back
 	ConsecutiveSameResultNudges int // consecutive repeat-result nudges without a different result
 	ConsecutiveNoOpCalls        int // consecutive trivial/no-op terminal calls (e.g. echo done/ok/a, pwd)
+	PlanValidationErrors        int
+	PlanProgressSeen            map[string]bool
+	ProgressIdleIterations      int
+	LastAssessmentProgress      int
 
 	// Blocked-call loop detection. The three block guards (activity policy,
 	// phase restriction, out-of-scope) short-circuit the dispatch BEFORE the
@@ -447,6 +455,7 @@ type HookResult struct {
 	ForceSkip      bool   // skip current tool call
 	EmitMessage    string // emit to UI without injecting into conversation
 	CleanupBrowser bool   // signal to force-close browser
+	StopReason     string // typed partial termination, independent of display text
 	// PruneContext signals the agent loop to HARD-TRUNCATE the message
 	// history (keep the system prompt + the Nudge) before the next LLM call.
 	// Used when the conversation itself is the cause of the failure — a text
@@ -514,6 +523,10 @@ func (r *HookRegistry) Fire(event string, state *ScanState, args map[string]stri
 		if result.ForceSkip {
 			merged.ForceSkip = true
 		}
+		if merged.StopReason == "" {
+			merged.StopReason = result.StopReason
+		}
+		merged.PruneContext = merged.PruneContext || result.PruneContext
 		if merged.EmitMessage == "" && result.EmitMessage != "" {
 			merged.EmitMessage = result.EmitMessage
 		}
@@ -656,6 +669,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolResult, hookClientRouteWorkflow)
 	reg.Register(OnToolResult, hookOASTVerificationWorkflow)
 	reg.Register(OnToolResult, hookResultRepeatTracker)
+	reg.Register(OnToolResult, hookPlanValidationTracker)
 	reg.Register(OnToolResult, hookExternalReferenceTracker)
 	reg.Register(OnToolResult, hookReportVulnerabilityTracker)
 	reg.Register(OnFinishAttempt, hookFinishGatekeeper)
@@ -1966,6 +1980,7 @@ func hookStuckNudge(state *ScanState, args map[string]string) HookResult {
 	if state.ConsecutiveNoOpCalls >= 8 {
 		return HookResult{
 			ForceSkip:   true,
+			StopReason:  "stuck_loop_limit",
 			EmitMessage: fmt.Sprintf("⛔ Loop limit reached: Agent executed %d consecutive no-op echo/dummy commands without taking real testing action. Force finishing to prevent infinite loop.", state.ConsecutiveNoOpCalls),
 		}
 	}
@@ -1987,6 +2002,7 @@ func hookStuckNudge(state *ScanState, args map[string]string) HookResult {
 		if state.ConsecutiveSameCallNudges >= 4 {
 			return HookResult{
 				ForceSkip:   true,
+				StopReason:  "stuck_loop_limit",
 				EmitMessage: fmt.Sprintf("⛔ Loop limit reached: Agent repeatedly re-issued identical %q call %d times despite warnings. Force finishing scan to prevent infinite loop.", state.LastToolName, state.ConsecutiveSameCallNudges),
 			}
 		}
@@ -2022,7 +2038,8 @@ Your next tool call MUST differ from the last one.`, verb, state.LastToolName, s
 		if state.ConsecutiveSameResultNudges >= 8 {
 			return HookResult{
 				ForceSkip:   true,
-				EmitMessage: fmt.Sprintf("Scan completed: Target probe responses converged across %d consecutive checks. All verified findings saved to dashboard.", state.ConsecutiveSameResultNudges),
+				StopReason:  "stuck_loop_limit",
+				EmitMessage: fmt.Sprintf("Scan stopped: repeated results persisted across %d recovery attempts. Assessment remains partial; saved findings are preserved.", state.ConsecutiveSameResultNudges),
 			}
 		}
 		msg := fmt.Sprintf(`⛔ NO PROGRESS: Your last %d tool calls produced byte-identical output. You are looping without making progress.

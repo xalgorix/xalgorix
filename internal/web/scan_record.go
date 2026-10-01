@@ -17,7 +17,7 @@ func (s *Server) scanRecordForSession(sess *scanSession) *ScanRecord {
 		return rec
 	}
 
-	existing, ok := loadScanRecordFromDir(sess.scanDir)
+	existing, ok := s.loadScanRecordForDetail(sess.scanDir, detailEventTail)
 	if !ok || existing == nil {
 		return rec
 	}
@@ -83,6 +83,7 @@ func (s *Server) refreshResumedScanRecord(rec *ScanRecord, sess *scanSession, fa
 		rec.StartedAt = fallbackStartedAt
 	}
 	rec.Status = "running"
+	rec.Completion = ""
 	rec.WorkStarted = true
 	rec.FinishedAt = ""
 	rec.StopReason = ""
@@ -177,7 +178,20 @@ func (s *Server) effectiveVulnCount(inst *ScanInstance, sess *scanSession) int {
 			ctxID = sess.sctx.ID
 		}
 		if ctxID != "" {
-			return len(reporting.GetVulnerabilitiesForContext(ctxID))
+			seen := make(map[string]bool)
+			key := func(v VulnSummary) string {
+				if strings.TrimSpace(v.Title) == "" {
+					return "id:" + v.SourceScanID + "/" + v.ID
+				}
+				return dedupFindingKey(v.Target, v)
+			}
+			for _, v := range inst.Vulns {
+				seen[key(v)] = true
+			}
+			for _, v := range reporting.GetVulnerabilitiesForContext(ctxID) {
+				seen[key(vulnToSummary(v))] = true
+			}
+			return len(seen)
 		}
 	}
 	return len(inst.Vulns)
@@ -256,6 +270,11 @@ func (s *Server) seedResumeInstanceFromRecord(inst *ScanInstance, req ScanReques
 	if rec.StartedAt != "" {
 		inst.StartedAt = rec.StartedAt
 	}
+	applyRecordIntegrityLocked(inst, rec)
+	inst.AdmittedAt = rec.AdmittedAt
+	inst.ResumedAt = rec.ResumedAt
+	inst.AssessmentProgress = rec.AssessmentProgress
+	inst.UsageBySession = cloneSessionUsage(rec.UsageBySession)
 	if rec.Name != "" {
 		inst.Name = rec.Name
 	}

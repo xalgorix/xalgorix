@@ -986,8 +986,12 @@ func TestReportVuln_RCEVerifierMustSupplyExecutionProof(t *testing.T) {
 		ctx := "verifier-rce-upgrade"
 		CleanupContext(ctx)
 		defer CleanupContext(ctx)
+		dir := t.TempDir()
+		if err := RestoreContext(ctx, dir, nil); err != nil {
+			t.Fatal(err)
+		}
 		calls := 0
-		SetFindingVerifier(ctx, func(VerificationRequest) VerificationVerdict {
+		verifier := func(VerificationRequest) VerificationVerdict {
 			calls++
 			if calls == 1 {
 				return VerificationVerdict{
@@ -1001,7 +1005,8 @@ func TestReportVuln_RCEVerifierMustSupplyExecutionProof(t *testing.T) {
 				Reason:    "benign command execution reproduced",
 				Evidence:  "Response contained command output: uid=1000(metabase) gid=1000(metabase)",
 			}
-		})
+		}
+		SetFindingVerifier(ctx, verifier)
 
 		first, err := reportVulnWithContextID(ctx, rceArgs())
 		if err != nil {
@@ -1012,6 +1017,11 @@ func TestReportVuln_RCEVerifierMustSupplyExecutionProof(t *testing.T) {
 			t.Fatalf("first weak candidate must be stored unverified: %+v output=%s", initial, first.Output)
 		}
 		initialID := initial[0].ID
+		CleanupContext(ctx)
+		if err := RestoreContext(ctx, dir, nil); err != nil {
+			t.Fatal(err)
+		}
+		SetFindingVerifier(ctx, verifier)
 
 		secondArgs := rceArgs()
 		secondArgs["exploitation_proof"] += " Re-testing the same sink with a benign command."
@@ -1034,6 +1044,13 @@ func TestReportVuln_RCEVerifierMustSupplyExecutionProof(t *testing.T) {
 		}
 		if second.Metadata["upgraded"] != true || !strings.Contains(second.Output, "Vulnerability reported: upgraded with verified evidence") {
 			t.Fatalf("upgrade result was not surfaced to hooks/UI: metadata=%v output=%s", second.Metadata, second.Output)
+		}
+		CleanupContext(ctx)
+		if err := RestoreContext(ctx, dir, nil); err != nil {
+			t.Fatal(err)
+		}
+		if restored := GetVulnerabilitiesForContext(ctx); len(restored) != 1 || restored[0].ID != initialID || !restored[0].Verified {
+			t.Fatal("verified upgrade was lost on a second restart")
 		}
 	})
 }

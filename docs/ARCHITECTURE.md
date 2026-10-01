@@ -253,6 +253,7 @@ Read from `~/.xalgorix.env` (and process env). Key variables:
 | `XALGORIX_PASSWORD` / `XALGORIX_PASSWORD_HASH` | dashboard auth |
 | `XALGORIX_DATA_DIR` | where scan records are stored |
 | `XALGORIX_MAX_ITERATIONS` / `_MAX_DURATION` / `_MAX_TOKENS` / `_MAX_TOOL_CALLS` | per-scan budgets |
+| `XALGORIX_MAX_NON_PROGRESS` | active seconds without validated assessment evidence; default 3600, 0 disables the clock |
 | `XALGORIX_MAX_INSTANCES` | authoritative concurrent scan capacity when set; otherwise capacity is derived from live RAM headroom |
 | `XALGORIX_SCAN_MEMORY_BUDGET_MB` | estimated RAM required for each newly admitted scan (auto-scaled when unset) |
 | `XALGORIX_RATE_LIMIT_REQUESTS` / `_RATE_LIMIT_WINDOW` / `_RATE_RPS` / `_RATE_BURST` | request throttling |

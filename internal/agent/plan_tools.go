@@ -110,6 +110,9 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 		if t.Title == "" {
 			t.Title = id
 		}
+		if a.state.DelegatedAgent && a.state.LaneScoped && t.VulnClass != "" && !classAllowedForState(a.state, t.VulnClass) {
+			return tools.Result{Error: fmt.Sprintf("class %q is outside your delegated lane; plan only your assigned classes", t.VulnClass)}, nil
+		}
 		if !plan.add(t) {
 			warnings = append(warnings, fmt.Sprintf("duplicate task id %q was dropped", id))
 		}
@@ -136,6 +139,9 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 	}
 	var floorClasses []string
 	for _, class := range defaultVulnClasses(a.state.DetectedTechs) {
+		if a.state.DelegatedAgent && !a.state.LaneScoped {
+			continue
+		}
 		if represented[class] {
 			continue
 		}

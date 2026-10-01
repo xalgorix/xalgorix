@@ -3,6 +3,7 @@ package agentsgraph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -60,6 +61,8 @@ type Graph struct {
 	queue        []*subAgentState
 	agents       map[string]*subAgentState
 	wg           sync.WaitGroup
+	persistPath  string
+	persistErr   error
 }
 
 // EffectiveMaxConcurrentAgents returns the configured maximum number of subagents
@@ -225,6 +228,10 @@ func (g *Graph) onAgentDone() {
 		g.queue = g.queue[1:]
 		next.Status = "running"
 		next.StartedAt = time.Now()
+		if err := g.persistLocked(); err != nil {
+			g.activeAgents--
+			return
+		}
 		g.wg.Add(1)
 		go g.runAgent(next)
 	} else {
@@ -259,6 +266,11 @@ func (g *Graph) createAgent(args map[string]string) (tools.Result, error) {
 		done:      make(chan struct{}),
 	}
 	g.agents[agentID] = state
+	state.Status = "queued"
+	if err := g.persistLocked(); err != nil {
+		g.mu.Unlock()
+		return tools.Result{Error: "Cannot create agent: delegation checkpoint could not be saved."}, nil
+	}
 
 	if g.activeAgents < g.maxConcurrent {
 		g.activeAgents++
@@ -324,6 +336,11 @@ func (g *Graph) spawnAgent(args map[string]string) (tools.Result, error) {
 		done:      make(chan struct{}),
 	}
 	g.agents[agentID] = state
+	state.Status = "queued"
+	if err := g.persistLocked(); err != nil {
+		g.mu.Unlock()
+		return tools.Result{Error: "Cannot spawn agent: delegation checkpoint could not be saved."}, nil
+	}
 
 	if g.activeAgents < g.maxConcurrent {
 		g.activeAgents++
@@ -358,7 +375,11 @@ func (g *Graph) complete(agentID, summary string, runErr error) {
 		return
 	}
 	state.CompletedAt = time.Now()
-	if runErr != nil {
+	if errors.Is(runErr, context.Canceled) {
+		state.Status = "failed"
+		state.Error = "parent scan stopped"
+		state.Result = summary
+	} else if runErr != nil {
 		state.Status = "failed"
 		state.Error = runErr.Error()
 		state.Result = summary
@@ -367,6 +388,7 @@ func (g *Graph) complete(agentID, summary string, runErr error) {
 		state.Result = summary
 	}
 	state.doneOnce.Do(func() { close(state.done) })
+	_ = g.persistLocked()
 }
 
 type agentSnapshot struct {
@@ -392,6 +414,7 @@ func (g *Graph) snapshot(agentID string, observeCompleted bool) (agentSnapshot, 
 	}
 	if observeCompleted && state.Status != "running" && state.Status != "queued" {
 		state.Observed = true
+		_ = g.persistLocked()
 	}
 	return agentSnapshot{
 		ID:          state.ID,
@@ -621,6 +644,7 @@ func (g *Graph) Stop() {
 			state.doneOnce.Do(func() { close(state.done) })
 		}
 	}
+	_ = g.persistLocked()
 	g.mu.Unlock()
 }
 

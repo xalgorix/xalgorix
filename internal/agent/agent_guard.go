@@ -67,6 +67,14 @@ func (a *Agent) refreshPassiveReconGuard() {
 }
 
 func (a *Agent) resetPassiveReconGuardForRun() {
+	if a.executionRestored && a.state != nil {
+		a.passiveReconGuardDone = a.state.PassiveReconGuardDone
+		a.passiveReconPassiveLookups = a.state.PassiveReconPassiveLookups
+		a.passiveReconBlockedActive = a.state.PassiveReconBlockedActive
+		a.passiveReconSourceKeys = a.state.PassiveReconSourceKeys
+		a.refreshPassiveReconGuard()
+		return
+	}
 	a.passiveReconGuardDone = false
 	a.passiveReconPassiveLookups = 0
 	a.passiveReconBlockedActive = 0
@@ -79,6 +87,8 @@ func (a *Agent) syncPassiveReconGuardState() {
 		return
 	}
 	a.state.PassiveReconGuardActive = a.passiveReconGuardActive
+	a.state.PassiveReconGuardDone = a.passiveReconGuardDone
+	a.state.PassiveReconSourceKeys = a.passiveReconSourceKeys
 	a.state.PassiveReconPassiveLookups = a.passiveReconPassiveLookups
 	a.state.PassiveReconBlockedActive = a.passiveReconBlockedActive
 }

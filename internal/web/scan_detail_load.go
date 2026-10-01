@@ -147,9 +147,9 @@ const scanMetaFile = "scan.meta.json"
 // plus the total/truncation hints — the exact payload the detail view needs.
 func buildDetailMeta(rec *ScanRecord) *ScanRecord {
 	light := *rec
-	total := len(rec.Events)
-	if total > detailEventTail {
-		light.Events = append([]WSEvent(nil), rec.Events[total-detailEventTail:]...)
+	total := max(rec.EventsTotal, len(rec.Events))
+	if len(rec.Events) > detailEventTail {
+		light.Events = append([]WSEvent(nil), rec.Events[len(rec.Events)-detailEventTail:]...)
 	} else {
 		light.Events = append([]WSEvent(nil), rec.Events...)
 	}
@@ -284,6 +284,22 @@ func (s *Server) loadScanRecordForDetail(dir string, tail int) (*ScanRecord, boo
 		return loadScanRecordFromDir(dir)
 	}
 	rec.Events = decodeEvents(ring)
+	if rec.EventsJournal {
+		rec.Events = nil
+		var journalErr error
+		total, _, journalErr = walkEventJournal(dir, func(_ int, event WSEvent) {
+			if tail > 0 {
+				if len(rec.Events) >= tail {
+					copy(rec.Events, rec.Events[1:])
+					rec.Events = rec.Events[:tail-1]
+				}
+				rec.Events = append(rec.Events, event)
+			}
+		})
+		if journalErr != nil {
+			return nil, false
+		}
+	}
 	rec.EventsTotal = total
 	rec.EventsTruncated = total > len(rec.Events)
 
@@ -321,6 +337,15 @@ func loadScanEventsWindow(dir string, offset, limit int) ([]WSEvent, int, bool) 
 	}
 	path := filepath.Join(dir, "scan.json")
 	end := offset + limit
+	if rec, ok := readScanSummary(path); ok && rec.EventsJournal {
+		window := make([]WSEvent, 0, limit)
+		total, _, err := walkEventJournal(dir, func(idx int, event WSEvent) {
+			if idx >= offset && idx < end {
+				window = append(window, event)
+			}
+		})
+		return window, total, err == nil
+	}
 	window := make([]json.RawMessage, 0, limit)
 	_, total, err := walkScanJSON(path, func(idx int, raw json.RawMessage) {
 		if idx >= offset && idx < end {

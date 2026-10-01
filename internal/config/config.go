@@ -227,6 +227,9 @@ type Config struct {
 	MaxToolCalls   int
 	MaxDurationSec int
 	MaxTokens      int
+	// MaxNonProgressSec bounds active time without validated assessment evidence.
+	// XALGORIX_MAX_NON_PROGRESS defaults to one hour; 0 disables this clock.
+	MaxNonProgressSec int
 
 	// ScanRetentionDays controls automatic pruning of old scan output
 	// directories under DataDir. XALGORIX_SCAN_RETENTION_DAYS — when > 0, a
@@ -452,6 +455,7 @@ func load() *Config {
 		MaxToolCalls:          envOrInt("XALGORIX_MAX_TOOL_CALLS", 0),
 		MaxDurationSec:        envOrInt("XALGORIX_MAX_DURATION", 0),
 		MaxTokens:             envOrInt("XALGORIX_MAX_TOKENS", 0),
+		MaxNonProgressSec:     envOrInt("XALGORIX_MAX_NON_PROGRESS", 3600),
 
 		// Scan retention: 0 disables automatic pruning (keep forever).
 		ScanRetentionDays: envOrInt("XALGORIX_SCAN_RETENTION_DAYS", 0),

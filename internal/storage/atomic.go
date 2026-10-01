@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // WriteAtomic writes data to "<dst>.tmp.<rand>" in the same directory
@@ -65,6 +66,19 @@ func WriteAtomic(dst string, data []byte) error {
 	if err := os.Rename(tmp, dst); err != nil {
 		cleanup()
 		return fmt.Errorf("storage: rename temp %q -> %q: %w", tmp, dst, err)
+	}
+	// Persist the directory entry as well as the file contents on systems
+	// that support directory fsync, so a power loss cannot undo the rename.
+	if runtime.GOOS != "windows" {
+		d, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("storage: open directory: %w", err)
+		}
+		err = d.Sync()
+		_ = d.Close()
+		if err != nil {
+			return fmt.Errorf("storage: fsync directory: %w", err)
+		}
 	}
 	return nil
 }
