@@ -2170,3 +2170,56 @@ func TestHookTargetHealthDetectorBareStatusCodeShapes(t *testing.T) {
 			state.ConsecutiveTargetErrors)
 	}
 }
+
+func TestHookTargetHealthDetectorEdgePagesDoNotClearStreak(t *testing.T) {
+	state := NewScanState()
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/2 503 Service Unavailable",
+	})
+	if state.ConsecutiveTargetErrors != 1 {
+		t.Fatalf("gateway failure must start the streak, got %d", state.ConsecutiveTargetErrors)
+	}
+
+	// A batch of pure CDN edge 403 challenge pages (dead origin behind a
+	// live edge) must NOT clear the streak.
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "ffuf results: [403] /admin\n[403] /login\nHTTP/2 403 attention required",
+	})
+	if state.ConsecutiveTargetErrors != 1 || state.TargetUnresponsiveSince.IsZero() {
+		t.Fatalf("edge 403 pages must be neutral, got count=%d", state.ConsecutiveTargetErrors)
+	}
+
+	// Edge 404s (unknown paths answered by the CDN) must NOT clear it either.
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/2 404\nGET /missing -> 404 (size=0)",
+	})
+	if state.ConsecutiveTargetErrors != 1 || state.TargetUnresponsiveSince.IsZero() {
+		t.Fatalf("edge 404s must be neutral, got count=%d", state.ConsecutiveTargetErrors)
+	}
+
+	// A redirect (3xx) proves the stack answers and clears the streak.
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/1.1 301 Moved Permanently\nlocation: /login",
+	})
+	if state.ConsecutiveTargetErrors != 0 || !state.TargetUnresponsiveSince.IsZero() {
+		t.Fatalf("a 3xx redirect must clear the streak, got count=%d", state.ConsecutiveTargetErrors)
+	}
+
+	// 5xx + edge-403 mixed batches (no 2xx/3xx) still EXTEND the streak.
+	state = NewScanState()
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/2 503 Service Unavailable",
+	})
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/2 403 attention required\nHTTP/2 503 Service Unavailable\n[404] /none",
+	})
+	if state.ConsecutiveTargetErrors != 2 {
+		t.Fatalf("503 mixed with edge 403/404 must extend the streak, got %d", state.ConsecutiveTargetErrors)
+	}
+}

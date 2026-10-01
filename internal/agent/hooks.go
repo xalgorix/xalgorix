@@ -2187,6 +2187,17 @@ var targetDownCodePattern = regexp.MustCompile(`(?:status|http|code)[=:\s]+50[23
 // nor clears the unresponsive streak.
 var targetHealthyCodePattern = regexp.MustCompile(`(?:status|http|code)[=:\s]+2\d\d\b|->\s*2\d\d\b|\[\s*2\d\d\s*\]|http/1\.[01]\s+2\d\d|http/2\s+2\d\d|200 ok`)
 
+// targetAliveCodePattern matches 3xx redirect status shapes: redirects
+// prove the application stack answers (auth redirects, www moves, etc.),
+// so they clear the unresponsive streak like a 2xx does. Together with
+// targetHealthyCodePattern this defines the ONLY results that can clear
+// the streak: everything else — CDN edge 403 challenge pages, edge 404s,
+// non-HTTP analysis output — is neutral. The old reset branch accepted
+// any "http/" status line plus bare "404"/"301"/"302" strings, which let
+// a dead origin behind a live CDN edge (edge answers 403/404 on the
+// app's behalf) clear the streak forever, so the scan never stopped.
+var targetAliveCodePattern = regexp.MustCompile(`(?:status|http|code)[=:\s]+3\d\d\b|->\s*3\d\d\b|\[\s*3\d\d\s*\]|http/1\.[01]\s+3\d\d|http/2\s+3\d\d`)
+
 // localOnlyTools never interact with the scan target. Their results
 // often echo or discuss target text (notes, ledger entries, archived
 // outputs, skill docs) and must not feed the target-health streaks.
@@ -2281,7 +2292,10 @@ If the host stays unreachable, document what was tested in notes (add_note) and 
 		}
 	} else if strings.Contains(combined, "429 too many requests") || strings.Contains(combined, "rate limit exceeded") || strings.Contains(combined, "http/1.1 429") || strings.Contains(combined, "http/2 429") || strings.Contains(combined, "429 rate limit") {
 		state.ConsecutiveRateLimitErrors++
-	} else if strings.Contains(combined, "http/") || strings.Contains(combined, "200 ok") || strings.Contains(combined, "301") || strings.Contains(combined, "302") || strings.Contains(combined, "404") {
+	} else if targetHealthyCodePattern.MatchString(combined) || targetAliveCodePattern.MatchString(combined) {
+		// Only a real 2xx/3xx application response proves the target is
+		// alive. Edge 403 challenge pages, edge 404s, and non-HTTP output
+		// are neutral: they neither extend nor clear the streak.
 		state.ConsecutiveTargetErrors = 0
 		state.ConsecutiveRateLimitErrors = 0
 		state.TargetUnresponsiveSince = time.Time{}

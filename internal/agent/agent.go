@@ -129,11 +129,12 @@ const (
 // hookTargetHealthDetector stamps state.TargetUnresponsiveSince at the
 // first failure of a streak and clears it on the first healthy response;
 // the kill additionally requires ConsecutiveTargetErrors >= 3 so a
-// single blip followed by local-only work can never end a scan.
-// Production cases: scans kept probing a dead target ("502 Bad
-// Gateway" / "503 Service Unavailable — No server is available to
-// handle this request") for 21–32 hours with zero progress.
-const targetUnresponsiveKillThreshold = 15 * time.Minute
+// single blip followed by local-only work can never end a scan. Ten
+// minutes leaves the model ~5 minutes of wrap-up (evidence notes, ledger,
+// finish) after the count-3 nudge — observed wrap-up completes well
+// inside that — while ending dead-target scans promptly (production
+// cases ran 21–32 hours with zero progress).
+const targetUnresponsiveKillThreshold = 10 * time.Minute
 
 // isExecChannelTool reports whether a tool runs subprocesses through the
 // shared terminal/lease launch path that the exec-channel breaker guards.
