@@ -229,6 +229,12 @@ type Agent struct {
 	initialIter    int
 	resumeBriefing string
 
+	// deferNoteSuppressed restores the specialist-wave defer detail latch
+	// across server restarts: a resumed run emits only compact defer notes
+	// instead of repeating the full-detail wall. Set from the persisted
+	// scan record via SetDeferNoteDetailEmitted before Run().
+	deferNoteSuppressed bool
+
 	// agentGraph is shared by every agent delegated from this root, but owned
 	// by the root scan only. The graph itself is scan-scoped, so concurrent
 	// scans cannot overwrite runners or consume one another's worker slots.
@@ -702,7 +708,29 @@ func (a *Agent) noteDelegationDefer(reason string) {
 		return
 	}
 	a.state.DelegationDeferReason = reason
-	a.emit(Event{Type: "message", Content: fmt.Sprintf("⏸️ Specialist wave deferred: %s. The wave launches automatically once the blocker clears (configuration blockers need an operator change).", reason)})
+	// The reason enumerates every missing recon milestone. Repeating
+	// near-identical walls of text on every reason change drowned the
+	// operator feed, and the in-memory latch was lost on every server
+	// restart so the wall re-appeared from scratch. Emit the full detail
+	// ONCE per scan lifetime (persisted via the scan record so resumes
+	// stay quiet), then keep change-triggered follow-ups to one line.
+	if !a.state.DelegationDeferDetailEmitted {
+		a.state.DelegationDeferDetailEmitted = true
+		a.emit(Event{Type: "message", Content: fmt.Sprintf("⏸️ Specialist wave deferred: %s. The wave launches automatically once the blocker clears (configuration blockers need an operator change).", reason)})
+		return
+	}
+	a.emit(Event{Type: "message", Content: "⏸️ Specialist wave still deferred: " + compactDeferReason(reason)})
+}
+
+// compactDeferReason shortens a defer reason to a single line for
+// follow-up notes. Rune-safe: the reasons contain non-ASCII punctuation.
+func compactDeferReason(reason string) string {
+	const maxRunes = 140
+	runes := []rune(reason)
+	if len(runes) <= maxRunes {
+		return reason
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 // reconPhaseComplete reports whether the comprehensive reconnaissance
@@ -1564,6 +1592,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 	// Initialize scan state for hooks (replaces 17+ local tracking variables)
 	a.state = NewScanState()
 	a.state.Iteration = a.initialIter
+	// A scan resumed after a server restart must not repeat the
+	// full-detail specialist-wave defer wall: the persisted record already
+	// displayed it.
+	if a.deferNoteSuppressed {
+		a.state.DelegationDeferDetailEmitted = true
+	}
 	if a.cfg != nil {
 		// Thread the configurable no-tool abort threshold (0 = never give up).
 		a.state.NoToolAbortLimit = a.cfg.NoToolAbortAt
@@ -2632,6 +2666,13 @@ func (a *Agent) SetInitialIteration(iter int) {
 // SetResumeBriefing sets a briefing summarizing prior state when resuming a scan. Call before Run().
 func (a *Agent) SetResumeBriefing(s string) {
 	a.resumeBriefing = strings.TrimSpace(s)
+}
+
+// SetDeferNoteDetailEmitted marks that the full-detail specialist-wave
+// defer note was already displayed in a previous process lifetime
+// (resume path): the current run emits only compact follow-up notes.
+func (a *Agent) SetDeferNoteDetailEmitted() {
+	a.deferNoteSuppressed = true
 }
 
 func (a *Agent) getIterationDelay() time.Duration {

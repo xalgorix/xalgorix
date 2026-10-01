@@ -320,6 +320,11 @@ func (s *Server) executeScanSession(sess *scanSession) {
 		if sess.record.Iterations > 0 {
 			agnt.SetInitialIteration(sess.record.Iterations)
 		}
+		if sess.record.DelegationDeferNoted {
+			// The full-detail specialist-wave defer note already displayed
+			// before the restart; resumed defer notes stay compact.
+			agnt.SetDeferNoteDetailEmitted()
+		}
 		if briefing := formatResumeBriefing(sess.record, sctx.ID); briefing != "" {
 			agnt.SetResumeBriefing(briefing)
 		}
@@ -571,6 +576,13 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 		TotalTokens: evt.TotalTokens,
 		Aborted:     evt.Aborted,
 		AbortReason: evt.AbortReason,
+	}
+
+	// Latch the full-detail specialist-wave defer diagnostic so a scan
+	// resumed after a server restart does not repeat the wall of text:
+	// it already displayed once in a previous process lifetime.
+	if evt.Type == "message" && strings.HasPrefix(evt.Content, "⏸️ Specialist wave deferred") && sess.record != nil {
+		sess.record.DelegationDeferNoted = true
 	}
 
 	if evt.Type == "tool_result" {

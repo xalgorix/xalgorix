@@ -376,25 +376,26 @@ type ScanState struct {
 	// SkillSuggestionsSent dedupes recommendations PER SKILL, not per scan:
 	// loading the SQLi skill must never suppress a later GraphQL or JWT
 	// recommendation for a different detected technology.
-	SkillSuggestionsSent        map[string]bool
-	DelegationAttempted         bool            // coordinator called spawn_agent/create_agent
-	DelegationEnabled           bool            // any specialist lane may run this scan; false = intentional single-agent mode (no waves, nudges, or reminders)
-	SingleAgentNoted            bool            // the one-time single-agent-mode notice was emitted
-	ReconGateBlocks             int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
-	DelegationDeferReason       string          // last specialist-wave defer reason, for change-triggered diagnostics
-	ReconLaneLaunched           bool            // engine launched the early recon-discovery lane
-	WaveLaunched                bool            // engine launched the testing specialist wave
-	DirBustingUsedWordlist      bool            // content discovery ran with a real wordlist (-w/--wordlist), not a single targeted probe
-	DelegationNudgeFired        bool            // multi-agent role decomposition nudge sent once
-	DelegationNudgeAt           int             // iteration of the initial decomposition nudge
-	DelegationReminders         int             // bounded reminders after ignored/malformed spawn calls
-	LedgerSeeded                bool            // hypothesis ledger seeded from the plan once
-	LastPlanBrief               string          // last plan brief injected into context; avoids duplicate injection when unchanged
-	PlanSurfaceRevision         string          // fingerprint of the surface the engine-authored plan was built from; a change triggers an engine-owned refresh
-	BrowserPreferenceNudgeCount int             // tracks whether browser preference warning was emitted for consecutive calls
-	AdvisoryLeadsNudged         map[string]bool // exact CVE/advisory leads already committed to the ledger
-	OASTVerificationNudged      map[string]bool // raw callback tokens already routed to class-aware verify_oob
-	OASTVerificationReminders   map[string]int  // bounded re-nudges when a positive poll is followed by more polling instead of verify_oob
+	SkillSuggestionsSent         map[string]bool
+	DelegationAttempted          bool            // coordinator called spawn_agent/create_agent
+	DelegationEnabled            bool            // any specialist lane may run this scan; false = intentional single-agent mode (no waves, nudges, or reminders)
+	SingleAgentNoted             bool            // the one-time single-agent-mode notice was emitted
+	ReconGateBlocks              int             // coordinator claim attempts blocked by the recon-first gate (bounded bypass)
+	DelegationDeferReason        string          // last specialist-wave defer reason, for change-triggered diagnostics
+	DelegationDeferDetailEmitted bool            // full-detail defer note emitted once; later defer changes emit compact one-line notes only
+	ReconLaneLaunched            bool            // engine launched the early recon-discovery lane
+	WaveLaunched                 bool            // engine launched the testing specialist wave
+	DirBustingUsedWordlist       bool            // content discovery ran with a real wordlist (-w/--wordlist), not a single targeted probe
+	DelegationNudgeFired         bool            // multi-agent role decomposition nudge sent once
+	DelegationNudgeAt            int             // iteration of the initial decomposition nudge
+	DelegationReminders          int             // bounded reminders after ignored/malformed spawn calls
+	LedgerSeeded                 bool            // hypothesis ledger seeded from the plan once
+	LastPlanBrief                string          // last plan brief injected into context; avoids duplicate injection when unchanged
+	PlanSurfaceRevision          string          // fingerprint of the surface the engine-authored plan was built from; a change triggers an engine-owned refresh
+	BrowserPreferenceNudgeCount  int             // tracks whether browser preference warning was emitted for consecutive calls
+	AdvisoryLeadsNudged          map[string]bool // exact CVE/advisory leads already committed to the ledger
+	OASTVerificationNudged       map[string]bool // raw callback tokens already routed to class-aware verify_oob
+	OASTVerificationReminders    map[string]int  // bounded re-nudges when a positive poll is followed by more polling instead of verify_oob
 }
 
 // NewScanState creates a zero-value ScanState with initialized maps.

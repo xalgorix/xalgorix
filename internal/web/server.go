@@ -536,9 +536,14 @@ type ScanRecord struct {
 	TotalTokens     int           `json:"total_tokens"`
 	Iterations      int           `json:"iterations"`
 	ToolCalls       int           `json:"tool_calls"`
-	CompanyName     string        `json:"company_name,omitempty"` // report branding: company name
-	LogoPath        string        `json:"logo_path,omitempty"`    // report branding: logo path
-	Phases          []int         `json:"phases,omitempty"`       // selected methodology phases
+	// DelegationDeferNoted records that the full-detail specialist-wave
+	// defer diagnostic already displayed once; a scan resumed after a
+	// server restart keeps emitting only the compact note instead of
+	// repeating the wall of text from scratch.
+	DelegationDeferNoted bool   `json:"delegation_defer_noted,omitempty"`
+	CompanyName          string `json:"company_name,omitempty"` // report branding: company name
+	LogoPath             string `json:"logo_path,omitempty"`    // report branding: logo path
+	Phases               []int  `json:"phases,omitempty"`       // selected methodology phases
 	// PhasesWorked is the set of phases the engine observed concrete evidence
 	// for (tool activity classified into a phase, or a phase the model worked
 	// in). A forward jump - e.g. a "phase 20" mention while the timeline is on

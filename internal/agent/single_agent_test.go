@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
@@ -901,5 +902,65 @@ func TestSingleAgent_SystemPromptHasNoCoordinatorSection(t *testing.T) {
 	)
 	if !strings.Contains(multiPrompt, "## Multi-Agent Coordinator") {
 		t.Fatal("delegation-enabled scans keep the multi-agent coordinator contract")
+	}
+}
+
+func TestNoteDelegationDeferEmitsDetailOnceThenCompact(t *testing.T) {
+	a := &Agent{events: make(chan Event, 8), state: NewScanState()}
+
+	// First defer: full detail, once.
+	a.noteDelegationDefer("comprehensive recon not complete (missing: item A, item B)")
+	evt := <-a.events
+	if !strings.Contains(evt.Content, "Specialist wave deferred") || !strings.Contains(evt.Content, "item A") {
+		t.Fatalf("first defer must emit the full detail, got: %q", evt.Content)
+	}
+	if !a.state.DelegationDeferDetailEmitted {
+		t.Fatal("detail latch must be set after the first emit")
+	}
+
+	// Identical reason: silent.
+	a.noteDelegationDefer("comprehensive recon not complete (missing: item A, item B)")
+	select {
+	case evt := <-a.events:
+		t.Fatalf("identical reason must stay silent, got: %q", evt.Content)
+	default:
+	}
+
+	// Changed reason: a single compact line, not the full wall again.
+	a.noteDelegationDefer("comprehensive recon not complete (missing: item A, item B, item C, item D, item E, item F, item G, item H, item I, item J, item K, item L, item M, item N, item O, item P, item Q, item R, item S, item T, item U, item V)")
+	evt = <-a.events
+	if !strings.Contains(evt.Content, "still deferred") {
+		t.Fatalf("follow-up must be a compact still-deferred note, got: %q", evt.Content)
+	}
+	if got := len([]rune(evt.Content)); got > 200 {
+		t.Fatalf("follow-up must stay one short line, got %d runes", got)
+	}
+
+	// A resumed agent (latch restored, as Run applies deferNoteSuppressed)
+	// never repeats the full-detail wall.
+	b := &Agent{events: make(chan Event, 8), state: NewScanState()}
+	b.state.DelegationDeferDetailEmitted = true
+	b.noteDelegationDefer("comprehensive recon not complete (missing: item A)")
+	evt = <-b.events
+	if strings.Contains(evt.Content, "The wave launches automatically once the blocker clears") {
+		t.Fatalf("resumed agent must not repeat the full-detail wall, got: %q", evt.Content)
+	}
+	if !strings.Contains(evt.Content, "still deferred") {
+		t.Fatalf("resumed agent must still surface the compact note, got: %q", evt.Content)
+	}
+}
+
+func TestCompactDeferReasonRuneSafe(t *testing.T) {
+	reason := strings.Repeat("é✓-", 100) // non-ASCII, > 140 runes
+	got := compactDeferReason(reason)
+	runes := []rune(got)
+	if len(runes) > 140 {
+		t.Fatalf("compactDeferReason returned %d runes, want <= 140", len(runes))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("compactDeferReason broke UTF-8")
+	}
+	if short := compactDeferReason("short reason"); short != "short reason" {
+		t.Fatalf("short reasons must pass through, got %q", short)
 	}
 }
