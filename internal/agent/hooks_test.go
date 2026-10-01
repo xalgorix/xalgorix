@@ -2072,3 +2072,101 @@ func TestDedupeBatchCalls(t *testing.T) {
 		t.Fatalf("third distinct call should be preserved, got %+v", got[2])
 	}
 }
+
+func TestHookTargetHealthDetectorCountsGateway5xx(t *testing.T) {
+	state := NewScanState()
+	for i := 0; i < 2; i++ {
+		hookTargetHealthDetector(state, map[string]string{
+			"tool_name": "terminal_execute",
+			"output":    "HTTP/1.1 503 Service Unavailable\nNo server is available to handle this request",
+		})
+	}
+	if state.ConsecutiveTargetErrors != 2 {
+		t.Fatalf("ConsecutiveTargetErrors = %d, want 2", state.ConsecutiveTargetErrors)
+	}
+	if state.TargetUnresponsiveSince.IsZero() {
+		t.Fatal("TargetUnresponsiveSince must be stamped on the first failure")
+	}
+	res := hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "STATUS:503",
+	})
+	if res.Nudge == "" {
+		t.Fatal("expected the unresponsive nudge on the 3rd consecutive failure")
+	}
+	if state.ConsecutiveTargetErrors != 3 {
+		t.Fatalf("ConsecutiveTargetErrors = %d, want 3", state.ConsecutiveTargetErrors)
+	}
+
+	// A healthy response clears the streak and the timestamp.
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/1.1 200 OK",
+	})
+	if state.ConsecutiveTargetErrors != 0 || !state.TargetUnresponsiveSince.IsZero() {
+		t.Fatalf("healthy response must clear the streak, got count=%d since=%v",
+			state.ConsecutiveTargetErrors, state.TargetUnresponsiveSince)
+	}
+}
+
+func TestHookTargetHealthDetectorMixedBatchesDoNotExtendStreak(t *testing.T) {
+	state := NewScanState()
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/1.1 503 Service Unavailable",
+	})
+	if state.ConsecutiveTargetErrors != 1 {
+		t.Fatalf("ConsecutiveTargetErrors = %d, want 1", state.ConsecutiveTargetErrors)
+	}
+	// A batch that also contains healthy 2xx responses is a flapping
+	// (overloaded but alive) target: neither extend nor clear the streak.
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "HTTP/1.1 503 Service Unavailable\nHTTP/1.1 200 OK",
+	})
+	if state.ConsecutiveTargetErrors != 1 {
+		t.Fatalf("mixed batch must not extend the streak, got %d", state.ConsecutiveTargetErrors)
+	}
+}
+
+func TestHookTargetHealthDetectorIgnoresLocalOnlyTools(t *testing.T) {
+	state := NewScanState()
+	for i := 0; i < 5; i++ {
+		hookTargetHealthDetector(state, map[string]string{
+			"tool_name": "read_notes",
+			"output":    "HTTP/1.1 503 Service Unavailable\nconnection refused",
+		})
+	}
+	if state.ConsecutiveTargetErrors != 0 {
+		t.Fatalf("local-only tool output must not feed target-health streaks, got %d",
+			state.ConsecutiveTargetErrors)
+	}
+}
+
+func TestHookTargetHealthDetectorBareStatusCodeShapes(t *testing.T) {
+	state := NewScanState()
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "[503] /admin",
+	})
+	if state.ConsecutiveTargetErrors != 1 {
+		t.Fatalf("bracketed 503 must count, got %d", state.ConsecutiveTargetErrors)
+	}
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "GET /x -> 502 (bytes=99)",
+	})
+	if state.ConsecutiveTargetErrors != 2 {
+		t.Fatalf("arrow 502 must count, got %d", state.ConsecutiveTargetErrors)
+	}
+	// A response size that merely equals 503 must NOT count as a failure.
+	state = NewScanState()
+	hookTargetHealthDetector(state, map[string]string{
+		"tool_name": "terminal_execute",
+		"output":    "size_download=503",
+	})
+	if state.ConsecutiveTargetErrors != 0 {
+		t.Fatalf("bare size 503 must not count as target failure, got %d",
+			state.ConsecutiveTargetErrors)
+	}
+}

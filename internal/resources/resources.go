@@ -7,6 +7,7 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -631,22 +632,52 @@ func AcquireToolLease(isHeavy bool, maxWait time.Duration, toolName string) (*To
 		ctx, cancel = context.WithTimeout(ctx, maxWait)
 		defer cancel()
 	}
-	lease, err := acquireToolLeaseWithContext(ctx, isHeavy, toolName, toolLeasePollInterval)
+	lease, err := acquireToolLeaseWithContext(ctx, isHeavy, toolName, toolLeasePollInterval, maxWait)
 	return lease, err == nil
 }
 
+// ErrToolLeaseWaitTimeout is wrapped into the error returned by the lease
+// acquire functions when launch capacity could not be obtained within the
+// bounded lease-wait window. Callers use errors.Is on it to distinguish a
+// saturated or wedged launch queue from a canceled scan.
+var ErrToolLeaseWaitTimeout = errors.New("tool lease wait timeout")
+
+// DefaultToolLeaseMaxWait bounds how long one subprocess launch may sit in
+// the tool lease queue before it is returned as a typed throttle failure.
+//
+// The predecessor semantics ("block until capacity is available") made the
+// wait unbounded: a wedged lease holder or a stuck resource-pressure level
+// froze EVERY subsequent terminal_execute/python_action/browser_action
+// call. Commands queued pre-launch are outside the per-command timeout
+// (that starts only after launch), so even trivial commands sat until the
+// agent-level hard-timeout force-return — observed burning 65 minutes per
+// attempt, repeatedly, for hours. Ten minutes is far above normal fleet
+// queueing while guaranteeing a fast, typed failure the agent can act on.
+const DefaultToolLeaseMaxWait = 10 * time.Minute
+
 // AcquireToolLeaseContext reserves live CPU/RAM headroom for one subprocess.
-// Unlike the legacy maxWait API, this never refuses purely because the system
-// stayed busy for a fixed number of seconds. It blocks until capacity is
-// available or until the caller's context is canceled.
+// It blocks until capacity is available, the caller's context is canceled,
+// or DefaultToolLeaseMaxWait elapses (in which case the returned error wraps
+// ErrToolLeaseWaitTimeout). It never refuses purely because the system
+// stayed busy for a shorter period — ten minutes of sustained saturation is
+// treated as a launch-path failure, not a reason to queue forever.
 func AcquireToolLeaseContext(ctx context.Context, isHeavy bool, toolName string) (*ToolLease, error) {
+	return AcquireToolLeaseContextMaxWait(ctx, isHeavy, toolName, DefaultToolLeaseMaxWait)
+}
+
+// AcquireToolLeaseContextMaxWait is AcquireToolLeaseContext with an explicit
+// lease-wait bound. A maxWait <= 0 selects DefaultToolLeaseMaxWait.
+func AcquireToolLeaseContextMaxWait(ctx context.Context, isHeavy bool, toolName string, maxWait time.Duration) (*ToolLease, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return acquireToolLeaseWithContext(ctx, isHeavy, toolName, toolLeasePollInterval)
+	if maxWait <= 0 {
+		maxWait = DefaultToolLeaseMaxWait
+	}
+	return acquireToolLeaseWithContext(ctx, isHeavy, toolName, toolLeasePollInterval, maxWait)
 }
 
-func acquireToolLeaseWithContext(ctx context.Context, isHeavy bool, toolName string, pollInterval time.Duration) (*ToolLease, error) {
+func acquireToolLeaseWithContext(ctx context.Context, isHeavy bool, toolName string, pollInterval time.Duration, maxWait time.Duration) (*ToolLease, error) {
 	if pollInterval <= 0 {
 		pollInterval = time.Second
 	}
@@ -655,6 +686,10 @@ func acquireToolLeaseWithContext(ctx context.Context, isHeavy bool, toolName str
 	startedWaiting := time.Now()
 	lastLog := startedWaiting
 	var lastReason string
+	var deadline time.Time
+	if maxWait > 0 {
+		deadline = startedWaiting.Add(maxWait)
+	}
 
 	for {
 		lease, reason := tryAcquireToolLease(isHeavy, toolLabel)
@@ -665,6 +700,14 @@ func acquireToolLeaseWithContext(ctx context.Context, isHeavy bool, toolName str
 			return lease, nil
 		}
 		lastReason = reason
+
+		// Bounded lease wait (circuit-breaker backstop): return a typed
+		// failure instead of queueing forever when the launch path cannot
+		// free capacity within the allowed window.
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("gave up waiting for launch capacity for %s after %s — %s: %w",
+				toolLabel, time.Since(startedWaiting).Round(time.Second), lastReason, ErrToolLeaseWaitTimeout)
+		}
 
 		if !waited {
 			log.Printf("[THROTTLE] Queueing %s until resources recover — %s", toolLabel, reason)

@@ -1158,11 +1158,16 @@ func ensureVenv() {
 
 	// Check if venv exists
 	if _, err := os.Stat(venvPath); os.IsNotExist(err) {
-		// Create venv
+		// Create venv. Bounded: this runs on EVERY terminal_execute
+		// pre-launch (before any per-command timeout applies), so an
+		// unbounded cmd.Run() here would wedge every command if
+		// `python3 -m venv` hangs.
 		fmt.Println("Creating Python virtual environment at ~/venv...")
-		cmd := exec.Command("python3", "-m", "venv", venvPath)
+		venvCtx, venvCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer venvCancel()
+		cmd := exec.CommandContext(venvCtx, "python3", "-m", "venv", venvPath)
 		if err := cmd.Run(); err != nil {
-			log.Printf("Warning: failed to create Python venv at %s: %v", venvPath, err)
+			log.Printf("Warning: failed to create Python venv at %s within 2m: %v", venvPath, err)
 		}
 	}
 }
@@ -1453,6 +1458,9 @@ func runShellInternal(contextID string, command string) (string, int) {
 	waitCtx := commandWaitContext(contextID)
 	lease, err := resources.AcquireToolLeaseContext(waitCtx, heavy, toolLabel)
 	if err != nil {
+		if errors.Is(err, resources.ErrToolLeaseWaitTimeout) {
+			return commandNotice + fmt.Sprintf("[THROTTLE] Could not launch %q within %s: %v. The tool launch queue stayed saturated — a previous command may still hold resources, or system pressure did not recover. Retry with a lighter/shorter command; if this keeps happening the exec channel is wedged: record a typed disposition instead of queuing more long commands.", toolLabel, resources.DefaultToolLeaseMaxWait, err), -1
+		}
 		return commandNotice + fmt.Sprintf("[CANCELED] Tool launch canceled before starting %q: %v", toolLabel, err), -1
 	}
 	defer lease.Release()

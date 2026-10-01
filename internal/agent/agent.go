@@ -96,6 +96,55 @@ func (a *Agent) hardTimeoutFor(tool string) time.Duration {
 	return defaultToolHardTimeout
 }
 
+// ▬▬ Exec-channel circuit breaker ▬▬
+//
+// Reaching the agent-level hard timeout is pathological for exec-channel
+// tools: terminal_execute enforces its own per-command ceiling (10m default,
+// 60m heavy, plus stream/kill grace), so the force-return only fires when
+// the tool layer itself is stuck — e.g. commands queued pre-launch on an
+// exhausted resource lease (now bounded at resources.DefaultToolLeaseMaxWait)
+// or a backend that stopped returning results. Observed in production: a
+// wedged channel returned "[TIMEOUT exceeded 1h5m0s]" for even `echo hi`,
+// twelve times in a row, burning ~5.5h of one scan session with the model
+// blindly retrying. The breaker degrades subsequent exec calls to a short
+// ceiling so each further attempt costs minutes, not hours, and quick
+// health-probe commands still succeed against a healthy channel (which
+// resets the breaker immediately).
+const (
+	// execChannelBreakerThreshold is the number of consecutive exec-tool
+	// hard-timeouts after which the exec channel is presumed unhealthy.
+	execChannelBreakerThreshold = 2
+
+	// execChannelDegradedTimeout replaces the per-tool hard ceiling for exec
+	// tools while the breaker is open. Long-running commands will fail
+	// inside this window; that is the point — a wedged channel must not be
+	// fed 65-minute timeouts, and a healthy one resets the breaker on the
+	// first success.
+	execChannelDegradedTimeout = 3 * time.Minute
+)
+
+// targetUnresponsiveKillThreshold is how long a continuous
+// target-unresponsive streak may persist before the Run loop ends the
+// scan with a typed "target_unresponsive" finish reason.
+// hookTargetHealthDetector stamps state.TargetUnresponsiveSince at the
+// first failure of a streak and clears it on the first healthy response;
+// the kill additionally requires ConsecutiveTargetErrors >= 3 so a
+// single blip followed by local-only work can never end a scan.
+// Production cases: scans kept probing a dead target ("502 Bad
+// Gateway" / "503 Service Unavailable — No server is available to
+// handle this request") for 21–32 hours with zero progress.
+const targetUnresponsiveKillThreshold = 15 * time.Minute
+
+// isExecChannelTool reports whether a tool runs subprocesses through the
+// shared terminal/lease launch path that the exec-channel breaker guards.
+func isExecChannelTool(name string) bool {
+	switch name {
+	case "terminal_execute", "python_action":
+		return true
+	}
+	return false
+}
+
 // Event represents an agent event (for UI updates).
 type Event struct {
 	Type        string // "thinking", "tool_call", "tool_result", "message", "error", "finished"
@@ -192,6 +241,15 @@ type Agent struct {
 	lastBudgetTokens   int
 	compactionCount    int
 	rateLimitBackoffFn func(int) time.Duration
+
+	// execTimeoutStreak counts consecutive exec-channel tools
+	// (terminal_execute/python_action) that hit the agent-level hard-timeout
+	// force-return. It backs the exec-channel circuit breaker (see
+	// execChannelBreakerThreshold): reaching the hard cap is pathological by
+	// definition — the terminal tool enforces its own lower per-command
+	// ceilings — so repeated hits mean the launch/exec backend is wedged.
+	// Any successful exec result resets the streak.
+	execTimeoutStreak atomic.Int32
 }
 
 // AgentOption configures optional behavior on a *Agent. The
@@ -1398,15 +1456,29 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (r
 	// per-tool ceiling plus a 30-second grace so even tools that ignore
 	// their own ctx still terminate. We derive from a.ctx so parent
 	// cancellation propagates as well.
+	//
+	// Exec-channel breaker: once consecutive exec tools have hit the hard
+	// cap (only possible when the exec backend is wedged), shrink the
+	// ceiling so a dead channel cannot burn the full 65 minutes per call.
 	hardTimeoutDuration := a.hardTimeoutFor(toolName)
+	degradedExecChannel := false
+	if isExecChannelTool(toolName) && int(a.execTimeoutStreak.Load()) >= execChannelBreakerThreshold {
+		hardTimeoutDuration = execChannelDegradedTimeout
+		degradedExecChannel = true
+	}
 	tcCtx, tcCancel := context.WithTimeout(a.ctx, hardTimeoutDuration+30*time.Second)
 	defer tcCancel()
 
 	for {
 		select {
 		case res := <-resultCh:
-			// Tool completed — update activity and return immediately
+			// Tool completed — update activity and return immediately.
+			// A promptly returning exec tool proves the launch path is
+			// healthy again: reset the exec-channel breaker.
 			a.touchActivity()
+			if isExecChannelTool(toolName) {
+				a.execTimeoutStreak.Store(0)
+			}
 			return res.Result, res.Err
 
 		case <-heartbeat.C:
@@ -1419,11 +1491,20 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (r
 			// when our own deadline elapses it is context.DeadlineExceeded.
 			if tcCtx.Err() == context.DeadlineExceeded {
 				a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ Tool '%s' timed out after %s. Force-returning to prevent infinite hang.", toolName, hardTimeoutDuration)})
+				if isExecChannelTool(toolName) {
+					streak := int(a.execTimeoutStreak.Add(1))
+					if streak == execChannelBreakerThreshold {
+						a.emit(Event{Type: "error", Content: fmt.Sprintf("⛔ EXEC-CHANNEL CIRCUIT BREAKER OPEN: %d consecutive exec tools hit the hard timeout — the execution backend is not returning results (a healthy channel never reaches this cap: terminal commands enforce their own, lower ceilings). terminal_execute/python_action calls are now capped at %s per call until one succeeds. If quick commands also fail, stop retrying: record a typed disposition for the remaining lane work, finish, and restart the scan/worker instead of queuing more commands.", streak, execChannelDegradedTimeout)})
+					}
+				}
 				switch toolName {
 				case "terminal_execute", "python_action":
 					a.scanCtx.Terminal.KillAll()
 				case "browser_action":
 					browser.CleanupContext(a.scanCtx.ID)
+				}
+				if degradedExecChannel {
+					return tools.Result{Error: fmt.Sprintf("[TIMEOUT exceeded %s] Exec channel is in degraded mode after consecutive hard timeouts — the execution backend is not returning results. Do not queue more long commands; record a typed disposition (blocked) for the remaining lane work and finish, or report the environment failure.", hardTimeoutDuration)}, nil
 				}
 				return tools.Result{Error: fmt.Sprintf("[TIMEOUT exceeded %s]", hardTimeoutDuration)}, nil
 			}
@@ -2190,6 +2271,35 @@ func (a *Agent) Run(targets []string, instruction string) {
 				a.msgMu.Lock()
 				a.messages = append(a.messages, llm.Message{Role: "user", Content: toolResultHook.Nudge})
 				a.msgMu.Unlock()
+			}
+
+			// ── Sustained target-unresponsive breaker ──
+			// The health hook stamps state.TargetUnresponsiveSince at the
+			// first failure of a consecutive streak and clears it on any
+			// healthy response. A target that stayed unreachable or down
+			// behind its load balancer for the whole window will not recover
+			// by scanning harder; continuing only burns LLM and scan budget
+			// (observed: scans probing a dead target for 21–32 hours). End
+			// the scan with a typed finish reason so the UI shows WHY it
+			// stopped instead of an endless "running" scan.
+			if !a.state.TargetUnresponsiveSince.IsZero() &&
+				time.Since(a.state.TargetUnresponsiveSince) > targetUnresponsiveKillThreshold &&
+				a.state.ConsecutiveTargetErrors >= 3 {
+				downFor := time.Since(a.state.TargetUnresponsiveSince).Round(time.Minute)
+				detail := fmt.Sprintf(
+					"Agent stopped before clean completion: the target was unreachable or returning gateway failures (connection refused / timeout / 502 / 503 / 504) continuously for %s across %d consecutive failed requests. Existing findings are preserved; re-run the scan once the target recovers.",
+					downFor, a.state.ConsecutiveTargetErrors)
+				a.emit(Event{Type: "error", Content: "⛔ TARGET UNRESPONSIVE: " + detail, TotalTokens: tokenCount()})
+				safe.IncWatchdogKill()
+				log.Printf("[watchdog] WARN kill scan=%s down_for=%s consecutive_failures=%d reason=target_unresponsive",
+					a.scanCtx.ID, downFor, a.state.ConsecutiveTargetErrors)
+				a.stopped.Store(true)
+				if a.cancel != nil {
+					a.cancel()
+				}
+				a.scanCtx.Terminal.KillAll()
+				a.emit(Event{Type: "finished", Content: detail, TotalTokens: tokenCount(), Aborted: true, AbortReason: "target_unresponsive"})
+				return
 			}
 
 			// ── Hook: OnFinishAttempt ──

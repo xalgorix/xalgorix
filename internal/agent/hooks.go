@@ -206,11 +206,18 @@ type ScanState struct {
 	ConsecutiveBrowser         int
 	ConsecutiveSearch          int
 	ConsecutiveErrors          int
-	ConsecutiveTargetErrors    int // consecutive host-unreachable/connection-refused errors
+	ConsecutiveTargetErrors    int // consecutive host-unreachable/connection-refused/gateway-5xx errors
 	ConsecutiveRateLimitErrors int // consecutive 429 rate-limit / WAF block errors
-	EmptyResponseCount         int
-	NoToolCount                int
-	RefusalCount               int // consecutive responses that look like a model-side safety refusal
+	// TargetUnresponsiveSince stamps the first failure of the current
+	// consecutive target-unresponsive streak and is cleared on the first
+	// healthy response. The Run loop ends the scan with a typed
+	// "target_unresponsive" finish reason when the streak persists past
+	// targetUnresponsiveKillThreshold, so a dead target (e.g. 502/503 from
+	// its load balancer) cannot keep a scan running for hours.
+	TargetUnresponsiveSince time.Time
+	EmptyResponseCount      int
+	NoToolCount             int
+	RefusalCount            int // consecutive responses that look like a model-side safety refusal
 	// MalformedToolOutputCount counts protocol-corrupt responses since the
 	// last successfully parsed tool call. Unlike ordinary prose-only turns,
 	// these contain leaked provider control tokens or broken tool markup and
@@ -2164,8 +2171,42 @@ func extractLocationHeader(raw string) string {
 }
 
 // ── hookTargetHealthDetector ──────────────────────────────────────────────────
-// Detects target network failures, host offline events, and IP bans mid-scan.
+// Detects target network failures, host offline events, gateway-down (5xx)
+// events, and IP bans mid-scan.
+// targetDownCodePattern matches tool-result shapes carrying a bare
+// 502/503/504 status code from curl's many -w formatting variants:
+// STATUS:503, HTTP=503, HTTP: 503, code=503, -> 503, [503]. Deliberately
+// anchored to a status keyword, arrow, or bracket so response sizes and
+// byte counts that merely equal 502/503/504 do not match.
+var targetDownCodePattern = regexp.MustCompile(`(?:status|http|code)[=:\s]+50[234]\b|->\s*50[234]\b|\[\s*50[234]\s*\]`)
+
+// targetHealthyCodePattern matches the same shapes for 2xx status codes
+// plus "200 ok", used to recognize a flapping batch that contains BOTH
+// gateway failures and healthy responses: such a batch neither extends
+// nor clears the unresponsive streak.
+var targetHealthyCodePattern = regexp.MustCompile(`(?:status|http|code)[=:\s]+2\d\d\b|->\s*2\d\d\b|\[\s*2\d\d\s*\]|http/1\.[01]\s+2\d\d|http/2\s+2\d\d|200 ok`)
+
+// localOnlyTools never interact with the scan target. Their results
+// often echo or discuss target text (notes, ledger entries, archived
+// outputs, skill docs) and must not feed the target-health streaks.
+var localOnlyTools = map[string]bool{
+	"read_notes": true, "add_note": true,
+	"read_skill": true, "list_skills": true, "search_skills": true,
+	"web_search": true, "cve_search": true, "exploit_search": true, "code_search": true,
+	"record_hypothesis": true, "add_hypothesis_evidence": true, "update_hypothesis": true,
+	"read_ledger": true, "claim_next_hypothesis": true,
+	"build_plan": true, "update_plan": true,
+	"create_agent": true, "spawn_agent": true, "check_agent": true, "wait_agent": true,
+	"report_vulnerability": true, "submit_verdict": true, "finish": true,
+	"str_replace_editor": true, "list_files": true, "search_files": true,
+	"read_tool_output": true, "scan_source_sinks": true, "scan_source_routes": true,
+	"ingest_har": true, "agentmail": true,
+}
+
 func hookTargetHealthDetector(state *ScanState, args map[string]string) HookResult {
+	if localOnlyTools[strings.TrimSpace(args["tool_name"])] {
+		return HookResult{}
+	}
 	output := strings.ToLower(args["output"])
 	errorMsg := strings.ToLower(args["error"])
 	combined := output + " " + errorMsg
@@ -2177,6 +2218,23 @@ func hookTargetHealthDetector(state *ScanState, args map[string]string) HookResu
 		"curl: (7) failed to connect", "curl: (6) could not resolve host",
 	}
 
+	// Gateway-level unavailability: the balancer/proxy answers the TCP
+	// connection but no backend serves requests — HAProxy/nginx
+	// "503 Service Unavailable — No server is available to handle this
+	// request", "502 Bad Gateway", "504 Gateway Time-out", Cloudflare
+	// 521/522. Without this class the old detector saw the 503 status
+	// line as an ordinary HTTP response and RESET the failure streak,
+	// letting scans run for 20+ hours against a dead target.
+	gatewayFailures := []string{
+		"503 service unavailable", "service unavailable", "no server is available",
+		"502 bad gateway", "bad gateway",
+		"504 gateway time-out", "504 gateway timeout", "gateway time-out", "gateway timeout",
+		"web server is down", "web server returned an unknown error",
+		"http/1.0 502", "http/1.0 503", "http/1.0 504",
+		"http/1.1 502", "http/1.1 503", "http/1.1 504",
+		"http/2 502", "http/2 503", "http/2 504",
+	}
+
 	isHealthFailure := false
 	for _, failSignal := range healthFailures {
 		if strings.Contains(combined, failSignal) {
@@ -2184,15 +2242,40 @@ func hookTargetHealthDetector(state *ScanState, args map[string]string) HookResu
 			break
 		}
 	}
+	if !isHealthFailure {
+		for _, failSignal := range gatewayFailures {
+			if strings.Contains(combined, failSignal) {
+				isHealthFailure = true
+				break
+			}
+		}
+	}
+	if !isHealthFailure && targetDownCodePattern.MatchString(combined) {
+		isHealthFailure = true
+	}
 
 	if isHealthFailure {
-		state.ConsecutiveTargetErrors++
-		if state.ConsecutiveTargetErrors == 3 {
-			return HookResult{
-				Nudge: `⚠️ TARGET UNREACHABLE / IP BAN ALERT: The target host stopped responding across 3 consecutive calls (connection refused / timeout / unreachable).
-Verify if the target application went offline, or if your client IP was banned by a firewall.
-If the host is unreachable, document what was tested in notes (add_note) and finish the scan gracefully.`,
-				EmitMessage: "⚠️ TARGET OFFLINE OR IP BANNED: Target host stopped responding across 3 consecutive requests.",
+		// A batch that ALSO contains healthy 2xx responses is a flapping
+		// (overloaded but alive) target: neither extend nor clear the
+		// streak so the kill logic ignores it while a truly dead target
+		// (every response failing) still trips it.
+		if !targetHealthyCodePattern.MatchString(combined) {
+			state.ConsecutiveTargetErrors++
+			if state.TargetUnresponsiveSince.IsZero() {
+				state.TargetUnresponsiveSince = time.Now()
+			}
+			if state.ConsecutiveTargetErrors == 3 {
+				return HookResult{
+					Nudge: `⚠️ TARGET UNREACHABLE / DOWN ALERT: The target stopped responding across 3 consecutive calls (connection refused / timeout / gateway errors such as "502 Bad Gateway" or "503 Service Unavailable — No server is available to handle this request").
+Verify whether the target application went offline, its backend is down behind the load balancer, or your client IP was banned by a firewall.
+If the host stays unreachable, document what was tested in notes (add_note) and finish the scan gracefully — the engine ends the scan automatically if the target stays unresponsive.`,
+					EmitMessage: "⚠️ TARGET OFFLINE, GATEWAY-DOWN, OR IP BANNED: Target stopped responding across 3 consecutive requests.",
+				}
+			}
+			if state.ConsecutiveTargetErrors > 3 && state.ConsecutiveTargetErrors%5 == 0 {
+				return HookResult{
+					EmitMessage: fmt.Sprintf("⚠️ Target still unresponsive: %d consecutive failed responses. The engine ends the scan automatically if this persists.", state.ConsecutiveTargetErrors),
+				}
 			}
 		}
 	} else if strings.Contains(combined, "429 too many requests") || strings.Contains(combined, "rate limit exceeded") || strings.Contains(combined, "http/1.1 429") || strings.Contains(combined, "http/2 429") || strings.Contains(combined, "429 rate limit") {
@@ -2200,6 +2283,7 @@ If the host is unreachable, document what was tested in notes (add_note) and fin
 	} else if strings.Contains(combined, "http/") || strings.Contains(combined, "200 ok") || strings.Contains(combined, "301") || strings.Contains(combined, "302") || strings.Contains(combined, "404") {
 		state.ConsecutiveTargetErrors = 0
 		state.ConsecutiveRateLimitErrors = 0
+		state.TargetUnresponsiveSince = time.Time{}
 	}
 
 	return HookResult{}
@@ -3115,7 +3199,7 @@ func classifyNoToolAbort(state *ScanState) (reason, detail string) {
 		return "target_rate_limited", "Agent stopped before clean completion: target active rate-limiting / HTTP 429 was detected across multiple probe attempts. Findings collected up to the rate limit are preserved."
 	}
 	if state != nil && state.ConsecutiveTargetErrors >= 3 {
-		return "target_unreachable_or_banned", "Agent stopped before clean completion: target host unresponsive or client IP blocked (connection refused / timeout across 3+ consecutive requests). Existing findings are preserved."
+		return "target_unreachable_or_banned", "Agent stopped before clean completion: target host unresponsive, down behind its load balancer (502/503/504), or client IP blocked (connection refused / timeout / gateway errors across 3+ consecutive requests). Existing findings are preserved."
 	}
 	if state != nil && state.RefusalCount >= 3 {
 		return "llm_safety_refusal", "Agent stopped incomplete: model safety refusal detected. Switch to an authorized security-testing model to continue full probing."

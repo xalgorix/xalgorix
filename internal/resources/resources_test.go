@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -370,7 +371,7 @@ func TestAcquireToolLeaseContextAllowsLightToolUnderHighCPUPressure(t *testing.T
 	activeHeavyToolLeases = 0
 	resourceMu.Unlock()
 
-	lease, err := acquireToolLeaseWithContext(context.Background(), false, "curl", time.Millisecond)
+	lease, err := acquireToolLeaseWithContext(context.Background(), false, "curl", time.Millisecond, 0)
 	if err != nil {
 		t.Fatalf("light pressure-slot acquisition failed: %v", err)
 	}
@@ -399,7 +400,7 @@ func TestAcquireToolLeaseContextCancelsInsteadOfRefusing(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
-	lease, err := acquireToolLeaseWithContext(ctx, true, "nuclei", time.Millisecond)
+	lease, err := acquireToolLeaseWithContext(ctx, true, "nuclei", time.Millisecond, 0)
 	if lease != nil {
 		lease.Release()
 		t.Fatal("unexpected heavy-tool lease under critical pressure")
@@ -409,6 +410,37 @@ func TestAcquireToolLeaseContextCancelsInsteadOfRefusing(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(err.Error()), "refus") {
 		t.Fatalf("resource wait should cancel, not refuse: %v", err)
+	}
+}
+
+func TestAcquireToolLeaseContextBoundedWaitReturnsTypedTimeout(t *testing.T) {
+	oldTotal := activeToolLeases
+	oldHeavy := activeHeavyToolLeases
+	t.Cleanup(func() {
+		resourceMu.Lock()
+		activeToolLeases = oldTotal
+		activeHeavyToolLeases = oldHeavy
+		resourceMu.Unlock()
+	})
+
+	// Saturate the launch queue so no lease can be granted.
+	resourceMu.Lock()
+	activeToolLeases = 1 << 20
+	activeHeavyToolLeases = 1 << 20
+	resourceMu.Unlock()
+
+	// A bounded wait must fail fast with the typed sentinel error
+	// (ErrToolLeaseWaitTimeout) instead of queueing forever.
+	lease, err := acquireToolLeaseWithContext(context.Background(), false, "curl", time.Millisecond, 10*time.Millisecond)
+	if lease != nil {
+		lease.Release()
+		t.Fatal("unexpected lease while the launch queue is saturated")
+	}
+	if err == nil {
+		t.Fatal("expected a typed error when the bounded lease wait expires")
+	}
+	if !errors.Is(err, ErrToolLeaseWaitTimeout) {
+		t.Fatalf("expected ErrToolLeaseWaitTimeout in the error chain, got: %v", err)
 	}
 }
 

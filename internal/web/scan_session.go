@@ -473,6 +473,10 @@ func (s *Server) executeScanSession(sess *scanSession) {
 			return
 		}
 		// (a) findings exist or testing was performed → fall through to a normal "finished" completion.
+		// Persist the typed abort reason on the record so the UI can always
+		// show WHY the scan ended (e.g. target_unresponsive), even when the
+		// scan counts as completed because findings were produced.
+		sess.record.StopReason = sess.abortReason
 		log.Printf("[SCAN] %s: agent stopped calling tools (%s) after testing (phase %d, %d tool calls); recording as completed with report intact",
 			sess.id, sess.abortReason, sess.record.CurrentPhase, sess.record.ToolCalls)
 	}
