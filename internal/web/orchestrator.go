@@ -1053,6 +1053,10 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			return
 		}
 		parentRecord = discoverySess.record
+		if parentRecord != nil {
+			discovery := subScanSummaryFromRecord(parentRecord)
+			parentRecord.Discovery = &discovery
+		}
 
 		// Capture the discovery session's context ID for notes lookup.
 		// The sctx was set during executeScanSession and its notes were preserved.
@@ -1119,13 +1123,14 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		// survive it - an explicit resource limit must never drop the host
 		// the operator actually asked for. Order-stable and idempotent
 		// across a resume rebuild.
-		kept := subdomains[:wildcardLimit:wildcardLimit]
-		for _, entry := range subdomains[wildcardLimit:] {
-			if isMandatoryWildcardEntry(entry, wt) {
-				kept = append(kept, entry)
-			}
+		var existing []SubScanSummary
+		if parentRecord != nil {
+			existing = parentRecord.SubScans
 		}
-		skipped := len(subdomains) - len(kept)
+		kept, skipped := capWildcardInventory(subdomains, wildcardLimit, resumeFromSubIndex, wt, existing)
+		if parentRecord != nil {
+			parentRecord.SubScanSkipped += skipped
+		}
 		subdomains = kept
 		log.Printf("[wildcard] Explicitly capped full subdomain scans at %d; skipping %d discovered candidates (XALGORIX_MAX_WILDCARD_SUBDOMAINS); mandatory targets retained", len(kept), skipped)
 		s.broadcastToInstance(req.InstanceID, WSEvent{
@@ -1171,6 +1176,10 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		parentRecord.SubScanRunning = 0
 		parentRecord.SubScanRemaining = len(subdomains) - resumeFromSubIndex
 		parentRecord.Status = "running"
+		parentRecord.FinishedAt = ""
+		parentRecord.StopReason = ""
+		s.refreshWildcardAssessmentChildren(parentRecord)
+		aggregateWildcardAssessment(parentRecord)
 		s.saveScanRecordTo(parentRecord, scanDir)
 		s.mirrorWildcardProgress(req.InstanceID, parentRecord)
 	}
@@ -1248,6 +1257,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			parentRecord.SubScanRunning = running
 			parentRecord.SubScanRemaining = len(subdomains) - completed - running
 			parentRecord.Status = "running"
+			aggregateWildcardAssessment(parentRecord)
 			s.instancesMu.RLock()
 			inst := s.instances[req.InstanceID]
 			s.instancesMu.RUnlock()
@@ -1396,8 +1406,7 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			// stays "failed"; anything else counts as a completed assessment.
 			childOutcome = wildcardChildOutcome(subSess.record)
 			if subSess.record != nil && parentRecord != nil && j < len(parentRecord.SubScans) {
-				parentRecord.SubScans[j].VulnCount = len(subSess.record.Vulns)
-				parentRecord.SubScans[j].TotalTokens = subSess.record.TotalTokens
+				parentRecord.SubScans[j] = subScanSummaryFromRecord(subSess.record)
 			}
 
 			// Generate PDF for this subdomain if NEW vulnerabilities found
@@ -1488,6 +1497,9 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			parentRecord.Status = "finished"
 		}
 		parentRecord.FinishedAt = time.Now().Format(time.RFC3339)
+		// Interrupted children finalize before this point; recover their saved
+		// assessments without replaying work or consulting the shared instance.
+		s.refreshWildcardAssessmentChildren(parentRecord)
 		normalizeTerminalWildcardProgress(parentRecord)
 		s.instancesMu.RLock()
 		inst := s.instances[req.InstanceID]

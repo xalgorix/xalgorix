@@ -51,7 +51,16 @@ export interface WSEvent {
   current_phase?: number;
 }
 
-export interface ScanInstance {
+export interface AssessmentOutcome {
+  completion?: "full" | "partial";
+  plan_present?: boolean;
+  plan_tasks_total?: number;
+  plan_tasks_completed?: number;
+  plan_tasks_skipped?: number;
+  plan_tasks_unfinished?: number;
+}
+
+export interface ScanInstance extends AssessmentOutcome {
   id: string;
   name?: string;
   targets: string;
@@ -76,9 +85,16 @@ export interface ScanInstance {
   current_phase?: number;
   phase_status?: Record<string, string>;
   phases_worked?: number[];
+  sub_scans?: SubScanSummary[];
+  sub_scan_total?: number;
+  sub_scan_completed?: number;
+  sub_scan_running?: number;
+  sub_scan_remaining?: number;
+  discovery?: SubScanSummary;
+  sub_scan_skipped?: number;
 }
 
-export interface SubScanSummary {
+export interface SubScanSummary extends AssessmentOutcome {
   id: string;
   target: string;
   started_at?: string;
@@ -86,9 +102,10 @@ export interface SubScanSummary {
   status: string;
   vuln_count: number;
   total_tokens: number;
+  stop_reason?: string;
 }
 
-export interface ScanRecord {
+export interface ScanRecord extends AssessmentOutcome {
   id: string;
   instance_id?: string;
   name?: string;
@@ -132,6 +149,8 @@ export interface ScanRecord {
   sub_scan_completed?: number;
   sub_scan_running?: number;
   sub_scan_remaining?: number;
+  discovery?: SubScanSummary;
+  sub_scan_skipped?: number;
 }
 
 /** One page of a scan's event log, from GET /api/scans/{id}/events. */

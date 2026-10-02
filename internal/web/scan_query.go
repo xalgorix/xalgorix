@@ -565,6 +565,8 @@ func (s *Server) scanRecordFromInstance(inst *ScanInstance) *ScanRecord {
 		SubScanCompleted:         inst.SubScanCompleted,
 		SubScanRunning:           inst.SubScanRunning,
 		SubScanRemaining:         inst.SubScanRemaining,
+		Discovery:                cloneSubScanSummary(inst.Discovery),
+		SubScanSkipped:           inst.SubScanSkipped,
 		WorkStarted:              inst.WorkStarted,
 	}
 }
@@ -587,6 +589,13 @@ func (s *Server) mirrorWildcardProgress(instanceID string, rec *ScanRecord) {
 		inst.SubScanCompleted = rec.SubScanCompleted
 		inst.SubScanRunning = rec.SubScanRunning
 		inst.SubScanRemaining = rec.SubScanRemaining
+		inst.Discovery = cloneSubScanSummary(rec.Discovery)
+		inst.SubScanSkipped = rec.SubScanSkipped
+		applyRecordIntegrityLocked(inst, rec)
+		inst.wildcardAssessmentReady = true
+		if !isInterruptedInstanceStatus(inst.Status) && (inst.StopReason == "" || isWildcardAssessmentReason(inst.StopReason)) {
+			inst.StopReason = rec.StopReason
+		}
 		normalizeTerminalWildcardInstanceLocked(inst)
 		inst.mu.Unlock()
 	}
@@ -638,6 +647,7 @@ func normalizeTerminalWildcardProgress(rec *ScanRecord) {
 	if rec.SubScanRemaining < 0 {
 		rec.SubScanRemaining = 0
 	}
+	aggregateWildcardAssessment(rec)
 }
 
 // normalizeTerminalWildcardInstanceLocked keeps status and wildcard children
@@ -660,6 +670,7 @@ func normalizeTerminalWildcardInstanceLocked(inst *ScanInstance) {
 	if inst.SubScanRemaining < 0 {
 		inst.SubScanRemaining = 0
 	}
+	aggregateWildcardInstanceLocked(inst)
 }
 
 func normalizeScanTarget(target string) string {
@@ -775,7 +786,8 @@ func isChildOfScan(parent, child *ScanRecord) bool {
 	// every subdomain record from *previous* yahoo.com scans on disk,
 	// instantly showing stale vulns and inflated subdomain counts.
 	if parent.InstanceID != "" {
-		return child.InstanceID == parent.InstanceID
+		return child.InstanceID == parent.InstanceID &&
+			(parent.ID == parent.InstanceID || normalizeScanTarget(child.ParentTarget) == normalizeScanTarget(parent.Target))
 	}
 	// Legacy fallback for scans created before multi-instance mode:
 	// match by target name only.
@@ -948,6 +960,12 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 	for _, child := range rec.SubScans {
 		add(child.Target, child)
 	}
+	wantedIDs := make(map[string]string)
+	for _, child := range rec.SubScans {
+		wantedIDs[normalizeScanTarget(child.Target)] = child.ID
+	}
+	physical := make(map[string]ScanRecord)
+	ambiguous := make(map[string]bool)
 
 	childTokensSum := 0
 	childToolCallsSum := 0
@@ -966,6 +984,14 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 			vuln.SourceScanID = child.ID
 			appendVulnSummaryUnique(&rec.Vulns, vuln)
 		}
+		key := normalizeScanTarget(child.Target)
+		if wanted := wantedIDs[key]; wanted != "" && wanted != child.ID {
+			continue // Retain earlier evidence without borrowing its outcome.
+		}
+		if prior, exists := physical[key]; exists && prior.ID != child.ID {
+			ambiguous[key] = true
+		}
+		physical[key] = child
 		add(child.Target, SubScanSummary{
 			ID:          child.ID,
 			Target:      child.Target,
@@ -1022,6 +1048,9 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 		default:
 			continue
 		}
+		if existing := children[normalizeScanTarget(target)]; existing != nil && existing.ID != "" {
+			continue // Durable identity/lifecycle outrank replayed descriptors.
+		}
 		summary := add(target, SubScanSummary{
 			ID:         evt.AgentID,
 			Target:     target,
@@ -1031,11 +1060,24 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 		})
 		_ = summary
 	}
+	// Event descriptors establish membership, but physical records own clocks,
+	// lifecycle and assessment facts. A discovery/coordinator event cannot
+	// replace a child's partial outcome or plan with a successful disposition.
+	for key, child := range physical {
+		if summary := children[key]; summary != nil {
+			if ambiguous[key] {
+				*summary = SubScanSummary{Target: summary.Target, Status: summary.Status}
+			} else {
+				*summary = subScanSummaryFromRecord(&child)
+			}
+		}
+	}
 
 	if total < len(children) {
 		total = len(children)
 	}
 	if total == 0 {
+		aggregateWildcardAssessment(rec)
 		return
 	}
 
@@ -1097,6 +1139,7 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 	rec.SubScanCompleted = completed
 	rec.SubScanRunning = running
 	rec.SubScanRemaining = remaining
+	aggregateWildcardAssessment(rec)
 }
 
 func finalizeScanRecordForResponse(rec *ScanRecord) {
@@ -1275,10 +1318,13 @@ func (s *Server) rebuildInstancesFromDisk() {
 			SubScanCompleted:   entry.rec.SubScanCompleted,
 			SubScanRunning:     entry.rec.SubScanRunning,
 			SubScanRemaining:   entry.rec.SubScanRemaining,
+			Discovery:          cloneSubScanSummary(entry.rec.Discovery),
+			SubScanSkipped:     entry.rec.SubScanSkipped,
 			WorkStarted:        entry.rec.WorkStarted,
 			events:             append([]WSEvent(nil), entry.rec.Events...),
 		}
 		applyRecordIntegrityLocked(inst, &entry.rec)
+		inst.wildcardAssessmentReady = entry.rec.ScanMode == "wildcard"
 		if inst.CurrentPhase == 0 {
 			inst.CurrentPhase = firstSelectedPhase(inst.Phases)
 		}

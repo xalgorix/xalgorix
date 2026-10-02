@@ -488,13 +488,20 @@ type VulnSummary struct {
 
 // SubScanSummary is a child target scanned as part of a wildcard parent scan.
 type SubScanSummary struct {
-	ID          string `json:"id"`
-	Target      string `json:"target"`
-	StartedAt   string `json:"started_at,omitempty"`
-	FinishedAt  string `json:"finished_at,omitempty"`
-	Status      string `json:"status"`
-	VulnCount   int    `json:"vuln_count"`
-	TotalTokens int    `json:"total_tokens"`
+	ID                  string `json:"id"`
+	Target              string `json:"target"`
+	StartedAt           string `json:"started_at,omitempty"`
+	FinishedAt          string `json:"finished_at,omitempty"`
+	Status              string `json:"status"`
+	VulnCount           int    `json:"vuln_count"`
+	TotalTokens         int    `json:"total_tokens"`
+	Completion          string `json:"completion,omitempty"`
+	StopReason          string `json:"stop_reason,omitempty"`
+	PlanPresent         bool   `json:"plan_present,omitempty"`
+	PlanTasksTotal      int    `json:"plan_tasks_total,omitempty"`
+	PlanTasksCompleted  int    `json:"plan_tasks_completed,omitempty"`
+	PlanTasksSkipped    int    `json:"plan_tasks_skipped,omitempty"`
+	PlanTasksUnfinished int    `json:"plan_tasks_unfinished,omitempty"`
 }
 
 type sessionUsage struct {
@@ -579,7 +586,10 @@ type ScanRecord struct {
 	SubScanCompleted int               `json:"sub_scan_completed,omitempty"`
 	SubScanRunning   int               `json:"sub_scan_running,omitempty"`
 	SubScanRemaining int               `json:"sub_scan_remaining,omitempty"`
-	WorkStarted      bool              `json:"work_started,omitempty"` // positive proof that an agent session was admitted
+	// Enumeration has its own outcome and plan; it is never an assessment child.
+	Discovery      *SubScanSummary `json:"discovery,omitempty"`
+	SubScanSkipped int             `json:"sub_scan_skipped,omitempty"`
+	WorkStarted    bool            `json:"work_started,omitempty"` // positive proof that an agent session was admitted
 }
 
 // QueueState persists scan queue state for recovery after restart
@@ -664,22 +674,25 @@ type ScanInstance struct {
 	// walk. SubScans intentionally omits `omitempty`: an empty array is the
 	// capability marker SaaS uses to distinguish upgraded scanners from older
 	// versions that cannot safely finalize wildcard scans from this endpoint.
-	SubScans           []SubScanSummary `json:"sub_scans"`
-	SubScanTotal       int              `json:"sub_scan_total"`
-	SubScanCompleted   int              `json:"sub_scan_completed"`
-	SubScanRunning     int              `json:"sub_scan_running"`
-	SubScanRemaining   int              `json:"sub_scan_remaining"`
-	WorkStarted        bool             `json:"work_started"` // true once any agent session is admitted
-	agent              *agent.Agent
-	cancel             context.CancelFunc
-	scanDir            string
-	sctx               *scanctx.ScanContext // per-instance session state (vulns, notes, terminal, browser)
-	events             []WSEvent            // buffered events for replay
-	chatCfg            *config.Config       // provider settings for post-scan chat (not exposed)
-	chatMessages       []llm.Message        // lightweight post-scan chat history (not exposed)
-	mu                 sync.RWMutex
-	snapshotReady      bool // final queue event and session cleanup are complete; persistence may be retried safely
-	snapshotFinalizing bool // terminal status is not externally coherent until the final queue event is durably snapshotted
+	SubScans                []SubScanSummary `json:"sub_scans"`
+	SubScanTotal            int              `json:"sub_scan_total"`
+	SubScanCompleted        int              `json:"sub_scan_completed"`
+	SubScanRunning          int              `json:"sub_scan_running"`
+	SubScanRemaining        int              `json:"sub_scan_remaining"`
+	Discovery               *SubScanSummary  `json:"discovery,omitempty"`
+	SubScanSkipped          int              `json:"sub_scan_skipped,omitempty"`
+	WorkStarted             bool             `json:"work_started"` // true once any agent session is admitted
+	agent                   *agent.Agent
+	cancel                  context.CancelFunc
+	scanDir                 string
+	sctx                    *scanctx.ScanContext // per-instance session state (vulns, notes, terminal, browser)
+	events                  []WSEvent            // buffered events for replay
+	chatCfg                 *config.Config       // provider settings for post-scan chat (not exposed)
+	chatMessages            []llm.Message        // lightweight post-scan chat history (not exposed)
+	mu                      sync.RWMutex
+	snapshotReady           bool // final queue event and session cleanup are complete; persistence may be retried safely
+	snapshotFinalizing      bool // terminal status is not externally coherent until the final queue event is durably snapshotted
+	wildcardAssessmentReady bool // unknown child plans have been reconciled, not silently treated as missing hydration
 }
 
 // maxConcurrentInstances removed — replaced by dynamic resource-aware

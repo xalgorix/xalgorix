@@ -51,6 +51,7 @@ func (s *Server) saveExactDispatchSnapshot(rec *ScanRecord) error {
 	copyRec.Events = append([]WSEvent(nil), rec.Events...)
 	copyRec.Vulns = append([]VulnSummary(nil), rec.Vulns...)
 	copyRec.SubScans = cloneSubScanSummaries(rec.SubScans)
+	copyRec.Discovery = cloneSubScanSummary(rec.Discovery)
 
 	data, err := json.MarshalIndent(&copyRec, "", "  ")
 	if err != nil {
@@ -279,6 +280,7 @@ func mergeDispatchSubScan(children *[]SubScanSummary, candidate SubScanSummary) 
 	for i := range *children {
 		if ((*children)[i].ID != "" && (*children)[i].ID == candidate.ID) ||
 			(normalizeScanTarget((*children)[i].Target) != "" && normalizeScanTarget((*children)[i].Target) == normalizeScanTarget(candidate.Target)) {
+			replaced := candidate.ID != "" && candidate.ID != (*children)[i].ID
 			if candidate.ID != "" {
 				(*children)[i].ID = candidate.ID
 			}
@@ -299,6 +301,15 @@ func mergeDispatchSubScan(children *[]SubScanSummary, candidate SubScanSummary) 
 			}
 			if candidate.TotalTokens > (*children)[i].TotalTokens {
 				(*children)[i].TotalTokens = candidate.TotalTokens
+			}
+			if replaced || candidate.Completion != "" || candidate.PlanPresent || candidate.PlanTasksTotal > 0 {
+				(*children)[i].Completion = candidate.Completion
+				(*children)[i].StopReason = candidate.StopReason
+				(*children)[i].PlanPresent = candidate.PlanPresent
+				(*children)[i].PlanTasksTotal = candidate.PlanTasksTotal
+				(*children)[i].PlanTasksCompleted = candidate.PlanTasksCompleted
+				(*children)[i].PlanTasksSkipped = candidate.PlanTasksSkipped
+				(*children)[i].PlanTasksUnfinished = candidate.PlanTasksUnfinished
 			}
 			return
 		}
@@ -337,11 +348,14 @@ func mergePersistedDispatchStopSnapshot(rec *ScanRecord, entries []scanEntry) bo
 			rec.CurrentPhase = candidate.CurrentPhase
 		}
 		if candidate.ParentTarget != "" {
-			mergeDispatchSubScan(&children, SubScanSummary{
-				ID: candidate.ID, Target: candidate.Target, StartedAt: candidate.StartedAt,
-				FinishedAt: candidate.FinishedAt, Status: candidate.Status,
-				VulnCount: len(candidate.Vulns), TotalTokens: candidate.TotalTokens,
-			})
+			mergeDispatchSubScan(&children, subScanSummaryFromRecord(candidate))
+		} else {
+			if candidate.SubScanSkipped > rec.SubScanSkipped {
+				rec.SubScanSkipped = candidate.SubScanSkipped
+			}
+			if candidate.Discovery != nil {
+				rec.Discovery = cloneSubScanSummary(candidate.Discovery)
+			}
 		}
 		for _, child := range candidate.SubScans {
 			mergeDispatchSubScan(&children, child)

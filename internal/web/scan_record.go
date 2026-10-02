@@ -324,6 +324,11 @@ func (s *Server) seedResumeInstanceFromRecord(inst *ScanInstance, req ScanReques
 	inst.SubScanCompleted = rec.SubScanCompleted
 	inst.SubScanRunning = rec.SubScanRunning
 	inst.SubScanRemaining = rec.SubScanRemaining
+	inst.Discovery = cloneSubScanSummary(rec.Discovery)
+	inst.SubScanSkipped = rec.SubScanSkipped
+	if inst.ScanMode == "wildcard" {
+		aggregateWildcardInstanceLocked(inst)
+	}
 	// Resume path: scan is being seeded from on-disk record, no live session
 	// exists yet, so effectiveVulnCount falls back to len(inst.Vulns).
 	inst.VulnCount = s.effectiveVulnCount(inst, nil)

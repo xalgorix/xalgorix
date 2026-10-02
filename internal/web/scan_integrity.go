@@ -67,6 +67,9 @@ func (s *Server) mirrorScanIntegrity(instanceID string, rec *ScanRecord) {
 	if instanceID == "" || rec == nil || rec.ParentTarget != "" {
 		return
 	}
+	if rec.ScanMode == "wildcard" && rec.Discovery == nil && len(rec.SubScans) == 0 && rec.SubScanTotal == 0 {
+		return // Enumeration is not the coordinator's assessment outcome.
+	}
 	s.instancesMu.RLock()
 	defer s.instancesMu.RUnlock()
 	if inst := s.instances[instanceID]; inst != nil {
@@ -83,7 +86,10 @@ func (s *Server) mirrorScanIntegrity(instanceID string, rec *ScanRecord) {
 func (s *Server) hydrateTerminalIntegrity(inst *ScanInstance) {
 	inst.mu.RLock()
 	id := inst.ID
-	need := isTerminalScanStatus(inst.Status) && (inst.Completion == "" || !inst.PlanPresent || (inst.Completion == "partial" && inst.StopReason == ""))
+	need := isTerminalScanStatus(inst.Status) && (inst.Completion == "" ||
+		(!inst.PlanPresent && !inst.wildcardAssessmentReady) ||
+		(inst.ScanMode == "wildcard" && !inst.wildcardAssessmentReady) ||
+		(inst.Completion == "partial" && inst.StopReason == ""))
 	inst.mu.RUnlock()
 	if !need {
 		return
@@ -92,11 +98,22 @@ func (s *Server) hydrateTerminalIntegrity(inst *ScanInstance) {
 	if rec == nil || !isTerminalScanStatus(rec.Status) {
 		return
 	}
+	if isWildcardAssessmentParent(rec) {
+		s.attachWildcardSubScans(rec)
+		normalizeTerminalWildcardProgress(rec)
+	}
 	s.reconcileTerminalStopReason(rec)
 	inst.mu.Lock()
 	recoveredReason := false
 	if isTerminalScanStatus(inst.Status) {
 		applyRecordIntegrityLocked(inst, rec)
+		if inst.ScanMode == "wildcard" {
+			inst.SubScans = cloneSubScanSummaries(rec.SubScans)
+			inst.SubScanTotal, inst.SubScanCompleted = rec.SubScanTotal, rec.SubScanCompleted
+			inst.SubScanRunning, inst.SubScanRemaining = rec.SubScanRunning, rec.SubScanRemaining
+			inst.Discovery, inst.SubScanSkipped = cloneSubScanSummary(rec.Discovery), rec.SubScanSkipped
+			normalizeTerminalWildcardInstanceLocked(inst)
+		}
 		if inst.StopReason == "" && rec.StopReason != "" {
 			inst.StopReason = rec.StopReason
 			recoveredReason = true
