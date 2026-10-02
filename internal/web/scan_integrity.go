@@ -203,6 +203,17 @@ func mergeSessionUsage(previous, newer map[string]sessionUsage) map[string]sessi
 	return merged
 }
 
+// A restored aggregate may lag its owned per-session high-water marks. Retain
+// those known facts once without inferring progress for unrecorded sessions.
+// The caller holds the instance lock when the instance has been published.
+func retainKnownSessionProgress(inst *ScanInstance) {
+	known := 0
+	for _, usage := range inst.UsageBySession {
+		known += max(usage.Progress, 0)
+	}
+	inst.AssessmentProgress = max(inst.AssessmentProgress, known)
+}
+
 func accountSessionUsageLocked(inst *ScanInstance, id string, tokens, progress int) {
 	if inst.UsageBySession == nil {
 		inst.UsageBySession = make(map[string]sessionUsage)

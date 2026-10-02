@@ -275,8 +275,9 @@ func (s *Server) seedResumeInstanceFromRecord(inst *ScanInstance, req ScanReques
 	applyRecordIntegrityLocked(inst, rec)
 	inst.AdmittedAt = rec.AdmittedAt
 	inst.ResumedAt = rec.ResumedAt
-	inst.AssessmentProgress = rec.AssessmentProgress
-	inst.UsageBySession = cloneSessionUsage(rec.UsageBySession)
+	inst.AssessmentProgress = max(inst.AssessmentProgress, rec.AssessmentProgress)
+	inst.UsageBySession = mergeSessionUsage(inst.UsageBySession, rec.UsageBySession)
+	retainKnownSessionProgress(inst)
 	if rec.Name != "" {
 		inst.Name = rec.Name
 	}

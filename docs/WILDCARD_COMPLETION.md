@@ -40,6 +40,10 @@ Aggregate stop reasons are `wildcard_assessment_incomplete`,
 `wildcard_assessment_unknown`, `wildcard_discovery_incomplete`, or
 `wildcard_resource_limit`. An explicit coordinator cancellation or failure
 reason takes precedence. Child reasons stay on their own records and summaries.
+A recovery placeholder retained on a normally completed parent is replaced
+by its assessment reason. Interrupted records keep their recovery marker.
+On resume, recorded per-session progress establishes a lower bound for the
+coordinator's aggregate. Repeated recovery does not count those facts twice.
 
 Recovery rebuilds assessment metadata from owned physical child records and
 preserves independent child evidence. Existing lifecycle, cancellation,

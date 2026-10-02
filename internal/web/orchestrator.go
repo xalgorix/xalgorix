@@ -222,6 +222,9 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		log.Printf("[scan] refusing legacy persisted instance id collision for %q", instanceID)
 		return
 	}
+	if req.IsResume {
+		retainKnownSessionProgress(instance)
+	}
 	s.instances[instanceID] = instance
 	delete(s.dispatchReservations, instanceID)
 	s.instancesMu.Unlock()

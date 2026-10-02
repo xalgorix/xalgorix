@@ -123,8 +123,12 @@ func aggregateWildcardAssessment(rec *ScanRecord) {
 		rec.Completion = "full"
 		reason = ""
 	}
-	// An explicit coordinator cancellation/failure reason keeps its ownership.
-	if rec.StopReason == "" || isWildcardAssessmentReason(rec.StopReason) {
+	// A completed parent can retain the recovery placeholder from an older
+	// snapshot. It no longer describes an interruption once work has finished.
+	// Keep the marker on recoverable stopped/pending records and preserve
+	// explicit coordinator cancellation/failure reasons.
+	staleResume := isCompletedScanStatus(rec.Status) && rec.StopReason == "server_restart_resuming"
+	if rec.StopReason == "" || isWildcardAssessmentReason(rec.StopReason) || staleResume {
 		rec.StopReason = reason
 	}
 }
