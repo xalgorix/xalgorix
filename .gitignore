@@ -14,7 +14,6 @@ build/
 !go.sum
 !package.json
 !webui/src/methodology-phases.json
-!benchmarks/real-world/**/manifest.json
 !webui/tsconfig.json
 !webui/tsconfig.app.json
 !webui/tsconfig.node.json
