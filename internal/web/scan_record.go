@@ -27,6 +27,7 @@ func (s *Server) scanRecordForSession(sess *scanSession) *ScanRecord {
 	}
 
 	rec = existing
+	s.reconcileSavedFindingUpgrades(rec, sess.scanDir)
 	s.refreshResumedScanRecord(rec, sess, startedAt)
 	sess.recordTokenOffset = rec.TotalTokens
 	return rec
@@ -267,6 +268,7 @@ func (s *Server) seedResumeInstanceFromRecord(inst *ScanInstance, req ScanReques
 	if !ok || rec == nil {
 		return
 	}
+	s.reconcileSavedFindingUpgrades(rec, resumeDir)
 	if rec.StartedAt != "" {
 		inst.StartedAt = rec.StartedAt
 	}

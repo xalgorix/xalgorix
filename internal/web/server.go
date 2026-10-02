@@ -460,29 +460,30 @@ type WSEvent struct {
 
 // VulnSummary is a simplified vulnerability for the UI.
 type VulnSummary struct {
-	ID                 string   `json:"id"`
-	SourceScanID       string   `json:"source_scan_id,omitempty"`
-	Title              string   `json:"title"`
-	Severity           string   `json:"severity"`
-	Target             string   `json:"target,omitempty"`
-	Endpoint           string   `json:"endpoint"`
-	CVSS               float64  `json:"cvss"`
-	CVSSVector         string   `json:"cvss_vector,omitempty"`
-	Description        string   `json:"description,omitempty"`
-	Impact             string   `json:"impact,omitempty"`
-	Method             string   `json:"method,omitempty"`
-	CVE                string   `json:"cve,omitempty"`
-	CWE                string   `json:"cwe_id,omitempty"`
-	OWASP              string   `json:"owasp,omitempty"`
-	TechnicalAnalysis  string   `json:"technical_analysis,omitempty"`
-	PoCDescription     string   `json:"poc_description,omitempty"`
-	PoCScript          string   `json:"poc_script,omitempty"`
-	Remediation        string   `json:"remediation,omitempty"`
-	Fix                string   `json:"fix,omitempty"`
-	ExploitationProof  string   `json:"exploitation_proof,omitempty"`
-	VerificationMethod string   `json:"verification_method,omitempty"`
-	Verified           bool     `json:"verified"`
-	Tags               []string `json:"tags,omitempty"`
+	Replaces           *reporting.FindingIdentity `json:"replaces,omitempty"`
+	ID                 string                     `json:"id"`
+	SourceScanID       string                     `json:"source_scan_id,omitempty"`
+	Title              string                     `json:"title"`
+	Severity           string                     `json:"severity"`
+	Target             string                     `json:"target,omitempty"`
+	Endpoint           string                     `json:"endpoint"`
+	CVSS               float64                    `json:"cvss"`
+	CVSSVector         string                     `json:"cvss_vector,omitempty"`
+	Description        string                     `json:"description,omitempty"`
+	Impact             string                     `json:"impact,omitempty"`
+	Method             string                     `json:"method,omitempty"`
+	CVE                string                     `json:"cve,omitempty"`
+	CWE                string                     `json:"cwe_id,omitempty"`
+	OWASP              string                     `json:"owasp,omitempty"`
+	TechnicalAnalysis  string                     `json:"technical_analysis,omitempty"`
+	PoCDescription     string                     `json:"poc_description,omitempty"`
+	PoCScript          string                     `json:"poc_script,omitempty"`
+	Remediation        string                     `json:"remediation,omitempty"`
+	Fix                string                     `json:"fix,omitempty"`
+	ExploitationProof  string                     `json:"exploitation_proof,omitempty"`
+	VerificationMethod string                     `json:"verification_method,omitempty"`
+	Verified           bool                       `json:"verified"`
+	Tags               []string                   `json:"tags,omitempty"`
 }
 
 // SubScanSummary is a child target scanned as part of a wildcard parent scan.

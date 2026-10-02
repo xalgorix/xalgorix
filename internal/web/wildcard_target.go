@@ -177,6 +177,7 @@ func mergeWildcardInventory(discovered []string, wt wildcardTarget) []string {
 // parent accumulation context carries the same verified evidence.
 func vulnFromSummary(vs VulnSummary) reporting.Vulnerability {
 	return reporting.Vulnerability{
+		Replaces:           vs.Replaces,
 		ID:                 vs.ID,
 		Title:              vs.Title,
 		Severity:           vs.Severity,

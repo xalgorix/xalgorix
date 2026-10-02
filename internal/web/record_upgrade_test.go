@@ -9,26 +9,32 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
-// TestRemoveVulnSummariesByID (P6 unit): the record-row purge removes every
-// row carrying the upgraded finding ID and keeps the rest in order.
-func TestRemoveVulnSummariesByID(t *testing.T) {
+func TestSummaryReplacementRequiresCandidateIdentityAndPhysicalOwner(t *testing.T) {
+	candidate, incoming, unrelated := upgradeContinuityRows()
+	incoming.Replaces = reporting.IdentityForFinding(vulnFromSummary(candidate))
+	otherOwner := candidate
+	otherOwner.SourceScanID = "other-physical-run"
+	confirmed := candidate
+	confirmed.Verified = true
 	rows := []VulnSummary{
 		{ID: "XALG-1", Title: "first"},
-		{ID: "XALG-9", Title: "stale candidate"},
-		{ID: "XALG-10", Title: "unrelated"},
-		{ID: "XALG-9", Title: "stale duplicate"},
+		candidate, unrelated, otherOwner, confirmed,
 	}
-	removeVulnSummariesByID(&rows, "XALG-9")
-	if len(rows) != 2 || rows[0].ID != "XALG-1" || rows[1].ID != "XALG-10" {
-		t.Fatalf("purge kept wrong rows: %+v", rows)
+	applySummaryReplacement(&rows, &incoming, false)
+	if len(rows) != 4 || rows[1].Title != unrelated.Title || rows[2].SourceScanID != otherOwner.SourceScanID || !rows[3].Verified {
+		t.Fatalf("replacement changed unrelated or verified rows: %+v", rows)
 	}
-	removeVulnSummariesByID(&rows, "")
-	if len(rows) != 2 {
-		t.Fatal("empty id must be a no-op")
+	unknown := incoming
+	unknown.Replaces = nil
+	applySummaryReplacement(&rows, &unknown, false)
+	if len(rows) != 4 {
+		t.Fatal("absent replacement identity must be a no-op")
 	}
-	removeVulnSummariesByID(&rows, "XALG-missing")
-	if len(rows) != 2 {
-		t.Fatal("missing id must be a no-op")
+	unknown.SourceScanID = "missing-owner"
+	unknown.Replaces = incoming.Replaces
+	applySummaryReplacement(&rows, &unknown, false)
+	if len(rows) != 4 {
+		t.Fatal("unknown physical owner must be a no-op")
 	}
 }
 

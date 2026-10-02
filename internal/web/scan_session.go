@@ -645,7 +645,7 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 					// record instead of accumulating the stale candidate
 					// next to the upgrade.
 					if metadataBool(evt.ToolResult.Metadata, "upgraded") {
-						removeVulnSummariesByID(&sess.record.Vulns, vulnID)
+						applySummaryReplacement(&sess.record.Vulns, &vs, true)
 					}
 					log.Printf("[VULN] Latest vuln: %s %s (CVSS %.1f)", vs.Severity, vs.Title, vs.CVSS)
 

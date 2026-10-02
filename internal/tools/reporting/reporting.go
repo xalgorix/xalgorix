@@ -59,24 +59,25 @@ var evidenceKeywords = map[string][]string{
 
 // Vulnerability represents a found vulnerability.
 type Vulnerability struct {
-	ID                string  `json:"id"`
-	Title             string  `json:"title"`
-	Severity          string  `json:"severity"`
-	OriginalSeverity  string  `json:"original_severity,omitempty"` // if auto-downgraded
-	Description       string  `json:"description"`
-	Impact            string  `json:"impact"`
-	Target            string  `json:"target"`
-	Endpoint          string  `json:"endpoint"`
-	Method            string  `json:"method"`
-	CVE               string  `json:"cve"`
-	CWE               string  `json:"cwe_id,omitempty"` // e.g. "CWE-79"
-	OWASP             string  `json:"owasp,omitempty"`  // e.g. "A03"
-	CVSS              float64 `json:"cvss"`
-	CVSSVector        string  `json:"cvss_vector,omitempty"` // CVSS 3.1 vector string
-	TechnicalAnalysis string  `json:"technical_analysis"`
-	PoCDescription    string  `json:"poc_description"`
-	PoCScript         string  `json:"poc_script_code"`
-	Remediation       string  `json:"remediation_steps"`
+	Replaces          *FindingIdentity `json:"replaces,omitempty"`
+	ID                string           `json:"id"`
+	Title             string           `json:"title"`
+	Severity          string           `json:"severity"`
+	OriginalSeverity  string           `json:"original_severity,omitempty"` // if auto-downgraded
+	Description       string           `json:"description"`
+	Impact            string           `json:"impact"`
+	Target            string           `json:"target"`
+	Endpoint          string           `json:"endpoint"`
+	Method            string           `json:"method"`
+	CVE               string           `json:"cve"`
+	CWE               string           `json:"cwe_id,omitempty"` // e.g. "CWE-79"
+	OWASP             string           `json:"owasp,omitempty"`  // e.g. "A03"
+	CVSS              float64          `json:"cvss"`
+	CVSSVector        string           `json:"cvss_vector,omitempty"` // CVSS 3.1 vector string
+	TechnicalAnalysis string           `json:"technical_analysis"`
+	PoCDescription    string           `json:"poc_description"`
+	PoCScript         string           `json:"poc_script_code"`
+	Remediation       string           `json:"remediation_steps"`
 	// Fix is a CONCRETE remediation patch — ideally a minimal code/config diff
 	// (e.g. parameterize a query, add an authz check, escape output). This is
 	// what makes a report actionable/audit-ready, and mirrors the inline-patch
@@ -904,6 +905,7 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	if idx := findUpgradeableVulnerabilityIndex(store.vulns, vuln); idx >= 0 {
 		upgradeFrom = store.vulns[idx].Title
 		vuln.ID = store.vulns[idx].ID
+		vuln.Replaces = IdentityForFinding(store.vulns[idx])
 		store.vulns[idx] = vuln
 		upgraded = true
 	} else {

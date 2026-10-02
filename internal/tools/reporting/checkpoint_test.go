@@ -71,3 +71,32 @@ func TestFindingPersistenceFailureDoesNotReturnSavedReceipt(t *testing.T) {
 		t.Fatal("failed append damaged the prior durable checkpoint")
 	}
 }
+
+func TestFindingCheckpointEnrichesUpgradeReceiptAndRejectsStaleCandidate(t *testing.T) {
+	ctxID := "finding-upgrade-receipt"
+	dir := t.TempDir()
+	t.Cleanup(func() { CleanupContext(ctxID) })
+	candidate := Vulnerability{ID: "XALG-4", Title: "Reflected XSS candidate", Target: "https://example.invalid", Endpoint: "/search?q=first", Method: "GET"}
+	verified := candidate
+	verified.Title, verified.Endpoint, verified.Verified = "Verified reflected XSS", "/search?q=proven", true
+	if err := RestoreContext(ctxID, dir, []Vulnerability{verified}); err != nil {
+		t.Fatal(err)
+	}
+	CleanupContext(ctxID)
+	verified.Replaces = IdentityForFinding(candidate)
+	if err := RestoreContext(ctxID, dir, []Vulnerability{verified, candidate}); err != nil {
+		t.Fatal(err)
+	}
+	rows := GetVulnerabilitiesForContext(ctxID)
+	if len(rows) != 1 || rows[0].Replaces == nil || !rows[0].Verified {
+		t.Fatal("checkpoint merge lost the recovered receipt or restored its candidate")
+	}
+	CleanupContext(ctxID)
+	if err := RestoreContext(ctxID, dir, []Vulnerability{candidate}); err != nil {
+		t.Fatal(err)
+	}
+	rows = GetVulnerabilitiesForContext(ctxID)
+	if len(rows) != 1 || rows[0].Replaces == nil {
+		t.Fatal("durable checkpoint lost the upgrade identity across a second restart")
+	}
+}

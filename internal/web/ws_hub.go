@@ -281,6 +281,7 @@ func (s *Server) broadcastToInstance(instanceID string, evt WSEvent) {
 		// Also buffer vulns
 		if len(evt.Vulns) > 0 {
 			for _, vuln := range evt.Vulns {
+				applySummaryReplacement(&inst.Vulns, &vuln, metadataBool(evt.ResultMeta, "upgraded"))
 				appendVulnSummaryUnique(&inst.Vulns, vuln)
 			}
 		}

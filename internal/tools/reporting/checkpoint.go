@@ -77,9 +77,7 @@ func RestoreContext(contextID, dir string, legacy []Vulnerability) error {
 		store.nextSequence = saved.Sequence
 	}
 	for _, v := range legacy {
-		if _, _, duplicate := findDuplicateVulnerability(store.vulns, v.Title, v.Description, v.CVE, v.CWE, v.Target, v.Endpoint); !duplicate {
-			store.vulns = append(store.vulns, v)
-		}
+		mergeRestoredFinding(store, v)
 	}
 	return store.persistLocked()
 }

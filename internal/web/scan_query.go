@@ -18,6 +18,7 @@ import (
 // vulnToSummary converts a reporting.Vulnerability to a VulnSummary with all fields.
 func vulnToSummary(v reporting.Vulnerability) VulnSummary {
 	return VulnSummary{
+		Replaces:           v.Replaces,
 		ID:                 v.ID,
 		Title:              v.Title,
 		Severity:           v.Severity,
@@ -58,25 +59,6 @@ func metadataBool(metadata map[string]any, key string) bool {
 	return false
 }
 
-// removeVulnSummariesByID removes every record row carrying the given
-// finding ID. Used when the reporting store replaced an unverified
-// candidate IN PLACE (an upgrade): the record must mirror the replacement
-// instead of accumulating the stale candidate next to the upgrade — the
-// pentest-ground v4.6.123 run stored the same finding ID twice this way.
-func removeVulnSummariesByID(vulns *[]VulnSummary, id string) {
-	if id == "" || len(*vulns) == 0 {
-		return
-	}
-	kept := (*vulns)[:0]
-	for _, v := range *vulns {
-		if v.ID == id {
-			continue
-		}
-		kept = append(kept, v)
-	}
-	*vulns = kept
-}
-
 func metadataString(metadata map[string]any, key string) (string, bool) {
 	if metadata == nil {
 		return "", false
@@ -103,10 +85,20 @@ func findReportedVulnerabilityByID(vulns []reporting.Vulnerability, id string) (
 }
 
 func appendVulnSummaryUnique(vulns *[]VulnSummary, vuln VulnSummary) bool {
+	applySummaryReplacement(vulns, &vuln, false)
 	key := vulnSummaryKey(vuln)
 	for i := range *vulns {
 		existing := &(*vulns)[i]
+		if summaryIsReplaced(vuln, *existing) {
+			return false
+		}
 		if vulnSummaryKey(*existing) == key {
+			if existing.ID == vuln.ID && existing.SourceScanID == vuln.SourceScanID && vuln.Verified && (!existing.Verified || vuln.Replaces != nil) {
+				if vuln.Replaces == nil {
+					vuln.Replaces = existing.Replaces
+				}
+				*existing = vuln
+			}
 			// A live parent snapshot can arrive before the persisted wildcard
 			// child. Preserve the row while enriching it with authoritative
 			// physical provenance once the child copy is attached.
@@ -458,6 +450,7 @@ func (s *Server) findScanByInstanceID(instanceID string) (string, *ScanRecord) {
 		return "", nil
 	}
 	if rec, err := s.loadExactDispatchSnapshot(instanceID); err == nil {
+		s.reconcileExactFindingUpgrades(rec)
 		return filepath.Dir(s.dispatchSnapshotPath(instanceID)), rec
 	} else if !errors.Is(err, errDispatchSnapshotNotFound) {
 		log.Printf("[scan] refusing unreadable exact dispatch snapshot %q: %v", instanceID, err)
@@ -1112,6 +1105,7 @@ func finalizeScanRecordForResponse(rec *ScanRecord) {
 			rec.Vulns[i].SourceScanID = rec.ID
 		}
 	}
+	applyRecordedFindingUpgrades(rec)
 	if isCompletedScanStatus(rec.Status) && phaseAllowed(rec.Phases, 22) {
 		rec.CurrentPhase = 22
 	}
@@ -1195,6 +1189,7 @@ func (s *Server) rebuildInstancesFromDisk() {
 	// values captured before the restart.
 	for i := range entries {
 		entry := &entries[i]
+		s.reconcileSavedFindingUpgrades(&entry.rec, entry.dir)
 		_, resumable := instanceIdentity(entry)
 		if !isInterruptedRecoverableRecord(entry.rec.Status, entry.rec.StopReason) {
 			continue
@@ -1240,6 +1235,7 @@ func (s *Server) rebuildInstancesFromDisk() {
 		if detail, ok := s.loadScanRecordForDetail(entry.dir, detailEventTail); ok {
 			entry.rec.Events = detail.Events
 		}
+		s.reconcileSavedFindingUpgrades(&entry.rec, entry.dir)
 		inst := &ScanInstance{
 			AdmittedAt:         entry.rec.AdmittedAt,
 			ResumedAt:          entry.rec.ResumedAt,
