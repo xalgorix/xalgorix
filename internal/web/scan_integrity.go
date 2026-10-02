@@ -176,6 +176,7 @@ func (s *Server) initializeSessionCounters(sess *scanSession) {
 				inst.AssessmentProgress = max(inst.AssessmentProgress, sess.lastSessionProgress)
 			}
 		}
+		retainKnownSessionProgress(inst)
 		inst.mu.Unlock()
 	}
 }

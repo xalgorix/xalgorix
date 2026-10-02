@@ -109,3 +109,54 @@ func TestWildcardResumeReconcilesDurableChildUsageExactlyOnce(t *testing.T) {
 		t.Fatal("exact snapshot omitted the per-session high-water mark")
 	}
 }
+
+func TestWildcardRestoredUnknownChildRetainsKnownProgressFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		progress int
+		want     int
+	}{
+		{name: "missing_child_progress", progress: 10, want: 17},
+		{name: "already_included", progress: 17, want: 17},
+		{name: "legacy_extra_progress", progress: 100, want: 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sctx := scanctx.New("restored-child", dir)
+			t.Cleanup(sctx.Close)
+			if err := os.WriteFile(filepath.Join(dir, "execution-budget.json"), []byte(`{"version":1,"scan_id":"restored-child","tokens":120,"progress":7}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			inst := &ScanInstance{ID: "parent", Status: "running", TotalTokens: 500, AssessmentProgress: tc.progress,
+				UsageBySession: map[string]sessionUsage{
+					"discovery": {Tokens: 50, Progress: 6},
+					"previous":  {Tokens: 60, Progress: 4},
+				}}
+			s := &Server{instances: map[string]*ScanInstance{"parent": inst}}
+			ag := agent.NewAgent(&config.Config{}, "child", nil, scopeguard.Config{}, sctx)
+			t.Cleanup(ag.Stop)
+			if _, err := ag.RestoreExecutionCheckpoint(); err != nil {
+				t.Fatal(err)
+			}
+			sess := &scanSession{id: sctx.ID, scanDir: dir, instanceID: "parent", scanMode: "wildcard", parentTarget: "example.invalid",
+				agent: ag, sctx: sctx, record: &ScanRecord{}}
+			for initialization := 0; initialization < 2; initialization++ {
+				s.initializeSessionCounters(sess)
+				if inst.AssessmentProgress != tc.want || inst.TotalTokens != 500 {
+					t.Fatalf("initialization %d lost progress or counted spent tokens twice: progress=%d tokens=%d", initialization, inst.AssessmentProgress, inst.TotalTokens)
+				}
+				if inst.UsageBySession[sctx.ID] != (sessionUsage{Tokens: 120, Progress: 7}) {
+					t.Fatal("restored child high-water mark was not retained")
+				}
+				if sess.record.TotalTokens != 120 || sess.record.AssessmentProgress != 7 || ag.AssessmentProgress() != 7 {
+					t.Fatal("physical child accounting changed during aggregate reconciliation")
+				}
+			}
+			s.processEvent(agent.Event{Type: "message", TotalTokens: 130}, sess)
+			s.processEvent(agent.Event{Type: "message", TotalTokens: 120}, sess)
+			if inst.TotalTokens != 510 || inst.AssessmentProgress != tc.want {
+				t.Fatal("new usage or replay changed the restored progress floor")
+			}
+		})
+	}
+}
