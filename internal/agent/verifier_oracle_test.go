@@ -213,6 +213,10 @@ func TestVerifierHTTPOracleCSRF(t *testing.T) {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
+				if test.ctype != "" && request.Header.Get("Content-Type") != test.ctype {
+					w.WriteHeader(http.StatusUnsupportedMediaType)
+					return
+				}
 				if request.Header.Get("Origin") != "https://csrf-attacker.example" {
 					t.Error("the forged request did not use an independent origin")
 				}
@@ -226,6 +230,41 @@ func TestVerifierHTTPOracleCSRF(t *testing.T) {
 				_, _ = io.WriteString(w, test.body)
 			}))
 			defer server.Close()
+			if test.ctype != "" {
+				client := &http.Client{Timeout: time.Second}
+				// A safelisted form request cannot reach this JSON-only action.
+				request, err := http.NewRequest(http.MethodPost, server.URL+"/setting", strings.NewReader("setting=changed"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Header.Set("Cookie", "sid=fixture")
+				request.Header.Set("Origin", "https://csrf-attacker.example")
+				request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				response, err := client.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = response.Body.Close()
+				if response.StatusCode != http.StatusUnsupportedMediaType || state.Load() != 0 {
+					t.Fatal("JSON-only negative control accepted a browser form")
+				}
+				// A non-simple browser request requires a successful preflight.
+				request, err = http.NewRequest(http.MethodOptions, server.URL+"/setting", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Header.Set("Origin", "https://csrf-attacker.example")
+				request.Header.Set("Access-Control-Request-Method", "POST")
+				request.Header.Set("Access-Control-Request-Headers", "content-type")
+				response, err = client.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = response.Body.Close()
+				if response.Header.Get("Access-Control-Allow-Origin") != "" || state.Load() != 0 {
+					t.Fatal("negative control unexpectedly granted cross-site JSON permission")
+				}
+			}
 			a := verifierOracleAgent(t)
 			a.targetAuth = "Cookie: sid=fixture"
 			result, err := a.verifyCSRFTool(map[string]string{"url": server.URL + "/setting", "data": "setting=changed", "content_type": test.ctype})
