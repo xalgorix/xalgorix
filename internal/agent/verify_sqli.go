@@ -8,18 +8,17 @@
 // black-box scanners already miss most. verify_sqli closes that loop in one
 // call: it sends a benign baseline, a single-quote "broken" request (an odd
 // quote count breaks the SQL syntax), and a doubled-quote "balanced" request
-// (the quote is escaped, so a real injectable app parses it cleanly again),
+// (the quote is escaped, so a compatible injectable app parses it cleanly again),
 // then reasons over the three responses:
 //
-//   - broken shows a DBMS error AND the benign baseline does not      → confirmed
+//   - broken shows a DBMS error, baseline and balanced do not        → confirmed
 //   - baseline ALREADY errors (errors regardless of input)            → NOT confirmed
 //   - broken shows no DBMS error                                      → NOT confirmed
 //
-// When the balanced request RECOVERS (no error) we have the classic break/recover
-// signature and report high confidence; when it still errors we confirm at lower
-// confidence (the quote-triggered error absent on benign input is still strong,
-// but the break/recover could not be shown). Requiring the baseline to be clean
-// is what separates a real injection point from a page that always errors.
+// The balanced request must recover before this tool confirms the error-based
+// signature. If both quote variants fail, a validator or filter can explain the
+// result; preserve the candidate for a different proof method. A clean baseline
+// also rejects pages that display the same error regardless of input.
 //
 // On confirmation it records exploit-proven evidence in the shared ledger
 // (mirroring verify_xss) and tells the agent to report it as High CWE-89; it
@@ -128,6 +127,9 @@ func (a *Agent) verifySQLiTool(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: "verify_sqli: could not build injection URLs for parameter " + parameter}, nil
 	}
 
+	if stop := a.injectionRateGate(); stop != "" {
+		return tools.Result{Error: stop}, nil
+	}
 	baselineBody, _, bErr := a.sendInjectionProbe(method, baselineURL, headers)
 	if bErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli: baseline request failed: %v", bErr)}, nil
@@ -198,9 +200,8 @@ func (a *Agent) verifySQLiTool(args map[string]string) (tools.Result, error) {
 // sqliErrorVerdict decides error-based SQLi from the three response bodies. The
 // core proof is the baseline→broken transition: a DBMS error that appears when a
 // single quote is injected but is ABSENT on the benign baseline. The balanced
-// (doubled-quote) response only modulates confidence — recovering (no error) is
-// the classic break/recover signature (high confidence); still erroring is a
-// weaker but valid signal (some apps/WAFs error on any quote). A baseline that
+// (doubled-quote) response must recover to distinguish the classic break/recover
+// signature from a validator or WAF that rejects any quote. A baseline that
 // already errors is rejected outright: the endpoint errors regardless of input,
 // so the error is not controlled by the injected quote.
 func sqliErrorVerdict(baseline, broken, balanced string) (confirmed bool, confidence float64, note string) {
@@ -211,7 +212,7 @@ func sqliErrorVerdict(baseline, broken, balanced string) (confirmed bool, confid
 		return false, 0, "the benign baseline ALREADY shows a DBMS error, so the endpoint errors regardless of input — the error is not controlled by the injected quote (not a proven injection point)."
 	}
 	if reporting.LooksLikeSQLError(balanced) {
-		return true, 0.8, "note: the balanced (doubled-quote) request also errored, so the classic break/recover could not be shown; the quote-triggered DBMS error absent on the benign baseline is still strong evidence of injection."
+		return false, 0, "the balanced request also errored. Quote rejection, validation, or a filtering layer can produce this pattern without SQL injection; no break/recover signature was reproduced. Preserve the candidate and test a separate boolean, timing, or data-extraction control."
 	}
 	return true, 0.95, "the DBMS error appeared only on the single-quote request and vanished when the quote was balanced — the classic error-based SQL-injection signature."
 }
@@ -262,7 +263,17 @@ func (a *Agent) injectionRateGate() string {
 	}
 	if a.scanCtx != nil {
 		if d := a.scanCtx.RequestRatePolicy().Delay(); d > 0 {
-			time.Sleep(d)
+			timer := time.NewTimer(d)
+			defer timer.Stop()
+			var done <-chan struct{}
+			if a.ctx != nil {
+				done = a.ctx.Done()
+			}
+			select {
+			case <-timer.C:
+			case <-done:
+				return "injection verifier: scan is shutting down"
+			}
 		}
 	}
 	return ""

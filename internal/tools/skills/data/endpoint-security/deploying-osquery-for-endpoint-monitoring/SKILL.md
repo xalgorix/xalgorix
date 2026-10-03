@@ -78,7 +78,7 @@ brew install osquery
 
 ### Step 2: Configure Osquery
 
-```json
+```jsonc
 // /etc/osquery/osquery.conf (Linux/macOS) or C:\ProgramData\osquery\osquery.conf
 {
   "options": {

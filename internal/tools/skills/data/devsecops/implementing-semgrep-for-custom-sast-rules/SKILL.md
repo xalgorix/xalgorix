@@ -229,7 +229,7 @@ rules:
     severity: ERROR
     message: JWT decoded with verification disabled
     patterns:
-      - pattern: jwt.decode($TOKEN, ..., options={"verify_signature": False}, ...)
+      - pattern: 'jwt.decode($TOKEN, ..., options={"verify_signature": False}, ...)'
     metadata:
       cwe: ["CWE-345"]
 ```
@@ -316,6 +316,11 @@ rules:
   - id: my-org-rules
     # ... rules here
 
+```
+
+The ignore file is separate from `.semgrep.yaml`:
+
+```text
 # .semgrepignore
 tests/
 node_modules/

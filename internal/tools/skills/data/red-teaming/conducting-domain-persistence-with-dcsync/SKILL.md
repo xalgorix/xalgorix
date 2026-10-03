@@ -88,7 +88,12 @@ DCSync is an attack technique that abuses the Microsoft Directory Replication Se
                     ($_.ActiveDirectoryRights -match 'ExtendedRight') } |
      Select-Object SecurityIdentifier, ObjectAceType
 
-   # Using BloodHound Cypher query
+   ```
+
+   BloodHound uses a separate Cypher console:
+
+   ```cypher
+   // Principals with DCSync or replication rights
    MATCH (u)-[:DCSync|GetChanges|GetChangesAll*1..]->(d:Domain)
    RETURN u.name, d.name
    ```

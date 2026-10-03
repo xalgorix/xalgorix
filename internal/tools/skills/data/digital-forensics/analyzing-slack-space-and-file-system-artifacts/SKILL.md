@@ -76,7 +76,7 @@ fsstat -o 2048 /cases/case-2024-001/images/evidence.dd | tee /cases/case-2024-00
 
 ```bash
 # Parse MFT with MFTECmd (Eric Zimmerman)
-MFTECmd.exe -f "C:\cases\ntfs\MFT" --csv "C:\cases\analysis\" --csvf mft_analysis.csv
+MFTECmd.exe -f "C:\cases\ntfs\MFT" --csv "C:\cases\analysis" --csvf mft_analysis.csv
 
 # Parse with analyzeMFT (Python)
 pip install analyzeMFT
@@ -190,7 +190,7 @@ bulk_extractor -o /cases/case-2024-001/analysis/bulk_extract/ \
 
 ```bash
 # Parse USN Journal with MFTECmd
-MFTECmd.exe -f "C:\cases\ntfs\UsnJrnl_J" --csv "C:\cases\analysis\" --csvf usn_journal.csv
+MFTECmd.exe -f "C:\cases\ntfs\UsnJrnl_J" --csv "C:\cases\analysis" --csvf usn_journal.csv
 
 # Python USN Journal parsing
 pip install pyusn

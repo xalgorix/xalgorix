@@ -52,7 +52,7 @@ nist_csf:
 ## Workflow
 
 ### Step 1: Receive and Acknowledge Alert
-```bash
+```text
 # Query Splunk for new critical/high severity alerts
 index=notable status=new severity IN ("critical","high")
 | table _time, rule_name, src, dest, severity, description

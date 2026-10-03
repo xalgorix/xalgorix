@@ -95,7 +95,7 @@ Test for Broken Object Level Authorization (BOLA) and Broken Function Level Auth
   - `PUT /api/users/456/role` (role modification)
   - `GET /api/admin/dashboard` (admin panel data)
 - **Mass assignment**: Send additional JSON properties not shown in the documentation:
-  ```json
+  ```http
   PUT /api/users/123
   {"name": "Test", "role": "admin", "isVerified": true, "balance": 99999}
   ```

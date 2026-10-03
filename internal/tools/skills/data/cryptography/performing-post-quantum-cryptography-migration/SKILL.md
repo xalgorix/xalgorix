@@ -27,6 +27,10 @@ nist_csf:
 - PR.DS-02
 - PR.DS-10
 ---
+## Helper prerequisites
+
+This bundled skill supplies methodology text; it does not install the local helper files invoked below. Before running a command using `agent.py` or a `scripts/` path, create that file from a complete implementation when one is supplied, or obtain and review the matching upstream helper. Check its `--help` and dependencies against the shown arguments. If no implementation is available, the invocation is a workflow illustration rather than a runnable command; use the documented underlying tools instead.
+
 
 # Performing Post-Quantum Cryptography Migration
 
@@ -131,7 +135,7 @@ The first step in PQC migration is discovering all cryptographic algorithm usage
 across the enterprise. This includes TLS configurations, certificates, code libraries,
 key stores, and protocol configurations.
 
-```python
+```bash
 # Scan TLS endpoints for quantum-vulnerable algorithms
 python scripts/agent.py --action scan_tls \
     --targets targets.txt \
@@ -150,7 +154,7 @@ The scanner identifies:
 Evaluate the organization's ability to swap cryptographic algorithms without
 major infrastructure changes:
 
-```python
+```bash
 # Assess crypto-agility readiness
 python scripts/agent.py --action assess_agility \
     --scan-results tls_inventory.json \
@@ -168,7 +172,7 @@ Key assessment areas:
 
 Test whether infrastructure supports hybrid key exchange with X25519MLKEM768:
 
-```python
+```bash
 # Test hybrid TLS support on target servers
 python scripts/agent.py --action test_hybrid_tls \
     --target server.example.com:443 \
@@ -229,7 +233,7 @@ ssl_prefer_server_ciphers on;
 Validate that ML-KEM (CRYSTALS-Kyber) key encapsulation works correctly in your
 environment:
 
-```python
+```bash
 # Test ML-KEM key encapsulation at all security levels
 python scripts/agent.py --action test_mlkem \
     --output mlkem_validation.json
@@ -249,7 +253,7 @@ ML-KEM parameter comparison:
 
 Validate ML-DSA (CRYSTALS-Dilithium) signature operations:
 
-```python
+```bash
 # Test ML-DSA digital signatures
 python scripts/agent.py --action test_mldsa \
     --output mldsa_validation.json
@@ -268,7 +272,7 @@ ML-DSA parameter comparison:
 
 Generate a prioritized migration roadmap based on inventory and assessment results:
 
-```python
+```bash
 # Generate complete migration roadmap
 python scripts/agent.py --action roadmap \
     --scan-results tls_inventory.json \

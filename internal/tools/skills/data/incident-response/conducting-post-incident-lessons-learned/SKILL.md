@@ -43,7 +43,7 @@ nist_csf:
 ## Workflow
 
 ### Step 1: Gather Incident Data
-```bash
+```text
 # Export incident timeline from ticketing system
 curl -s "https://thehive.local/api/v1/case/$CASE_ID/timeline" \
   -H "Authorization: Bearer $THEHIVE_API_KEY" | jq '.' > incident_timeline.json

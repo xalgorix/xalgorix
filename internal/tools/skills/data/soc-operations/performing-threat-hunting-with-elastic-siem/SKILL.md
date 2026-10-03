@@ -193,7 +193,7 @@ curl -X POST "https://kibana:5601/api/detection_engine/rules" \
 
 Create hunting dashboard with aggregations:
 
-```json
+```http
 GET logs-endpoint.events.process-*/_search
 {
   "size": 0,

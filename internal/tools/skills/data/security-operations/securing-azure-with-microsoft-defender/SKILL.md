@@ -69,7 +69,7 @@ nist_csf:
 
 Activate Defender plans for each workload type: Servers, Containers, App Service, Storage, Databases, Key Vault, Resource Manager, and DNS. Each plan provides specialized threat detection and vulnerability assessment.
 
-```powershell
+```bash
 # Enable Defender for Servers Plan 2
 az security pricing create --name VirtualMachines --tier Standard --subplan P2
 
@@ -96,7 +96,7 @@ az security pricing list --query "[?pricingTier=='Standard'].{Plan:name, Tier:pr
 
 Connect AWS accounts and GCP projects to Defender for Cloud for unified security posture management across cloud providers.
 
-```powershell
+```bash
 # Create AWS connector for CSPM
 az security security-connector create \
   --name aws-production-connector \
@@ -121,7 +121,7 @@ az security security-connector create \
 
 Analyze the Secure Score across all subscriptions. Each recommendation includes a risk priority based on asset exposure, internet exposure, and threat intelligence context.
 
-```powershell
+```bash
 # Get current Secure Score
 az security secure-score list \
   --query "[].{Name:displayName, Score:current, Max:max, Percentage:percentage}" -o table
@@ -141,7 +141,7 @@ az security assessment show \
 
 Enable Just-In-Time VM access to reduce the attack surface by opening management ports only when needed, and deploy adaptive application controls to whitelist approved executables.
 
-```powershell
+```bash
 # Enable JIT VM access policy
 az security jit-policy create \
   --resource-group production-rg \
@@ -170,7 +170,7 @@ az security jit-policy initiate \
 
 Configure workflow automation to trigger Logic Apps or Azure Functions when security alerts are generated. Set up email notifications for Critical and High severity alerts.
 
-```powershell
+```bash
 # Create workflow automation for high severity alerts
 az security automation create \
   --name high-severity-alert-automation \

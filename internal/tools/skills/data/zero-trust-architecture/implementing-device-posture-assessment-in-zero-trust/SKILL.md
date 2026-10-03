@@ -102,7 +102,13 @@ $compliancePolicy = @{
 
 New-MgDeviceManagementDeviceCompliancePolicy -BodyParameter $compliancePolicy
 
-# macOS Compliance Policy via Jamf Pro API
+```
+
+The following HTTP example uses a POSIX shell and requires a documented API
+supported by the installed management-system version:
+
+```bash
+# macOS compliance-policy API example
 curl -X POST "https://jamf.company.com/api/v1/compliance-policies" \
   -H "Authorization: Bearer ${JAMF_TOKEN}" \
   -H "Content-Type: application/json" \

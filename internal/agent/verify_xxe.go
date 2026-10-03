@@ -130,6 +130,9 @@ func (a *Agent) verifyXXETool(args map[string]string) (tools.Result, error) {
 	fileURI := "file://" + file
 	probeBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE data [<!ENTITY xxe SYSTEM %q>]><data>&xxe;</data>`, fileURI)
 
+	if stop := a.injectionRateGate(); stop != "" {
+		return tools.Result{Error: stop}, nil
+	}
 	baselineResp, _, bErr := a.sendXMLProbe(method, absURL, headers, baselineBody)
 	if bErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_xxe: baseline request failed: %v", bErr)}, nil

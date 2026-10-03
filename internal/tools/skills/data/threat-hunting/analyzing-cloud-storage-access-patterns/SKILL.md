@@ -27,6 +27,10 @@ nist_csf:
 - GV.SC-06
 - DE.CM-01
 ---
+## Helper prerequisites
+
+This bundled skill supplies methodology text; it does not install the local helper files invoked below. Before running a command using `agent.py` or a `scripts/` path, create that file from a complete implementation when one is supplied, or obtain and review the matching upstream helper. Check its `--help` and dependencies against the shown arguments. If no implementation is available, the invocation is a workflow illustration rather than a runnable command; use the documented underlying tools instead.
+
 
 
 # Analyzing Cloud Storage Access Patterns

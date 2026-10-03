@@ -1,29 +1,9 @@
-// Package agent — verify_csrf.go implements verify_csrf: a Cross-Site Request
-// Forgery confirmer, rounding out the deterministic verifier family
-// (verify_sqli/verify_ssti/verify_xss/verify_xxe/verify_oob).
-//
-// CSRF is the one common class black-box scanners flag by shape ("this form has
-// no anti-CSRF token") but rarely PROVE, because proving it means showing the
-// server actually honors a forged cross-site request. verify_csrf does exactly
-// that in one call: it replays the state-changing request the way an attacker's
-// page would — a forged Origin/Referer and NO anti-CSRF token, reusing the scan
-// session's cookies — and reads the outcome:
-//
-//   - the server ACCEPTS it (2xx/3xx, no token/forbidden rejection) → confirmed
-//   - it is rejected (401/403/419, or a csrf/token/forbidden message) → NOT
-//
-// It deliberately requires ambient cookie authentication and declines when the
-// scan has no Cookie header or authenticates with an Authorization header
-// (Bearer/Basic). A cross-site attacker's browser auto-sends cookies, but it
-// does not synthesize an API Authorization header; and an anonymous request
-// accepted with no victim authority is not, by itself, proof of CSRF. This
-// keeps the confirmer honest on public password-reset and modern token APIs.
-//
-// On confirmation it records evidence in the shared ledger (CWE-352); it does
-// NOT auto-report. Same safety envelope as the other verifiers: it scope-checks
-// the resolved host and refuses the operator's own machine/local network,
-// honors the request-rate policy and cancellation, does not follow redirects,
-// and is disabled in passive mode.
+// Package agent — verify_csrf.go probes candidate CSRF endpoints using an
+// ambient cookie and a forged Origin/Referer. HTTP acceptance is an observation,
+// not proof of a state change or of browser cookie eligibility. Candidates need
+// independent browser reproduction and a before/after victim-state comparison.
+// The probe omits header credentials, declines non-simple browser requests,
+// checks scope, rate policy and cancellation, and is disabled in passive mode.
 package agent
 
 import (
@@ -31,7 +11,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
@@ -40,7 +19,7 @@ import (
 func (a *Agent) registerVerifyCSRFTool(reg *tools.Registry) {
 	reg.Register(&tools.Tool{
 		Name:        "verify_csrf",
-		Description: "CONFIRM Cross-Site Request Forgery on a cookie-authenticated state-changing endpoint (the CSRF member of the verifier family). Give it a url (or ledger hypothesis_id) and the form body (data) of the state change. It replays the request the way an attacker's page would — a forged Origin/Referer and NO anti-CSRF token, reusing the scan session cookie — and confirms CSRF when the server ACCEPTS it (2xx/3xx, no token/forbidden rejection): the action fires from any origin with the victim's ambient authority. It declines when no Cookie session is configured or the endpoint is protected by an Authorization header (Bearer/Basic), avoiding false positives on anonymous password-reset and token-auth APIs. On success it records CWE-352 evidence in the ledger; report it with the accepted cross-site request as proof. Uses the scan session auth, does not follow redirects, disabled in passive mode. Reach for it on password/email change, role or permission update, delete, funds transfer, or settings writes that require a cookie-authenticated victim.",
+		Description: "Probe possible CSRF on a cookie-authenticated endpoint. Give it a url (or hypothesis_id) and a form body without an anti-CSRF token. It sends a forged Origin/Referer with the ambient Cookie only. Accepted HTTP responses remain candidates requiring independent browser reproduction and a before/after victim-state check. Raw Cookie replay cannot establish SameSite/Secure eligibility; a 2xx/3xx can be a no-op or login redirect. Non-simple methods/content types require separate browser/CORS verification and are not replayed. No exploit evidence is recorded from acceptance alone. Does not follow redirects; disabled in passive mode.",
 		Parameters: []tools.Parameter{
 			{Name: "url", Description: "Absolute URL (scheme://host/path) or path of the state-changing endpoint. One of url or hypothesis_id is required.", Required: false},
 			{Name: "hypothesis_id", Description: "Optional ledger hypothesis id carrying an HTTP path; used when 'url' is not given.", Required: false},
@@ -105,22 +84,29 @@ func (a *Agent) verifyCSRFTool(args map[string]string) (tools.Result, error) {
 	if headers == nil {
 		headers = map[string]string{}
 	}
-	// CSRF rides ambient cookie auth. If the session authenticates with an
-	// Authorization header (Bearer/Basic), the endpoint is NOT CSRF-able — a
-	// cross-site attacker's browser never attaches that header — so decline
-	// rather than emit a false positive on a token-auth API.
-	for k := range headers {
-		if strings.EqualFold(k, "Authorization") {
-			return tools.Result{
-				Output:   "CSRF NOT applicable: this scan authenticates with an Authorization header (Bearer/Basic), which a cross-site attacker cannot forge — the endpoint is not CSRF-able. CSRF requires ambient cookie auth.",
-				Metadata: map[string]any{"csrf_confirmed": false, "reason": "header-auth"},
-			}, nil
-		}
-	}
+	// Cookie authentication can coexist with a header credential. The forged
+	// request sends only the ambient cookie, preserving that distinct test.
 	if !hasAmbientCookie(headers) {
 		return tools.Result{
 			Output:   "CSRF NOT applicable: no ambient Cookie session is configured. An anonymous request accepted without victim authority may indicate missing abuse controls, but it is not proof of Cross-Site Request Forgery. Supply a legitimate cookie-authenticated session and retry the state-changing action.",
 			Metadata: map[string]any{"csrf_confirmed": false, "reason": "no-cookie-auth"},
+		}, nil
+	}
+
+	// Cross-site forms cannot synthesize authorization or custom credentials.
+	ambient := map[string]string{}
+	for key, value := range headers {
+		if strings.EqualFold(key, "Cookie") {
+			ambient["Cookie"] = value
+		}
+	}
+	headers = ambient
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	if (method != "POST" && method != "GET" && method != "HEAD") ||
+		(mediaType != "application/x-www-form-urlencoded" && mediaType != "multipart/form-data" && mediaType != "text/plain") {
+		return tools.Result{
+			Output:   "CSRF inconclusive: this method or Content-Type requires browser preflight/CORS permission. Reproduce the actual cross-site browser request with the victim session and inspect the resulting state; raw HTTP replay would not establish browser feasibility.",
+			Metadata: map[string]any{"csrf_confirmed": false, "inconclusive": true, "reason": "non-simple-browser-request"},
 		}, nil
 	}
 
@@ -129,6 +115,9 @@ func (a *Agent) verifyCSRFTool(args map[string]string) (tools.Result, error) {
 	headers["Referer"] = attackerOrigin + "/"
 	headers["Content-Type"] = contentType
 
+	if stop := a.injectionRateGate(); stop != "" {
+		return tools.Result{Error: stop}, nil
+	}
 	status, body, reqLine, sErr := a.sendStateChangeProbe(method, absURL, headers, data)
 	if sErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_csrf: request failed: %v", sErr)}, nil
@@ -144,31 +133,9 @@ func (a *Agent) verifyCSRFTool(args map[string]string) (tools.Result, error) {
 		}, nil
 	}
 
-	confirm := fmt.Sprintf("Cross-Site Request Forgery CONFIRMED at %s: the server accepted a state-changing %s with a forged cross-site Origin (%s) and no anti-CSRF token — the action can be triggered from any origin against an authenticated victim (CWE-352).", endpoint, method, attackerOrigin)
-	proof := fmt.Sprintf("Forged request (cross-site Origin, no CSRF token):\n%s\nData: %s\n→ HTTP %d (accepted). %s", reqLine, boundedText(data, 200), status, note)
-
-	h := l.Upsert(scanctx.Hypothesis{
-		Title:      "Cross-Site Request Forgery at " + endpoint,
-		VulnClass:  "csrf",
-		Endpoint:   endpoint,
-		Target:     baseURLOf(u),
-		Confidence: 0.75,
-		Status:     scanctx.HypothesisTesting,
-		Origin:     "verify_csrf",
-		NextAction: "Report as CSRF (CWE-352) using the accepted cross-site request as proof; strengthen impact by chaining the state change (email/password takeover) and link the finding via add_hypothesis_evidence(kind=finding_ref).",
-	})
-	l.AddEvidence(h.ID, scanctx.Evidence{
-		Kind:       "exploit",
-		Summary:    confirm,
-		Request:    reqLine,
-		Response:   boundedText(body, 400),
-		Confidence: 0.75,
-		AgentID:    a.ledgerOrigin(),
-	})
-
 	return tools.Result{
-		Output:   confirm + fmt.Sprintf(" Recorded in the ledger (%s) — report it as CWE-352 and link the finding.\n\n%s", h.ID, proof),
-		Metadata: map[string]any{"csrf_confirmed": true, "endpoint": endpoint, "hypothesis_id": h.ID, "status": status},
+		Output:   fmt.Sprintf("CSRF candidate at %s: HTTP %d accepted the forged-origin %s request. %s\n%s\nAcceptance alone does not establish a state change or that a victim browser would send the cookie (SameSite/Secure protections may prevent it). Reproduce the actual cross-site browser action and compare victim state before/after; preserve the candidate for review until that proof exists.", endpoint, status, method, note, reqLine),
+		Metadata: map[string]any{"csrf_confirmed": false, "csrf_candidate": true, "inconclusive": true, "endpoint": endpoint, "status": status},
 	}, nil
 }
 
@@ -200,14 +167,12 @@ func (a *Agent) sendStateChangeProbe(method, rawURL string, headers map[string]s
 	return resp.StatusCode, string(resp.Body), reqLine, nil
 }
 
-// csrfVerdict decides CSRF from the forged request's status and body. A success
-// with no anti-CSRF rejection means the state change fired from a foreign
-// origin with no token; a 401/403/419 or a token/forbidden message means a
-// defense (token or Origin/Referer check) blocked it.
+// csrfVerdict classifies HTTP acceptance only. The caller must not interpret an
+// accepted response as proof of a victim state change or browser exploitability.
 func csrfVerdict(status int, body string) (confirmed bool, note string) {
 	lb := strings.ToLower(body)
 	if status == 401 || status == 403 || status == 419 || csrfRejectionMarker(lb) {
-		return false, fmt.Sprintf("the forged cross-site request was rejected (HTTP %d / anti-CSRF or authorization check) — the endpoint validates a token or the request origin, so it is NOT CSRF-able.", status)
+		return false, fmt.Sprintf("the response signals a possible anti-CSRF or authorization rejection (HTTP %d). Inspect actual victim state and browser behavior before concluding exploitability.", status)
 	}
 	if status >= 200 && status < 400 {
 		return true, "the forged cross-site request was accepted with no anti-CSRF token."
@@ -219,8 +184,8 @@ func csrfVerdict(status int, body string) (confirmed bool, note string) {
 // authorization rejection.
 func csrfRejectionMarker(lb string) bool {
 	for _, m := range []string{
-		"csrf", "xsrf", "invalid token", "missing token", "token mismatch",
-		"token required", "invalid csrf", "forbidden", "not allowed",
+		"invalid token", "missing token", "token mismatch",
+		"token required", "invalid csrf", "csrf verification failed", "csrf token missing", "csrf token required", "csrf token mismatch", "xsrf token missing", "xsrf token mismatch", "forbidden", "not allowed",
 		"access denied", "unauthorized", "authentication required",
 	} {
 		if strings.Contains(lb, m) {

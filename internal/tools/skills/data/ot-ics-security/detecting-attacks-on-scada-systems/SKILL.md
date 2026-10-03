@@ -234,7 +234,7 @@ if __name__ == "__main__":
 
 Create detection rules for known SCADA attack patterns including those used by TRITON, Industroyer/CrashOverride, and PIPEDREAM/INCONTROLLER.
 
-```yaml
+```text
 # Suricata Rules for SCADA Attack Detection
 # Deploy on IDS sensor monitoring OT network SPAN port
 

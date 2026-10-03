@@ -83,7 +83,7 @@ The agent script produces a JSON report containing:
 - A CI gate verdict (pass/fail) based on the configured severity threshold
 - Execution metadata including scan duration and tool versions
 
-```json
+```text
 {
   "scan_summary": {
     "tool": "both",

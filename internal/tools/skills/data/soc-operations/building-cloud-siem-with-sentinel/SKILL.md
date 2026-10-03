@@ -66,7 +66,7 @@ nist_csf:
 
 Create a Log Analytics workspace optimized for security data and enable data connectors for multi-cloud ingestion.
 
-```powershell
+```bash
 # Create Log Analytics workspace
 az monitor log-analytics workspace create \
   --resource-group security-rg \
@@ -228,7 +228,7 @@ suspicious_roles
 
 Connect threat intelligence providers and create indicator-based matching rules to detect communication with known malicious infrastructure.
 
-```powershell
+```bash
 # Enable Microsoft Threat Intelligence connector
 az sentinel data-connector create \
   --resource-group security-rg \

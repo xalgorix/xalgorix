@@ -62,6 +62,8 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      XALGORIX_REQUIRE_ORACLE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,6 +78,14 @@ jobs:
 
       - name: Download modules
         run: go mod download
+
+      - name: Set up application oracle runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install application oracle dependencies
+        run: python -m pip install -r internal/agent/testdata/oracle-requirements.txt
 
       - name: go vet
         run: go vet ./...

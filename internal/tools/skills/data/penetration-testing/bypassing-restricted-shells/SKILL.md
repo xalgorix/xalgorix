@@ -65,7 +65,7 @@ echo $0              # confirm the shell binary (rbash vs bash)
 ```
 
 ### Step 2: Try the cheapest escapes first (SSH / PATH / allowed binary)
-```bash
+```text
 # Re-login bypassing the restricted shell entirely
 ssh -t user@<IP> bash
 ssh user@<IP> -t "bash --noprofile -i"

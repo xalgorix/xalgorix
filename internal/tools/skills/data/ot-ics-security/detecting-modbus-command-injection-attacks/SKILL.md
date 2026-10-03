@@ -397,7 +397,7 @@ if __name__ == "__main__":
 
 ### Step 2: Deploy Suricata Rules for Modbus Attack Detection
 
-```yaml
+```text
 # Suricata IDS Rules for Modbus Command Injection Detection
 # Reference: MITRE ATT&CK for ICS, FrostyGoop analysis
 

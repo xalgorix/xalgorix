@@ -182,7 +182,7 @@ spec:
 
 Tailscale ACLs define who can access what within your tailnet using a declarative JSON format. The default policy is deny-all, making it zero trust by design.
 
-```json
+```jsonc
 {
   "acls": [
     // Engineering team can access development servers

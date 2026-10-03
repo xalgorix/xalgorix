@@ -210,9 +210,7 @@ aws wafv2 update-web-acl \
 
 Add AWS WAF Bot Control to detect and manage automated traffic.
 
-```bash
-# Add Bot Control managed rule group
-# (Add to the rules array when updating the Web ACL)
+```json
 {
   "Name": "AWSManagedRulesBotControlRuleSet",
   "Priority": 6,
@@ -220,18 +218,26 @@ Add AWS WAF Bot Control to detect and manage automated traffic.
     "ManagedRuleGroupStatement": {
       "VendorName": "AWS",
       "Name": "AWSManagedRulesBotControlRuleSet",
-      "ManagedRuleGroupConfigs": [{
-        "AWSManagedRulesBotControlRuleSet": {
-          "InspectionLevel": "COMMON"
+      "ManagedRuleGroupConfigs": [
+        {
+          "AWSManagedRulesBotControlRuleSet": {
+            "InspectionLevel": "COMMON"
+          }
         }
-      }],
+      ],
       "ExcludedRules": [
-        {"Name": "CategoryHttpLibrary"},
-        {"Name": "SignalNonBrowserUserAgent"}
+        {
+          "Name": "CategoryHttpLibrary"
+        },
+        {
+          "Name": "SignalNonBrowserUserAgent"
+        }
       ]
     }
   },
-  "OverrideAction": {"None": {}},
+  "OverrideAction": {
+    "None": {}
+  },
   "VisibilityConfig": {
     "SampledRequestsEnabled": true,
     "CloudWatchMetricsEnabled": true,
@@ -244,73 +250,103 @@ Add AWS WAF Bot Control to detect and manage automated traffic.
 
 Build custom WAF rules for API-specific security requirements.
 
-```bash
-# Block requests without required API key header
-{
-  "Name": "RequireAPIKey",
-  "Priority": 7,
-  "Statement": {
-    "NotStatement": {
-      "Statement": {
-        "ByteMatchStatement": {
-          "FieldToMatch": {
-            "SingleHeader": {"Name": "x-api-key"}
-          },
-          "PositionalConstraint": "EXACTLY",
-          "SearchString": "",
-          "TextTransformations": [{"Priority": 0, "Type": "NONE"}]
+```json
+[
+  {
+    "Name": "RequireAPIKey",
+    "Priority": 7,
+    "Statement": {
+      "NotStatement": {
+        "Statement": {
+          "SizeConstraintStatement": {
+            "FieldToMatch": {
+              "SingleHeader": {
+                "Name": "x-api-key"
+              }
+            },
+            "ComparisonOperator": "GT",
+            "Size": 0,
+            "TextTransformations": [
+              {
+                "Priority": 0,
+                "Type": "NONE"
+              }
+            ]
+          }
         }
       }
-    }
-  },
-  "Action": {"Block": {"CustomResponse": {"ResponseCode": 403}}},
-  "VisibilityConfig": {
-    "SampledRequestsEnabled": true,
-    "CloudWatchMetricsEnabled": true,
-    "MetricName": "RequireAPIKey"
-  }
-}
-
-# Geo-restrict to allowed countries
-{
-  "Name": "GeoRestriction",
-  "Priority": 8,
-  "Statement": {
-    "NotStatement": {
-      "Statement": {
-        "GeoMatchStatement": {
-          "CountryCodes": ["US", "CA", "GB", "DE", "FR", "AU"]
+    },
+    "Action": {
+      "Block": {
+        "CustomResponse": {
+          "ResponseCode": 403
         }
       }
+    },
+    "VisibilityConfig": {
+      "SampledRequestsEnabled": true,
+      "CloudWatchMetricsEnabled": true,
+      "MetricName": "RequireAPIKey"
     }
   },
-  "Action": {"Block": {}},
-  "VisibilityConfig": {
-    "SampledRequestsEnabled": true,
-    "CloudWatchMetricsEnabled": true,
-    "MetricName": "GeoRestriction"
-  }
-}
-
-# Block oversized request bodies (prevent payload attacks)
-{
-  "Name": "MaxBodySize",
-  "Priority": 9,
-  "Statement": {
-    "SizeConstraintStatement": {
-      "FieldToMatch": {"Body": {"OversizeHandling": "MATCH"}},
-      "ComparisonOperator": "GT",
-      "Size": 10240,
-      "TextTransformations": [{"Priority": 0, "Type": "NONE"}]
+  {
+    "Name": "GeoRestriction",
+    "Priority": 8,
+    "Statement": {
+      "NotStatement": {
+        "Statement": {
+          "GeoMatchStatement": {
+            "CountryCodes": [
+              "US",
+              "CA",
+              "GB",
+              "DE",
+              "FR",
+              "AU"
+            ]
+          }
+        }
+      }
+    },
+    "Action": {
+      "Block": {}
+    },
+    "VisibilityConfig": {
+      "SampledRequestsEnabled": true,
+      "CloudWatchMetricsEnabled": true,
+      "MetricName": "GeoRestriction"
     }
   },
-  "Action": {"Block": {}},
-  "VisibilityConfig": {
-    "SampledRequestsEnabled": true,
-    "CloudWatchMetricsEnabled": true,
-    "MetricName": "MaxBodySize"
+  {
+    "Name": "MaxBodySize",
+    "Priority": 9,
+    "Statement": {
+      "SizeConstraintStatement": {
+        "FieldToMatch": {
+          "Body": {
+            "OversizeHandling": "MATCH"
+          }
+        },
+        "ComparisonOperator": "GT",
+        "Size": 10240,
+        "TextTransformations": [
+          {
+            "Priority": 0,
+            "Type": "NONE"
+          }
+        ]
+      }
+    },
+    "Action": {
+      "Block": {}
+    },
+    "VisibilityConfig": {
+      "SampledRequestsEnabled": true,
+      "CloudWatchMetricsEnabled": true,
+      "MetricName": "MaxBodySize"
+    }
   }
-}
+]
 ```
 
 ### Step 5: Associate WAF with API Gateway and Enable Logging

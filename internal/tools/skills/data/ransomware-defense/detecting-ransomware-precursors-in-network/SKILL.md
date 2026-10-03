@@ -72,7 +72,7 @@ Map network-observable indicators to each pre-encryption phase:
 
 **Suricata rules for common ransomware precursors:**
 
-```yaml
+```suricata
 # Cobalt Strike default HTTPS beacon profile detection
 alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"RANSOMWARE PRECURSOR - Cobalt Strike Default TLS Certificate"; tls.cert_subject; content:"Major Cobalt Strike"; sid:3000001; rev:1;)
 

@@ -25,16 +25,29 @@ Run Microsoft RESTler for stateful, grammar-driven REST API fuzzing: producer-co
 
 ### Step 1: Compile the Grammar
 ```bash
-restler compile --api_spec tmp/openapi.json --restler_fuzz_settings "epoch"
+restler compile --api_spec tmp/openapi.json
 ```
 Inspect `Compile/grammar.py` for unresolved producer-consumer dependencies — endpoints that never get inputs are silently untested.
 
 ### Step 2: Configure Auth
+Save the following JSON as `restler_user_settings.json`. Supply a reviewed
+`refresh_token.py` implementing the test application's actual login protocol.
+RESTler requires a metadata line followed by complete token header lines; a
+bare access-token string is not valid refresh output. For example:
+
+```text
+{u'app1': {}}
+Authorization: Bearer FIXTURE_TOKEN_VALUE
+```
+
 ```json
-// restler_user_settings.json — token refresh keeps fuzzing authenticated
 {
-  "token_refresh_cmd": "curl -sk -X POST https://TARGET/api/auth/login -d '...' | jq -r .access_token",
-  "token_refresh_interval": 1800
+  "authentication": {
+    "token": {
+      "token_refresh_cmd": "python3 refresh_token.py",
+      "token_refresh_interval": 1800
+    }
+  }
 }
 ```
 Verify the auth header is LIVE before trusting a clean run: a broken refresh command makes RESTler fuzz as anonymous and "find nothing".
@@ -42,27 +55,46 @@ Verify the auth header is LIVE before trusting a clean run: a broken refresh com
 ### Step 3: Run Modes
 ```bash
 # test: replay each request once — validates the grammar and auth
-restler test --grammar ./Compile/grammar.py
+restler test --grammar_file ./Compile/grammar.py \
+  --dictionary_file ./Compile/dict.json --settings restler_user_settings.json
 # fuzz-lean: single-pass fuzzing with default payloads — fast baseline
 # fuzz: full producer-consumer sequences — highest bug yield
-restler fuzz-lean --grammar ./Compile/grammar.py --time_budget 2
-restler fuzz --grammar ./Compile/grammar.py --time_budget 8 \
-  --checkers NamespaceRule,UseAfterFree,PayloadBody,InsecureRedirect
+restler fuzz-lean --grammar_file ./Compile/grammar.py \
+  --dictionary_file ./Compile/dict.json --settings restler_user_settings.json
+restler fuzz --grammar_file ./Compile/grammar.py \
+  --dictionary_file ./Compile/dict.json --settings restler_user_settings.json --time_budget 8
 ```
-Enable the checkers that lean mode skips: `NamespaceRule` (cross-tenant access), `UseAfterFree` (deleted resources still served), `PayloadBody` (injection payloads in bodies).
+Configure the desired checkers in the settings supported by the installed
+RESTler version. The namespace checker requires two independently authorized
+test identities with different private resources; one token cannot test
+cross-tenant isolation. Confirm checker names and activation with that
+version's `--help` and documentation rather than inventing CLI switches.
 
 ### Step 4: Custom Dictionary (app-specific bugs)
-```json
-// dict.json — seed with real object IDs and injection payloads
-["admin", "root", "1", "2", "12345", "' OR '1'='1'--", "{{\"$ne\":\"x\"}}",
- "../../etc/passwd", "\u0000", "A".repeat(10000)]
+```bash
+# Generate a JSON dictionary; JavaScript expressions are not valid JSON.
+python3 - <<'PY' > dict.json
+import json
+from pathlib import Path
+
+dictionary = json.loads(Path("Compile/dict.json").read_text())
+dictionary.setdefault("restler_fuzzable_string", []).extend([
+        "admin", "root", "1", "2", "12345", "' OR '1'='1'--",
+        '{"$ne":"x"}', "../../etc/passwd", "\u0000", "A" * 10000,
+])
+dictionary.setdefault("restler_fuzzable_int", []).extend(["0", "1", "-1"])
+print(json.dumps(dictionary))
+PY
 ```
-Per-resource dynamic values via `restler_custom_payload` in the grammar. The default dictionary rarely triggers app-specific bugs.
+The compiler's other dictionary keys are preserved. After generating this
+merged file, rerun the chosen mode with `--dictionary_file ./dict.json`.
+Use `restler_custom_payload` for per-resource dynamic values in the grammar.
 
 ### Step 5: Triage Bug Buckets
 ```text
 Per bug: request sequence + response in RestlerResults.
-REAL: 500s with stack traces, NamespaceRule cross-tenant reads, UseAfterFree
+REQUIRES TRIAGE: 500s with stack traces (not automatically security impact).
+CONFIRMED ONLY WITH IMPACT: NamespaceRule cross-tenant reads, UseAfterFree
       (deleted resource still returns 200/data), auth bypasses in sequences
 NOISE: GC/timing races, expected 401s from token refresh gaps, soft validation 422s
 Reproduce every real finding manually (outside RESTler) before reporting —

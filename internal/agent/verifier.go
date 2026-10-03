@@ -26,6 +26,7 @@ import (
 
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
@@ -109,12 +110,8 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 	a.emit(Event{Type: "message", Content: fmt.Sprintf("🔎 Verifier: independently re-testing candidate %q before it can be reported...", req.Title)})
 	a.client.SetTemperature(TempValidator)
 
-	// Accumulate the verifier's OWN re-test tool outputs. If the model reproduces
-	// concrete impact but forgets to call submit_verdict (a common failure with
-	// some models), we can still auto-confirm from what IT independently observed.
-	var observed strings.Builder
-
 	deadline := time.Now().Add(verifierDeadline)
+	hasRetest := false
 	for turn := 0; turn < verifierMaxTurns && verdict == nil; turn++ {
 		if a.stopped.Load() {
 			return reporting.VerificationVerdict{Inconclusive: true, Reason: "scan stopped during verification"}
@@ -157,13 +154,15 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 			// applies, so the verifier cannot probe out-of-scope/local hosts and
 			// a hung re-test cannot outlive the report_vulnerability call.
 			res := a.execVerifierToolGuarded(vreg, tc.Name, tc.Args, deadline)
+			if res.Error == "" && res.Output != "" && !strings.Contains(res.Output, "OUT-OF-SCOPE TARGET BLOCKED") {
+				switch tc.Name {
+				case "http_request", "terminal_execute", "browser_action", "verify_path_traversal", "oob_poll":
+					hasRetest = true
+				}
+			}
 			out := res.Output
 			if res.Error != "" {
 				out = "error: " + res.Error
-			}
-			if res.Output != "" {
-				observed.WriteString(res.Output)
-				observed.WriteString("\n")
 			}
 			// Only emit valid tool results to the live feed; suppress malformed schema errors (e.g. missing params)
 			if res.Error == "" || (!strings.Contains(res.Error, "missing required parameter") && !strings.Contains(res.Error, "unknown tool")) {
@@ -193,28 +192,21 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 		}
 	}
 
-	// Evidence-based auto-confirm safety net. Some models re-run the exploit and
-	// clearly reproduce impact (e.g. the /eval re-test returns `uid=0(root)`) but
-	// never call submit_verdict, or hedge to "inconclusive". If the verifier's
-	// OWN observed output independently shows concrete impact for this finding's
-	// class, that IS an independent reproduction — confirm it. This never fires
-	// on an explicit "rejected" (positive disproof), which we always respect.
-	if (verdict == nil || verdict.Inconclusive) &&
-		reporting.HasConcreteImpact(observed.String()) {
-		a.emit(Event{Type: "message", Content: fmt.Sprintf("✅ Verifier CONFIRMED (reproduced concrete impact): %s", req.Title)})
-		return reporting.VerificationVerdict{
-			Confirmed: true,
-			Reason:    "verifier independently reproduced concrete impact during re-testing",
-			Evidence:  truncStr(strings.TrimSpace(observed.String()), 1500),
-		}
-	}
+	// Tool text may contain documentation, reflected payloads, or evidence from
+	// another route or vulnerability class. Keywords cannot independently prove
+	// the candidate's mechanism; preserve an inconclusive verdict for review.
 
 	if verdict == nil {
 		return reporting.VerificationVerdict{Inconclusive: true, Reason: "verifier did not reach a verdict within the turn budget"}
 	}
+	if verdict.Confirmed && !hasRetest {
+		return reporting.VerificationVerdict{Inconclusive: true, Reason: "verifier submitted confirmation without a successful independent re-test"}
+	}
 
 	if verdict.Confirmed {
 		a.emit(Event{Type: "message", Content: fmt.Sprintf("✅ Verifier CONFIRMED: %s", req.Title)})
+	} else if verdict.Inconclusive {
+		a.emit(Event{Type: "message", Content: fmt.Sprintf("🔎 Verifier INCONCLUSIVE %q: %s", req.Title, verdict.Reason)})
 	} else {
 		a.emit(Event{Type: "message", Content: fmt.Sprintf("🚫 Verifier REJECTED %q: %s", req.Title, verdict.Reason)})
 	}
@@ -228,11 +220,24 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 // letting it probe hosts the main agent blocks and leaving a hung tool running
 // past the report_vulnerability ceiling.
 func (a *Agent) execVerifierToolGuarded(vreg *tools.Registry, name string, args map[string]string, deadline time.Time) tools.Result {
+	if time.Until(deadline) <= 0 {
+		return tools.Result{Error: "[verifier deadline reached]"}
+	}
+	if a.ctx != nil && a.ctx.Err() != nil {
+		return tools.Result{Error: "agent stopped during verification"}
+	}
+	if name == "http_request" && scopeguard.IsLocalOrListener(a.localGuard, args["url"]) {
+		return tools.Result{Output: "⛔ OUT-OF-SCOPE TARGET BLOCKED — the HTTP request points at the operator's machine or listener. Submit an inconclusive verdict if it cannot be independently verified."}
+	}
 	if blocked, reason := a.shouldBlockForOutOfScope(name, args); blocked {
 		return tools.Result{Output: "⛔ OUT-OF-SCOPE TARGET BLOCKED — " + reason +
 			"\nYou cannot probe this host during verification. If the finding depends on reaching it, it is not independently verifiable here — submit an 'inconclusive' verdict."}
 	}
 
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return tools.Result{Error: "[verifier deadline reached]"}
+	}
 	resultCh := make(chan tools.Result, 1)
 	go func() {
 		defer func() {
@@ -248,10 +253,6 @@ func (a *Agent) execVerifierToolGuarded(vreg *tools.Registry, name string, args 
 	}()
 
 	timeout := a.hardTimeoutFor(name)
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return tools.Result{Error: "[verifier deadline reached]"}
-	}
 	if remaining < timeout {
 		timeout = remaining
 	}

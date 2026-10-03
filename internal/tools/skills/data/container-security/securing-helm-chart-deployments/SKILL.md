@@ -152,7 +152,7 @@ image:
 
 ### Template with Security Contexts
 
-```yaml
+```gotmpl
 # templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -177,7 +177,7 @@ spec:
 
 ### Use External Secrets (Not Helm Values)
 
-```yaml
+```gotmpl
 # templates/external-secret.yaml
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret

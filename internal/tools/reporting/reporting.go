@@ -3156,6 +3156,7 @@ func checkFalsePositive(title, description, severity, proof string) string {
 var dbmsErrorSignatures = []string{
 	"you have an error in your sql", "sql syntax", "sqlstate", "ora-0",
 	"psqlexception", "sqlite3::", "unclosed quotation mark after the character string",
+	"sqlite3.operationalerror:", "sqlite3.programmingerror:", "sqlite_error:",
 	"quoted string not properly terminated", "warning: mysql",
 }
 

@@ -209,7 +209,7 @@ proxychains nmap -sT -p 80,443,445,3389 10.10.0.0/24
 
 ### Privilege Escalation
 
-```bash
+```text
 # Windows privilege escalation
 # Check for local admin via token impersonation
 meterpreter> getsystem

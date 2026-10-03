@@ -120,8 +120,10 @@ mitre_attack:
     - Process: OS API Execution (Sysmon EventCode 10)
     - Process: Process Access (Windows Security 4663)
 log_sources:
-  - index: sysmon, sourcetype: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
-  - index: wineventlog, sourcetype: WinEventLog:Security
+  - index: sysmon
+    sourcetype: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
+  - index: wineventlog
+    sourcetype: WinEventLog:Security
 severity: High
 confidence: Medium-High
 false_positive_sources:
@@ -189,7 +191,7 @@ DeviceProcessEvents
 
 Validate detection rules using Atomic Red Team:
 
-```bash
+```powershell
 # Install Atomic Red Team
 IEX (IWR 'https://raw.githubusercontent.com/redcanaryco/invoke-atomicredteam/master/install-atomicredteam.ps1' -UseBasicParsing)
 Install-AtomicRedTeam -getAtomics

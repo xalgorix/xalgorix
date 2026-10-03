@@ -27,9 +27,9 @@ func TestSqliErrorVerdict(t *testing.T) {
 		},
 		{
 			// Simulated/any-quote apps: broken AND balanced error, baseline clean.
-			// Still confirmed (quote-triggered error absent on benign input) but lower confidence.
+			// Quote rejection is also possible; this is not a reproduced break/recover.
 			name: "broken and balanced both error", baseline: clean, broken: dbErr, balanced: dbErr,
-			wantConfirmed: true, wantConf: 0.8,
+			wantConfirmed: false, wantConf: 0,
 		},
 		{
 			// Always-on error page: baseline already errors → reject.

@@ -61,7 +61,7 @@ echo $PATH | tr ':' '\n'   # then ls each dir for GTFOBins candidates
 
 Search GTFOBins for any binary you can execute that has a "Shell" property.
 
-```bash
+```text
 # Editors / pagers
 vi    -> :set shell=/bin/sh   then   :shell
 vim   -> :!/bin/sh

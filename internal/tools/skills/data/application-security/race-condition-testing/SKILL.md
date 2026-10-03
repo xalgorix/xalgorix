@@ -1,6 +1,7 @@
 ---
 name: race-condition-testing
-description: Application-level concurrency abuse - identify race-prone business operations (coupons, payments,
+description: >-
+  Application-level concurrency abuse - identify race-prone business operations (coupons, payments,
   withdrawals, quotas, OTP, invites) and synchronize parallel requests with bounded concurrency to prove a
   duplicated persistent effect: double-spend, limit overrun, duplicate creation, TOCTOU.
 domain: cybersecurity

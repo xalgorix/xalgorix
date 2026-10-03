@@ -62,7 +62,11 @@ nist_csf:
 # SECURE: Pinned to immutable SHA digest
 - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
 
-# Use Dependabot to auto-update pinned SHAs
+```
+
+Use a separate Dependabot configuration:
+
+```yaml
 # .github/dependabot.yml
 version: 2
 updates:

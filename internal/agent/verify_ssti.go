@@ -122,6 +122,9 @@ func (a *Agent) verifySSTITool(args map[string]string) (tools.Result, error) {
 	if e0 != nil {
 		return tools.Result{Error: "verify_ssti: could not build the baseline URL for parameter " + parameter}, nil
 	}
+	if stop := a.injectionRateGate(); stop != "" {
+		return tools.Result{Error: stop}, nil
+	}
 	baselineBody, _, bErr := a.sendInjectionProbe(method, baselineURL, headers)
 	if bErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_ssti: baseline request failed: %v", bErr)}, nil

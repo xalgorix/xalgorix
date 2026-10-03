@@ -131,7 +131,7 @@ Azure AD > Conditional Access > New Policy:
 
 Test each policy control on both platforms:
 
-```bash
+```text
 # Verify data transfer restrictions
 1. Open managed app (Outlook)
 2. Copy text from email body
