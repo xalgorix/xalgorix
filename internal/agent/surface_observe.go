@@ -48,7 +48,7 @@ func RecordSurfaceObservation(state *ScanState, obs SurfaceObservation) {
 	// Probe-artifact URLs (OAST callbacks, attacker-legend origins from
 	// payload headers) are scanner-side traffic, never target surface:
 	// ingesting them pollutes the inventory and inflates obligations.
-	if isScanArtifactURL(endpoint) {
+	if isScanArtifactURL(endpoint) || isProbeArtifactEndpoint(endpoint) {
 		return
 	}
 	if m := strings.ToUpper(strings.TrimSpace(obs.Method)); m != "" {
@@ -148,8 +148,19 @@ func endpointProvenance(state *ScanState, endpoint string) []string {
 // surface is authoritative: real observed traffic defines the attack surface.
 func promoteDiscoveredEndpoint(state *ScanState, endpoint string) {
 	endpoint = strings.TrimSpace(endpoint)
-	if endpoint == "" || isScanArtifactURL(endpoint) || len(state.DiscoveredEndpoints) >= maxPromotedEndpoints {
+	if endpoint == "" || isScanArtifactURL(endpoint) || isProbeArtifactEndpoint(endpoint) {
 		return
+	}
+	isTemplate := routeTemplateCovers(endpoint, endpoint)
+	if len(state.DiscoveredEndpoints) >= maxPromotedEndpoints && !isTemplate {
+		return
+	}
+	// A concrete request to an already inventoried dynamic route is coverage
+	// for that route, not a new route obligation for every path parameter value.
+	for _, existing := range state.DiscoveredEndpoints {
+		if !isTemplate && routeTemplateCovers(existing, endpoint) {
+			return
+		}
 	}
 	want := map[string]bool{}
 	for _, a := range endpointCoverageAliases(endpoint) {
@@ -165,7 +176,11 @@ func promoteDiscoveredEndpoint(state *ScanState, endpoint string) {
 			}
 		}
 	}
-	state.DiscoveredEndpoints = append(state.DiscoveredEndpoints, endpoint)
+	updated := pruneConcreteCoveredByTemplates(append(append([]string(nil), state.DiscoveredEndpoints...), endpoint))
+	if len(updated) > maxPromotedEndpoints {
+		return
+	}
+	state.DiscoveredEndpoints = updated
 	sort.Strings(state.DiscoveredEndpoints)
 }
 
@@ -180,7 +195,7 @@ func mergeDiscoveredEndpoints(state *ScanState, fromNotes []string) []string {
 	var out []string
 	for _, ep := range append(append([]string(nil), state.DiscoveredEndpoints...), fromNotes...) {
 		ep = strings.TrimSpace(ep)
-		if ep == "" {
+		if ep == "" || isScanArtifactURL(ep) || isProbeArtifactEndpoint(ep) {
 			continue
 		}
 		seen := false
@@ -201,8 +216,66 @@ func mergeDiscoveredEndpoints(state *ScanState, fromNotes []string) []string {
 			break
 		}
 	}
+	out = pruneConcreteCoveredByTemplates(out)
 	sort.Strings(out)
 	return out
+}
+
+func routeTemplateCovers(template, endpoint string) bool {
+	for _, pattern := range endpointCoverageLookupAliases(template) {
+		if !strings.Contains(pattern, "{") && !strings.Contains(pattern, "/:") {
+			continue
+		}
+		for _, candidate := range endpointCoverageAliases(endpoint) {
+			if endpointTemplateMatches(pattern, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pruneConcreteCoveredByTemplates(endpoints []string) []string {
+	out := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		// Distinct template names may describe the same route. Keep both
+		// rather than letting their wildcard segments remove each other.
+		if routeTemplateCovers(endpoint, endpoint) {
+			out = append(out, endpoint)
+			continue
+		}
+		covered := false
+		for _, template := range endpoints {
+			if template != endpoint && routeTemplateCovers(template, endpoint) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, endpoint)
+		}
+	}
+	return out
+}
+
+// Tool commands contain payload paths, wordlist placeholders and local file
+// names as well as real routes. These never become assessment obligations.
+func isProbeArtifactEndpoint(endpoint string) bool {
+	path, ok := parseSurfacePath(endpoint)
+	if !ok {
+		return false
+	}
+	lower := strings.ToLower(path)
+	for _, segment := range strings.Split(strings.SplitN(path, "?", 2)[0], "/") {
+		if strings.EqualFold(segment, "FUZZ") {
+			return true
+		}
+	}
+	if isLocalInventoryPath(path) ||
+		strings.Contains(lower, "../") || strings.Contains(lower, "%2e%2e") {
+		return true
+	}
+	return strings.ContainsAny(path, "'\";|`$\\<> \r\n\t")
 }
 
 // ── Parameter extraction (black-box primary) ────────────────────────────────

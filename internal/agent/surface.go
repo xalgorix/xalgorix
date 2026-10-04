@@ -87,9 +87,13 @@ func (se *SurfaceEndpoint) hasMethod(method string) bool {
 
 var staticAssetExts = []string{".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map"}
 var staticAssetPaths = []string{"/robots.txt", "/sitemap.xml", "/favicon", "/.well-known/", "/static/", "/assets/", "/vendor/"}
+var apiSchemaPaths = map[string]bool{"/openapi.json": true, "/openapi.yaml": true, "/swagger.json": true, "/swagger.yaml": true}
 
 func isStaticAssetPath(path string) bool {
-	lp := strings.ToLower(path)
+	lp := strings.ToLower(strings.SplitN(path, "?", 2)[0])
+	if apiSchemaPaths[lp] {
+		return true
+	}
 	for _, p := range staticAssetPaths {
 		if strings.HasPrefix(lp, p) || strings.Contains(lp, p) {
 			return true
@@ -201,6 +205,7 @@ func hasParamLike(params []string, candidates []string) bool {
 // from every evidence source the state holds.
 func buildSurfaceEndpoint(state *ScanState, endpoint string) *SurfaceEndpoint {
 	se := &SurfaceEndpoint{Endpoint: endpoint, Source: "notes"}
+	observedKeys := observedSurfaceKeys(state, endpoint)
 	// Split host/path like the coverage aliases.
 	value := strings.TrimSpace(endpoint)
 	path := value
@@ -233,7 +238,7 @@ func buildSurfaceEndpoint(state *ScanState, endpoint string) *SurfaceEndpoint {
 		methods[m] = true
 	}
 	// Runtime black-box parameter observations (query/form/JSON/multipart).
-	for _, alias := range endpointCoverageAliases(endpoint) {
+	for _, alias := range observedKeys {
 		for _, p := range state.ObservedEndpointParameters[alias] {
 			key := p.Name + ":" + p.Location
 			if p.Name == "" || paramSeen[key] {
@@ -246,7 +251,7 @@ func buildSurfaceEndpoint(state *ScanState, endpoint string) *SurfaceEndpoint {
 	se.Methods = sortedStringSet(methods)
 	se.Method = primaryMethod(se.Methods)
 	// Content types observed for this endpoint.
-	for _, alias := range endpointCoverageAliases(endpoint) {
+	for _, alias := range observedKeys {
 		if cts := state.EndpointContentTypes[alias]; cts != "" {
 			se.ContentTypes = append(se.ContentTypes,
 				strings.FieldsFunc(cts, func(r rune) bool { return r == ',' || r == ';' || r == ' ' })...)
@@ -330,12 +335,50 @@ func sortedObservedMethods(state *ScanState, endpoint string) []string {
 		return nil
 	}
 	seen := map[string]bool{}
-	for _, alias := range endpointCoverageAliases(endpoint) {
+	for _, alias := range observedSurfaceKeys(state, endpoint) {
 		for m, observed := range state.ObservedEndpointMethods[alias] {
 			if observed {
 				seen[strings.ToUpper(m)] = true
 			}
 		}
+	}
+	return sortedStringSet(seen)
+}
+
+// A scoped request enriches a matching relative inventory path, and a
+// concrete request enriches its route template, without adding a separate
+// plan obligation for each path parameter value.
+func observedSurfaceKeys(state *ScanState, endpoint string) []string {
+	seen := map[string]bool{}
+	for _, alias := range endpointCoverageAliases(endpoint) {
+		seen[alias] = true
+	}
+	if state == nil {
+		return sortedStringSet(seen)
+	}
+	wanted := endpointCoverageLookupAliases(endpoint)
+	isTemplate := routeTemplateCovers(endpoint, endpoint)
+	addMatching := func(key string) {
+		if isScanArtifactURL(key) || isProbeArtifactEndpoint(key) {
+			return
+		}
+		for _, observed := range endpointCoverageAliases(key) {
+			for _, alias := range wanted {
+				if observed == alias || (isTemplate && endpointTemplateMatches(alias, observed)) {
+					seen[key] = true
+					return
+				}
+			}
+		}
+	}
+	for key := range state.ObservedEndpointMethods {
+		addMatching(key)
+	}
+	for key := range state.ObservedEndpointParameters {
+		addMatching(key)
+	}
+	for key := range state.EndpointContentTypes {
+		addMatching(key)
 	}
 	return sortedStringSet(seen)
 }

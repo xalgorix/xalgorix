@@ -3795,7 +3795,7 @@ func extractPaths(blob string) []string {
 }
 
 func isLocalInventoryPath(path string) bool {
-	for _, prefix := range []string{"/root/go/", "/usr/bin/", "/usr/src/", "/proc/", "/tmp/"} {
+	for _, prefix := range []string{"/root/go/", "/usr/bin/", "/usr/src/", "/usr/local/lib/", "/usr/lib/", "/proc/", "/tmp/"} {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}

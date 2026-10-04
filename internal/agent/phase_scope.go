@@ -150,6 +150,11 @@ var probeLegendHosts = []string{
 	"malicious.com", "localhost.com",
 }
 
+var oastBaseHosts = map[string]bool{
+	"oast.pro": true, "oast.live": true, "oast.me": true, "oast.fun": true,
+	"oast.site": true, "interact.sh": true,
+}
+
 // isScanArtifactHost reports whether the host is a scanner-side payload
 // host (OAST callback or attacker legend), not target surface.
 func isScanArtifactHost(host string) bool {
@@ -158,6 +163,9 @@ func isScanArtifactHost(host string) bool {
 		return false
 	}
 	if oastHostPattern.MatchString(host) {
+		return true
+	}
+	if oastBaseHosts[host] {
 		return true
 	}
 	for _, legend := range probeLegendHosts {
