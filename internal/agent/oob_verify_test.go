@@ -79,6 +79,14 @@ func TestFinalizeOOBVerdict(t *testing.T) {
 
 func TestOOBVerifyToolValidation(t *testing.T) {
 	ag := newOOBAgent(t)
+	polls := 0
+	ag.oobPollFn = func(token string) []oobsrv.Interaction {
+		if token != "abc" {
+			t.Fatalf("polled unexpected token %q", token)
+		}
+		polls++
+		return nil
+	}
 	if res, _ := ag.oobVerifyTool(map[string]string{"vuln_class": "blind-rce"}); res.Error == "" {
 		t.Fatal("expected error when token is missing")
 	}
@@ -112,11 +120,17 @@ func TestOOBVerifyToolValidation(t *testing.T) {
 	}); res.Error != "" {
 		t.Fatalf("valid runtime callback payload should reach polling, got: %+v", res)
 	}
+	if polls != 1 {
+		t.Fatalf("valid runtime callback payload polled %d times, want 1", polls)
+	}
 	if res, _ := ag.oobVerifyTool(map[string]string{
 		"token":      "abc",
 		"vuln_class": "xxe",
 	}); res.Error != "" {
 		t.Fatalf("non-RCE class must not require execution attribution, got: %+v", res)
+	}
+	if polls != 2 {
+		t.Fatalf("non-RCE callback payload left poll count at %d, want 2", polls)
 	}
 }
 

@@ -211,6 +211,7 @@ type Agent struct {
 	hooks                      *HookRegistry     // extensible lifecycle hooks
 	state                      *ScanState        // shared mutable scan state for hooks
 	localGuard                 scopeguard.Config // operator's listener identity, consulted by shouldBlockForOutOfScope to detect Local_Or_Listener_Host references in Gated_Tool args
+	oobPollFn                  oobPollFunc       // optional per-agent poller; nil uses the live OOB backend
 
 	// Per-scan whitebox/auth config. Default to the global cfg values but can
 	// be overridden PER SCAN via SetTargetAuth/SetSourceRepo before Run() so a

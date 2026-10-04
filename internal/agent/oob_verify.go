@@ -33,6 +33,8 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
+type oobPollFunc func(string) []oobsrv.Interaction
+
 // registerOOBVerifyTool registers the Agent-bound verify_oob tool. It is
 // Agent-bound so it can record to the shared ledger; it makes no outbound
 // request itself (it only reads the local OAST interaction store), so it needs
@@ -68,8 +70,15 @@ func (a *Agent) oobVerifyTool(args map[string]string) (tools.Result, error) {
 	if err := validateOOBExecutionAttribution(token, class, primitive, payload); err != nil {
 		return tools.Result{Error: err.Error(), Metadata: map[string]any{"oob_confirmed": false}}, nil
 	}
-	hits := oobsrv.Poll(token)
+	hits := a.pollOOB(token)
 	return a.finalizeOOBVerdict(token, class, strings.TrimSpace(args["endpoint"]), strings.TrimSpace(args["parameter"]), strings.TrimSpace(args["role"]), primitive, payload, hits), nil
+}
+
+func (a *Agent) pollOOB(token string) []oobsrv.Interaction {
+	if a.oobPollFn != nil {
+		return a.oobPollFn(token)
+	}
+	return oobsrv.Poll(token)
 }
 
 func normalizeExecutionPrimitive(s string) string {
