@@ -59,16 +59,16 @@ func (a *Agent) registerPlanTools(reg *tools.Registry) {
 
 	reg.Register(&tools.Tool{
 		Name: "update_plan",
-		Description: "Mark a planned task as active, completed, or dispositioned so the engine tracks " +
-			"progress. Call this when you start a task and when it's done (covered, or ruled out " +
-			"with a TYPED disposition). The engine also auto-marks tasks done from coverage " +
-			"evidence, so you only need this for tasks it can't infer (e.g. ruling a class " +
-			"not-applicable). Typed dispositions are auditable; vague prose is rejected for " +
-			"engine-owned coverage tasks.",
+		Description: "Update a task only when the engine cannot infer its state: optionally mark it " +
+			"active, or record a typed, evidence-based disposition. The engine automatically " +
+			"completes coverage-backed tasks after their inputs are tested; do not call this " +
+			"to declare those tasks complete or skip them to clear the plan. Every skipped " +
+			"engine-owned task needs a concrete reason note, and observed testable inputs " +
+			"must be tested rather than skipped.",
 		Parameters: []tools.Parameter{
 			{Name: "task_id", Description: "The task id from build_plan. If omitted, the single currently-active task is updated (or, when marking one active, the next pending task).", Required: false},
-			{Name: "status", Description: "One of: active, completed, skipped, or a typed disposition: not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded. Typed dispositions require a concrete reason note and are validated against the observed surface.", Required: false},
-			{Name: "notes", Description: "Concrete rationale / finding reference. For typed dispositions state the surface fact (e.g. 'no XML input surface exists', 'horizontal proof requires a second account that was not supplied'). For the recon task, N/A dimensions use lines like 'service_discovery: raw IP target, no port surface beyond HTTP'.", Required: false},
+			{Name: "status", Description: "One of: active, completed, skipped, or a typed disposition: not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded. A skip or typed disposition on an engine-owned task requires notes with a concrete observed reason; a bare skip is rejected.", Required: false},
+			{Name: "notes", Description: "Concrete rationale / finding reference. Required for skipped or typed dispositions on engine-owned tasks; name the observed absent surface or blocker (e.g. 'no XML input surface exists', 'horizontal proof requires a second account that was not supplied'). For the recon task, N/A dimensions use lines like 'service_discovery: raw IP target, no port surface beyond HTTP'.", Required: false},
 		},
 		Execute: a.updatePlanTool,
 	})

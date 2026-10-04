@@ -125,9 +125,13 @@ type ScanState struct {
 	// distinguishes what was ACTUALLY done so the completion gate can demand
 	// defensible breadth. Each dimension is: "" pending, "complete", or
 	// "not_applicable". Not every dimension applies to every target.
-	ReconCoverage            ReconCoverage
-	ScannerUsed              bool
-	FinishAttempts           int
+	ReconCoverage  ReconCoverage
+	ScannerUsed    bool
+	FinishAttempts int
+	// FinishRecoveryPending marks only the next charged model request after
+	// an actual rejected finish, so token telemetry does not label later
+	// productive, nudged reasoning as finish-rejection overhead.
+	FinishRecoveryPending    bool
 	MaxFinishRejections      int
 	MinIterations            int
 	OASTProbesExecuted       int

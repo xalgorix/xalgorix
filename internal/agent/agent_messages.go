@@ -54,6 +54,44 @@ func formatToolResult(toolName string, result tools.Result) string {
 	return msg
 }
 
+var planBriefTaskIDRe = regexp.MustCompile(`(?m)^  ▶ \[Phase [0-9]+\] ([^ \n]+) —`)
+
+// removeSupersededPlanBrief removes an older generated snapshot only when
+// every task it highlighted has either settled or remains visible in the new
+// brief. That retains methodology hints for active work which the planner's
+// next-pending-task view may otherwise omit. Other guidance stays untouched.
+func (a *Agent) removeSupersededPlanBrief(previous, current string) {
+	if a == nil || a.state == nil || a.state.Plan == nil || previous == "" ||
+		!strings.HasPrefix(previous, "## Active Plan —") || current == "" {
+		return
+	}
+	currentTasks := make(map[string]bool)
+	for _, match := range planBriefTaskIDRe.FindAllStringSubmatch(current, -1) {
+		currentTasks[match[1]] = true
+	}
+	for _, match := range planBriefTaskIDRe.FindAllStringSubmatch(previous, -1) {
+		id := match[1]
+		task := a.state.Plan.Get(id)
+		if task != nil && (task.Status == TaskPending || task.Status == TaskActive) && !currentTasks[id] {
+			return
+		}
+	}
+	a.msgMu.Lock()
+	defer a.msgMu.Unlock()
+	for i := len(a.messages) - 1; i >= 0; i-- {
+		if a.messages[i].Role != "user" || !strings.Contains(a.messages[i].Content, previous) {
+			continue
+		}
+		remaining := strings.TrimSpace(strings.Replace(a.messages[i].Content, previous, "", 1))
+		if remaining == "" {
+			a.messages = append(a.messages[:i], a.messages[i+1:]...)
+		} else {
+			a.messages[i].Content = remaining
+		}
+		return
+	}
+}
+
 // getToolSuggestion provides helpful suggestions when a tool fails
 func getToolSuggestion(toolName, errorMsg string) string {
 	lower := strings.ToLower(errorMsg)

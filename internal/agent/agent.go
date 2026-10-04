@@ -1789,6 +1789,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 		}
 
 		// ── Hook: OnIterationStart ──
+		previousPlanBrief := a.state.LastPlanBrief
 		iterResult := a.hooks.Fire(OnIterationStart, a.state, nil)
 		if autoDelegation := a.maybeAutoDelegate(targets); autoDelegation != "" {
 			// If the hook also produced its model-directed decomposition prompt on
@@ -1801,6 +1802,10 @@ func (a *Agent) Run(targets []string, instruction string) {
 			}
 		}
 		if iterResult.Nudge != "" {
+			if current := a.state.LastPlanBrief; current != "" && current != previousPlanBrief &&
+				strings.Contains(iterResult.Nudge, current) {
+				a.removeSupersededPlanBrief(previousPlanBrief, current)
+			}
 			a.msgMu.Lock()
 			a.messages = append(a.messages, llm.Message{Role: "user", Content: iterResult.Nudge})
 			a.msgMu.Unlock()
@@ -1845,19 +1850,13 @@ func (a *Agent) Run(targets []string, instruction string) {
 		scannerTemp := scannerTemperatureFor(a.state)
 		a.client.SetTemperature(&scannerTemp)
 
-		category := scanctx.CategoryNormalReasoning
-		if a.state != nil {
-			if a.state.PendingFailedReportCalls > 0 || a.state.MalformedToolOutputCount > 0 {
-				category = scanctx.CategoryMalformedToolRecovery
-			} else if a.state.NoToolCount > 0 {
-				category = scanctx.CategoryNoToolRecovery
-			} else if a.state.FinishAttempts > 0 && iterResult.Nudge != "" {
-				category = scanctx.CategoryFinishRejectionRecovery
-			}
-		}
+		category := reasoningRequestCategory(a.state)
 
 		response, usage, err := a.client.ChatWithUsage(msgsSnapshot)
 		a.recordTokenAttribution(usage, msgsSnapshot, iter, category, 0)
+		if usage != nil && usage.TotalTokens > 0 && a.state != nil {
+			a.state.FinishRecoveryPending = false
+		}
 		// Update activity after LLM response
 		a.touchActivity()
 		// A benchmark deadline, operator stop, or parent cancellation must win
@@ -2448,6 +2447,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if tc.Name == "finish" || (result.Metadata != nil && result.Metadata["finished"] == true) {
 				finishResult := a.hooks.Fire(OnFinishAttempt, a.state, nil)
 				if finishResult.Block {
+					a.state.FinishRecoveryPending = true
 					rejectMsg := fmt.Sprintf("⚠️ FINISH REJECTED — %s\n\nDO NOT call finish again until you have done more testing.\nContinue with the NEXT PHASE of testing NOW.", finishResult.BlockReason)
 					a.emit(Event{Type: "tool_result", ToolName: "finish", ToolResult: tools.Result{Output: rejectMsg}, TotalTokens: tokenCount()})
 					a.msgMu.Lock()
@@ -3150,6 +3150,22 @@ func calculateMessageMetrics(msgs []llm.Message) (totalBytes, sysBytes, userByte
 		}
 	}
 	return
+}
+
+func reasoningRequestCategory(state *ScanState) string {
+	if state == nil {
+		return scanctx.CategoryNormalReasoning
+	}
+	if state.PendingFailedReportCalls > 0 || state.MalformedToolOutputCount > 0 {
+		return scanctx.CategoryMalformedToolRecovery
+	}
+	if state.NoToolCount > 0 {
+		return scanctx.CategoryNoToolRecovery
+	}
+	if state.FinishRecoveryPending {
+		return scanctx.CategoryFinishRejectionRecovery
+	}
+	return scanctx.CategoryNormalReasoning
 }
 
 func (a *Agent) recordTokenAttribution(usage *llm.TokenUsage, msgs []llm.Message, iter int, category string, retryAttempt int) {

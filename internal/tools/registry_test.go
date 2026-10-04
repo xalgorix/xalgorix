@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/xml"
 	"strings"
 	"sync"
 	"testing"
@@ -169,6 +170,43 @@ func TestSchemaXML_EscapesUnsafeChars(t *testing.T) {
 	}
 	if !strings.Contains(out, "&lt;tag&gt;") {
 		t.Errorf("schema missing &lt;tag&gt; escaped form: %s", out)
+	}
+}
+
+func TestSchemaXMLCompactLayoutPreservesToolContract(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&Tool{
+		Name:        "request&probe",
+		Description: "Send a controlled <request> & inspect its result.",
+		Parameters: []Parameter{
+			{Name: "url", Description: "Target URL", Required: true},
+			{Name: "note", Description: "Optional context"},
+		},
+	})
+	var parsed struct {
+		XMLName xml.Name `xml:"tools"`
+		Tools   []struct {
+			Name        string `xml:"name,attr"`
+			Description string `xml:"description"`
+			Parameters  []struct {
+				Name        string `xml:"name,attr"`
+				Required    bool   `xml:"required,attr"`
+				Description string `xml:",chardata"`
+			} `xml:"parameters>parameter"`
+		} `xml:"tool"`
+	}
+	if err := xml.Unmarshal([]byte(r.SchemaXML()), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Tools) != 1 || parsed.Tools[0].Name != "request&probe" ||
+		parsed.Tools[0].Description != "Send a controlled <request> & inspect its result." ||
+		len(parsed.Tools[0].Parameters) != 2 ||
+		parsed.Tools[0].Parameters[0].Name != "url" ||
+		!parsed.Tools[0].Parameters[0].Required ||
+		parsed.Tools[0].Parameters[0].Description != "Target URL" ||
+		parsed.Tools[0].Parameters[1].Required ||
+		parsed.Tools[0].Parameters[1].Description != "Optional context" {
+		t.Fatalf("serialized tool contract changed: %+v", parsed.Tools)
 	}
 }
 
