@@ -31,6 +31,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -70,6 +72,10 @@ type Task struct {
 	// dispositions existed). Skipped-without-disposition remains readable for
 	// old persisted plans.
 	Disposition string `json:"disposition,omitempty"`
+	// DispositionSurface binds an accepted N/A judgment to the relevant
+	// observed surface. Unrelated discoveries must not undo that judgment;
+	// newly applicable inputs must still reopen the work.
+	DispositionSurface string `json:"disposition_surface,omitempty"`
 	// Prerequisite marks a task as a TECHNICAL PREREQUISITE for the
 	// selected phases rather than a methodology obligation of its own
 	// phase: a restricted phase selection still needs bounded discovery
@@ -419,6 +425,24 @@ func endpointTestedForClass(state *ScanState, endpoint, class string) bool {
 			}
 		}
 	}
+	// Inventory templates name the route, whereas request evidence names a
+	// concrete parameter value. Match only complete placeholder segments;
+	// literal paths and host-qualified identities retain their boundaries.
+	for _, alias := range aliases {
+		if !strings.Contains(alias, "{") && !strings.Contains(alias, "/:") {
+			continue
+		}
+		for endpoint, classes := range state.EndpointClassCoverage {
+			if !classes[class] {
+				continue
+			}
+			for _, candidate := range endpointCoverageAliases(endpoint) {
+				if endpointTemplateMatches(alias, candidate) {
+					return true
+				}
+			}
+		}
+	}
 	// Verifier-attributed scan-level evidence (Part 20): a deterministic
 	// verifier that actually executed this (endpoint, class) pair — from ANY
 	// agent, root or specialist — is trustworthy coverage. The coordinator
@@ -450,6 +474,32 @@ func endpointTestedForClass(state *ScanState, endpoint, class string) bool {
 		}
 	}
 	return false
+}
+
+func endpointTemplateMatches(template, endpoint string) bool {
+	wanted := strings.Split(template, "/")
+	actual := strings.Split(endpoint, "/")
+	if len(wanted) != len(actual) {
+		return false
+	}
+	for i, part := range wanted {
+		name := ""
+		if strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}") {
+			name = strings.TrimSuffix(strings.TrimPrefix(part, "{"), "}")
+		} else if strings.HasPrefix(part, ":") {
+			name = strings.TrimPrefix(part, ":")
+		}
+		if name != "" && validParamName(name) {
+			if actual[i] == "" {
+				return false
+			}
+			continue
+		}
+		if part != actual[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func endpointSetContains(set map[string]bool, aliases []string) bool {
@@ -518,6 +568,7 @@ func refreshEnginePlan(state *ScanState) {
 		}
 		t.Status = old.Status
 		t.Disposition = old.Disposition
+		t.DispositionSurface = old.DispositionSurface
 		t.Notes = old.Notes
 	}
 	reconcilePlan(state)
@@ -548,9 +599,51 @@ func skipDispositionStillValid(state *ScanState, t *Task) bool {
 		return false // content discovery always applies to web targets
 	}
 	if t.VulnClass != "" {
+		if t.DispositionSurface != "" && t.DispositionSurface == dispositionSurfaceSignature(state, t) {
+			return true
+		}
 		return len(ApplicableEndpointsForClass(state, t.VulnClass)) == 0
 	}
 	return true
+}
+
+// dispositionSurfaceSignature records the inputs to an accepted class-level
+// judgment, not coverage or progress counters. Requests that exercise the
+// same surface cannot invalidate the judgment, while a new applicable route,
+// method, content type or parameter requires a fresh disposition.
+func dispositionSurfaceSignature(state *ScanState, task *Task) string {
+	endpoints := ApplicableEndpointsForClass(state, task.VulnClass)
+	if task.WholeTarget {
+		endpoints = append([]string(nil), state.DiscoveredEndpoints...)
+		sort.Strings(endpoints)
+	}
+	var surface []*SurfaceEndpoint
+	for _, endpoint := range endpoints {
+		item := buildSurfaceEndpoint(state, endpoint)
+		sort.Strings(item.ContentTypes)
+		sort.Strings(item.Features)
+		sort.Slice(item.Parameters, func(i, j int) bool {
+			if item.Parameters[i].Name != item.Parameters[j].Name {
+				return item.Parameters[i].Name < item.Parameters[j].Name
+			}
+			return item.Parameters[i].Location < item.Parameters[j].Location
+		})
+		surface = append(surface, item)
+	}
+	value := struct {
+		Surface []*SurfaceEndpoint
+		Auth    bool
+		Bearer  bool
+		Cookie  bool
+		Techs   []string
+		Hosts   []string
+	}{Surface: surface, Auth: state.AuthContextAvailable, Bearer: state.BearerAuthObserved,
+		Cookie: state.CookieAuthObserved, Techs: sortedStringSet(state.DetectedTechs)}
+	if task.WholeTarget {
+		value.Hosts = sortedStringSet(state.DiscoveredHosts)
+	}
+	encoded, _ := json.Marshal(value)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 // planHasEngineTasks reports whether the plan is MIXED: at least one
@@ -624,6 +717,7 @@ func MergeRequiredEngineTasks(state *ScanState, plan *Plan) int {
 			if existing != nil && existing.Status == TaskSkipped && !skipDispositionStillValid(state, existing) {
 				existing.Status = TaskPending
 				existing.Disposition = ""
+				existing.DispositionSurface = ""
 			}
 			continue
 		}

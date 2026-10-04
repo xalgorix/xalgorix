@@ -271,8 +271,8 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	if st == TaskCompleted && t.Origin == "auto" && t.VulnClass != "" && !authLaneSettled && !exploratorySettled && a.state != nil &&
 		!taskCoverageComplete(a.state, t) {
 		return tools.Result{Error: fmt.Sprintf(
-			"task %q (%s) needs coverage evidence before completion: every discovered endpoint must be tested for %s (engine-verified). Continue testing the class, or mark status 'skipped' with a concrete justification if it is genuinely not applicable to this target.",
-			id, t.VulnClass, t.VulnClass)}, nil
+			"task %q (%s) needs coverage evidence before completion. %s Continue testing those inputs, or use status 'not_applicable' with a concrete absent-surface reason if the class does not apply. Notes alone cannot mark untested work completed.",
+			id, t.VulnClass, taskCoverageRequirement(a.state, t))}, nil
 	}
 	// ── Typed disposition validation for engine-owned coverage work ──
 	// A coverage-floor task may only be skipped with a TYPED, concrete
@@ -325,6 +325,10 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	}
 	t.Status = st
 	t.Disposition = disposition
+	t.DispositionSurface = ""
+	if st == TaskSkipped && disposition == DispositionNotApplicable && t.Origin == "auto" && t.VulnClass != "" {
+		t.DispositionSurface = dispositionSurfaceSignature(a.state, t)
+	}
 	if notes != "" {
 		if t.Notes != "" {
 			t.Notes += " | " + notes
@@ -338,6 +342,22 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		label += " (" + disposition + ")"
 	}
 	return tools.Result{Output: fmt.Sprintf("Task %q → %s. Plan: %d pending, %d active, %d completed, %d skipped (%d%% executed; skips are not executed coverage).", id, label, pending, active, completed, skipped, plan.ProgressPct())}, nil
+}
+
+func taskCoverageRequirement(state *ScanState, task *Task) string {
+	if task.WholeTarget {
+		return "The target-level class evidence is still missing."
+	}
+	var missing []string
+	for _, endpoint := range ApplicableEndpointsForClass(state, task.VulnClass) {
+		if !endpointTestedForClass(state, endpoint, task.VulnClass) {
+			missing = append(missing, endpoint)
+		}
+	}
+	if len(missing) == 0 {
+		return "The class evidence is still missing."
+	}
+	return fmt.Sprintf("Untested applicable endpoints (%d): %s.", len(missing), truncList(missing, 6))
 }
 
 // inferPlanTaskID picks the task an update_plan call with no task_id most likely

@@ -1466,7 +1466,12 @@ func sharedCoverageForState(state *ScanState) *scanctx.CoverageStore {
 // the matrix. A request to example.com/api/users records both the scoped form
 // and /api/users, while retaining case-sensitive paths and ignoring queries.
 func endpointCoverageAliases(endpoint string) []string {
-	value := strings.Trim(strings.TrimSpace(endpoint), "\"'`,;)(}{[]<>")
+	value := strings.Trim(strings.TrimSpace(endpoint), "\"'`,;)([]<>")
+	// A closing template brace belongs to the route identity; only surplus
+	// wrapper braces from surrounding prose may be removed.
+	for strings.HasSuffix(value, "}") && strings.Count(value, "}") > strings.Count(value, "{") {
+		value = strings.TrimSuffix(value, "}")
+	}
 	if value == "" {
 		return nil
 	}
@@ -3588,14 +3593,51 @@ func extractEndpointsFromNotes(state *ScanState) []string {
 	return extractPaths(blob)
 }
 
+// Endpoint inventories are the notes fallback for planning. Findings and
+// command transcripts may contain local filenames and payload URLs; those
+// notes must not create new target obligations.
+func endpointInventoryNotes(saved map[string]string) string {
+	var keys []string
+	for key := range saved {
+		name := strings.ToLower(key)
+		if strings.Contains(name, "endpoint") || strings.Contains(name, "inventory") ||
+			strings.Contains(name, "attack surface") || strings.Contains(name, "discovery manifest") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	var blob strings.Builder
+	for _, key := range keys {
+		blob.WriteString(saved[key])
+		blob.WriteByte('\n')
+	}
+	return blob.String()
+}
+
 // endpointPathRe matches /path, /api/x, or full http(s) URLs.
-var endpointPathRe = regexp.MustCompile(`(?:https?://[^\s"'<>]+|/(?:[A-Za-z0-9_.\-]+/)*[A-Za-z0-9_.\-]+)`)
+var endpointPathRe = regexp.MustCompile(`(?:https?://[^\s"'<>]+|/(?:[A-Za-z0-9_.{}:\-]+/)*[A-Za-z0-9_.{}:\-]+)`)
 
 // extractPaths pulls unique endpoint paths out of a text blob, sorted.
 func extractPaths(blob string) []string {
 	seen := make(map[string]bool)
 	var paths []string
-	for _, m := range endpointPathRe.FindAllString(blob, -1) {
+	for _, bounds := range endpointPathRe.FindAllStringIndex(blob, -1) {
+		m := strings.TrimRight(blob[bounds[0]:bounds[1]], ".,);]`:")
+		if strings.HasPrefix(m, "/") {
+			// A slash inside a closing HTML tag, MIME type, port/protocol
+			// listing or schema reference is not a route token.
+			if bounds[0] > 0 {
+				before := blob[bounds[0]-1]
+				if before == '<' || before == '#' || before == '@' || before == '/' ||
+					(before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') ||
+					(before >= '0' && before <= '9') || before == '_' {
+					continue
+				}
+			}
+			if isLocalInventoryPath(m) {
+				continue
+			}
+		}
 		// Skip obvious non-endpoints: schema namespaces, file extensions on
 		// static assets, the w3.org SVG namespace that JS bundles embed, and
 		// scanner-side payload URLs (OAST callbacks, attacker legends).
@@ -3615,6 +3657,15 @@ func extractPaths(blob string) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+func isLocalInventoryPath(path string) bool {
+	for _, prefix := range []string{"/root/go/", "/usr/bin/", "/usr/src/", "/proc/", "/tmp/"} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return path == "/etc/passwd" || path == "/etc/hosts"
 }
 
 // ── hookReportVulnerabilityTracker ─────────────────────────────────────────

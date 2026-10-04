@@ -438,6 +438,7 @@ func surfaceRevision(state *ScanState) string {
 	sort.Strings(eps)
 
 	var b strings.Builder
+	fmt.Fprintf(&b, "authctx=%t|bearer=%t|cookie=%t|", state.AuthContextAvailable, state.BearerAuthObserved, state.CookieAuthObserved)
 	fmt.Fprintf(&b, "ep=%d:%s", len(eps), strings.Join(eps, ","))
 	for _, ep := range eps {
 		if methods := sortedObservedMethods(state, ep); len(methods) > 0 {

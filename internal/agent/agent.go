@@ -58,7 +58,7 @@ var toolHardTimeout = map[string]time.Duration{
 // imports notes for pruning, so this is the natural place to bridge it.
 func init() {
 	notesBlobForContext = func(scanContextID string) string {
-		return notes.FormatForContextID(scanContextID)
+		return endpointInventoryNotes(notes.GetAllNotesForContext(scanContextID))
 	}
 }
 
