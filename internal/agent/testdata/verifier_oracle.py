@@ -2,6 +2,7 @@
 import http.server
 import json
 import pathlib
+import re
 import sqlite3
 import sys
 import tempfile
@@ -19,6 +20,7 @@ passwd = pathlib.Path(scratch.name, "passwd")
 passwd.write_text("root:x:0:0:isolated fixture:/nonexistent:/bin/false\n")
 custom = pathlib.Path(scratch.name, "canary")
 custom.write_text("fixture-only-canary-8490362715\n")
+unstable_counter = 0
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -77,10 +79,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.respond(404, "No fixture route")
 
     def do_POST(self):
+        global unstable_counter
         payload = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         if not self.path.startswith("/xxe/"):
             self.respond(404, "No fixture route")
             return
+
+        raw = payload.decode(errors="replace")
+        if self.path == "/xxe/echo":
+            self.respond(200, raw, "application/xml")
+            return
+        if self.path == "/xxe/static":
+            self.respond(200, "Documentation example: fixture-only-canary-8490362715")
+            return
+        if self.path in {"/xxe/substitute", "/xxe/unstable"}:
+            match = re.search(r"<data>(.*)</data>", raw, re.DOTALL)
+            if match is None:
+                self.respond(400, "invalid fixture document")
+                return
+            value = match.group(1)
+            if "&xxe;" in value:
+                if self.path == "/xxe/unstable" and "xalgorix-xxe-missing-" not in raw:
+                    unstable_counter += 1
+                    replacement = "volatile-substitution-" + str(unstable_counter)
+                else:
+                    replacement = "external-entity-blocked"
+                value = value.replace("&xxe;", replacement)
+            self.respond(200, value)
+            return
+
         parser = xml.parsers.expat.ParserCreate()
         output = []
         parser.CharacterDataHandler = output.append

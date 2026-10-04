@@ -559,10 +559,11 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 
 	// Register the deterministic XML External Entity confirmer (verify_xxe): the
 	// XXE sibling of verify_sqli/verify_ssti. Given a seeded hypothesis or a url,
-	// it POSTs a benign baseline XML plus a DOCTYPE/external-entity payload that
-	// reads a local file, and confirms injection when the file's contents appear
-	// in the probe response but not the baseline — recording exploit-proven
-	// evidence in the ledger. Agent-bound: needs the scope config, session auth,
+	// it sends a randomized benign baseline, a nonexistent-file control, and
+	// two repeated local-file entity probes. It requires stable file-derived
+	// evidence absent from both controls, and automatically tries a target-
+	// attributed OAST callback for non-reflective parsers before recording
+	// exploit-proven evidence. Agent-bound: needs the scope config, session auth,
 	// the scan target, and the ledger.
 	a.registerVerifyXXETool(reg)
 

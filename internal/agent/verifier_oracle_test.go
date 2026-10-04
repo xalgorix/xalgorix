@@ -164,24 +164,34 @@ func TestVerifierApplicationOracleSSTI(t *testing.T) {
 }
 
 func TestVerifierApplicationOracleXXE(t *testing.T) {
+	cfg := config.Get()
+	previousDisable, previousPublicURL := cfg.OOBDisable, cfg.OOBPublicURL
+	cfg.OOBDisable, cfg.OOBPublicURL = true, ""
+	t.Cleanup(func() {
+		cfg.OOBDisable, cfg.OOBPublicURL = previousDisable, previousPublicURL
+	})
 	base := verifierOracleServer(t)
 	for _, test := range []struct {
-		name string
-		want bool
-	}{{"vulnerable", true}, {"patched", false}} {
+		name  string
+		route string
+		file  string
+		want  bool
+	}{
+		{"vulnerable-passwd", "vulnerable", "/oracle/passwd", true},
+		{"patched-passwd", "patched", "/oracle/passwd", false},
+		{"vulnerable-custom", "vulnerable", "/oracle/canary", true},
+		{"patched-custom", "patched", "/oracle/canary", false},
+		{"raw-echo", "echo", "/oracle/canary", false},
+		{"fixed-documentation", "static", "/oracle/canary", false},
+		{"blocked-substitution", "substitute", "/oracle/canary", false},
+		{"unstable-substitution", "unstable", "/oracle/canary", false},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			a := verifierOracleAgent(t)
-			result, err := a.verifyXXETool(map[string]string{"url": base + "/xxe/" + test.name, "file": "/oracle/passwd"})
+			result, err := a.verifyXXETool(map[string]string{"url": base + "/xxe/" + test.route, "file": test.file})
 			checkOracleVerdict(t, a, result, err, "xxe", test.want)
 		})
 	}
-	// This positive uses a different file format, outside the passwd detector's
-	// documented recognizable-content scope. Keep that limitation explicit.
-	t.Run("custom-file-detection-limit", func(t *testing.T) {
-		a := verifierOracleAgent(t)
-		result, err := a.verifyXXETool(map[string]string{"url": base + "/xxe/vulnerable", "file": "/oracle/canary"})
-		checkOracleVerdict(t, a, result, err, "xxe", false)
-	})
 }
 
 func TestVerifierHTTPOracleCSRF(t *testing.T) {
