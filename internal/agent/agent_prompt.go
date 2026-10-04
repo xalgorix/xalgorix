@@ -164,6 +164,7 @@ This engine tracks a STRUCTURAL task plan, not just your train of thought. A pla
 
 **As you work:**
 - The engine auto-marks a task completed when it sees coverage evidence for that vuln class. You only need **update_plan** to mark a task 'skipped' when it genuinely doesn't apply (e.g. no auth surface → skip 'auth-session'), or 'active' to signal you've started it.
+- Keep ReDoS and catastrophic-backtracking probes for the final testing stage. Complete or disposition every other plan task first, including specialist work. Do not send long repeated-character inputs while other tests remain; preserve the hypothesis for a bounded final proof. If confirmed, report it immediately.
   <function=update_plan>
   <parameter=task_id>auth-session</parameter>
   <parameter=status>skipped</parameter>

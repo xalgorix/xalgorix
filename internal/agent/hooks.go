@@ -645,6 +645,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	// Order matters: policy/loop guards run before OnToolExecute records work;
 	// result detection and reset hooks run only after an executed attempt.
 	reg.Register(OnToolCall, hookReportRetryGuard)
+	reg.Register(OnToolCall, hookReDoSLast)
 	reg.Register(OnToolCall, hookProfessionalDelegationPlanGuard)
 	reg.Register(OnToolCall, hookSingleAgentSpawnGuard)
 	reg.Register(OnToolCall, hookOASTSelfProbeGuard)
@@ -748,6 +749,96 @@ func hookSingleAgentSpawnGuard(state *ScanState, args map[string]string) HookRes
 		ForceSkip: true,
 		Nudge:     "⛔ Single-agent mode is active. Perform this work directly with the root agent - no specialist agents are available in this scan.",
 	}
+}
+
+// hookReDoSLast defers availability-impacting regex probes until the rest of
+// the assessment plan is settled. Plan ordering alone cannot enforce this:
+// agents can issue a request before they mark its task active.
+func hookReDoSLast(state *ScanState, args map[string]string) HookResult {
+	if state == nil || !isReDoSAction(state, args) {
+		return HookResult{}
+	}
+	if state.DelegatedAgent && len(state.AssignedClasses) == 1 &&
+		isReDoSTask(&Task{VulnClass: state.AssignedClasses[0]}) {
+		return HookResult{}
+	}
+	if state.PlanBuilt && state.Plan.readyForReDoS() && !state.DelegatedAgent {
+		return HookResult{}
+	}
+	var unfinished []string
+	if state.Plan != nil {
+		for _, task := range state.Plan.Tasks {
+			if !isReDoSTask(task) && task.Status != TaskCompleted && task.Status != TaskSkipped {
+				unfinished = append(unfinished, task.ID)
+			}
+		}
+	}
+	guidance := "Build the assessment plan and finish the other tests first."
+	if len(unfinished) > 0 {
+		guidance = fmt.Sprintf("Finish or disposition the remaining non-ReDoS tasks first (%d): %s.",
+			len(unfinished), truncList(unfinished, 6))
+	}
+	return HookResult{ForceSkip: true, Nudge: "⛔ ReDoS testing is the final availability stage. " + guidance +
+		" Split benign requests out of this batch, then run the smallest bounded ReDoS probe and report its result at the end."}
+}
+
+func isReDoSAction(state *ScanState, args map[string]string) bool {
+	toolName := strings.TrimSpace(args["tool_name"])
+	switch toolName {
+	case "terminal_execute", "python_action":
+		command := args["command"]
+		if command == "" {
+			command = args["code"]
+		}
+		lower := strings.ToLower(command)
+		if !strings.Contains(lower, "curl ") && !strings.Contains(lower, "wget ") &&
+			!strings.Contains(lower, "httpx") && !strings.Contains(lower, "requests.") &&
+			!strings.Contains(lower, "urllib") && !strings.Contains(lower, "fetch(") {
+			return false
+		}
+		return isReDoSTask(&Task{Title: command}) || hasLongRepeatedInput(command) || hasRepeatedPayloadExpression(command)
+	case "http_request", "send_request", "browser_action", "page_agent":
+		value := joinedToolArgs(args)
+		return isReDoSTask(&Task{Title: value}) || hasLongRepeatedInput(value) || hasRepeatedPayloadExpression(value)
+	case "spawn_agent", "create_agent":
+		return isReDoSTask(&Task{Title: args["name"] + " " + args["task"]})
+	case "update_plan":
+		status := strings.ToLower(strings.TrimSpace(args["status"]))
+		if state.Plan == nil || status == "skipped" || status == "skip" ||
+			status == "not_applicable" || status == "not-applicable" || status == "blocked_unreachable" {
+			return false
+		}
+		return isReDoSTask(state.Plan.Get(args["task_id"]))
+	default:
+		if strings.HasPrefix(toolName, "verify_") {
+			value := toolName + " " + joinedToolArgs(args)
+			return isReDoSTask(&Task{Title: value}) || hasLongRepeatedInput(value) || hasRepeatedPayloadExpression(value)
+		}
+		return false
+	}
+}
+
+func hasLongRepeatedInput(value string) bool {
+	var last rune
+	run := 0
+	for _, current := range value {
+		if current == last {
+			run++
+		} else {
+			last, run = current, 1
+		}
+		if run >= 24 && ((current >= 'a' && current <= 'z') ||
+			(current >= 'A' && current <= 'Z') || (current >= '0' && current <= '9')) {
+			return true
+		}
+	}
+	return false
+}
+
+var repeatedPayloadExpression = regexp.MustCompile(`(?i)(?:['"][a-z0-9]['"]\s*\*\s*[2-9][0-9]|\.repeat\(\s*[2-9][0-9])`)
+
+func hasRepeatedPayloadExpression(value string) bool {
+	return repeatedPayloadExpression.MatchString(value)
 }
 
 // hookOASTSelfProbeGuard blocks requests sent directly from the scanner to the
@@ -2723,7 +2814,7 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 				totalEndpoints, injectionCount, accessControlCount, dirBustingCount, depth)
 			nudgeMsg := fmt.Sprintf(`⚠️ You are at iteration %d/%d. Do NOT stop early — perform DEEP FUZZING on discovered endpoints now:
 
-1. **Parameter & Payload Fuzzing**: Perform boundary testing, parameter key discovery (arjun/x8), and ReDoS regex fuzzing on input parameters.
+1. **Parameter & Payload Fuzzing**: Perform boundary testing and parameter key discovery (arjun/x8) on input parameters. Save ReDoS probes for the final stage after the other plan tasks are settled.
 2. **Load Deep Knowledge Skills**: Use read_skill to load vulnerability-specific bypass techniques for the target's stack.
 3. **Automated Scanning**: Run nuclei or ffuf on discovered API routes for hidden endpoints.%s%s%s
 

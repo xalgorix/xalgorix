@@ -202,6 +202,31 @@ func (p *Plan) RemainingCount() int {
 	return pending + active
 }
 
+// ReDoS can make the target unavailable. Keep that work until every other
+// planned assessment task has reached a terminal disposition.
+func isReDoSTask(t *Task) bool {
+	if t == nil {
+		return false
+	}
+	name := strings.ToLower(t.ID + " " + t.Title + " " + t.VulnClass)
+	name = strings.NewReplacer("-", " ", "_", " ").Replace(name)
+	return strings.Contains(name, "redos") || strings.Contains(name, "regex dos") ||
+		strings.Contains(name, "regex denial") || strings.Contains(name, "regular expression denial") ||
+		strings.Contains(name, "catastrophic backtracking")
+}
+
+func (p *Plan) readyForReDoS() bool {
+	if p.IsEmpty() {
+		return false
+	}
+	for _, t := range p.Tasks {
+		if !isReDoSTask(t) && t.Status != TaskCompleted && t.Status != TaskSkipped {
+			return false
+		}
+	}
+	return true
+}
+
 // ProgressPct returns the whole-percent share of tasks actually EXECUTED
 // (completed over total). Skipped work is deliberately excluded: a plan with
 // 12 completed and 8 justified-skip tasks is 60% executed, not 100% — folding
@@ -225,8 +250,12 @@ func (p *Plan) NextTasks(limit int) []*Task {
 		return nil
 	}
 	var ready []*Task
+	redosReady := p.readyForReDoS()
 	for _, t := range p.Tasks {
 		if t.Status != TaskPending {
+			continue
+		}
+		if isReDoSTask(t) && !redosReady {
 			continue
 		}
 		if p.dependenciesSatisfied(t) {
@@ -237,7 +266,7 @@ func (p *Plan) NextTasks(limit int) []*Task {
 		// No dependency-ready tasks, but some are pending — return the
 		// lowest-phase pending ones rather than stalling forever.
 		for _, t := range p.Tasks {
-			if t.Status == TaskPending {
+			if t.Status == TaskPending && (!isReDoSTask(t) || redosReady) {
 				ready = append(ready, t)
 			}
 		}

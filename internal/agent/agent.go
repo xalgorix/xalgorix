@@ -687,6 +687,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	// running or has not been collected. Descendants skip this gate because the
 	// root coordinator is responsible for collecting the whole graph.
 	if a.ownsAgentGraph {
+		a.hooks.Register(OnToolCall, a.delegatedWorkReDoSGuard)
 		a.hooks.Register(OnFinishAttempt, a.delegatedWorkFinishGate)
 	}
 
@@ -707,6 +708,18 @@ func (a *Agent) delegatedWorkFinishGate(_ *ScanState, _ map[string]string) HookR
 	}
 	if pending := a.agentGraph.UncollectedCount(); pending > 0 {
 		return HookResult{Block: true, BlockReason: fmt.Sprintf("%d delegated result(s) have not been collected. Read them before finishing:\n%s", pending, a.agentGraph.PendingSummary())}
+	}
+	return HookResult{}
+}
+
+// The final ReDoS stage also waits for specialist results; the root plan can
+// be settled while a delegated lane is still exercising its own hypotheses.
+func (a *Agent) delegatedWorkReDoSGuard(state *ScanState, args map[string]string) HookResult {
+	if a == nil || !isReDoSAction(state, args) {
+		return HookResult{}
+	}
+	if gate := a.delegatedWorkFinishGate(state, args); gate.Block {
+		return HookResult{ForceSkip: true, Nudge: "⛔ ReDoS testing is the final availability stage. " + gate.BlockReason}
 	}
 	return HookResult{}
 }
