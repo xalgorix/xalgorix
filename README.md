@@ -216,7 +216,7 @@ Xalgorix is free and open source — self-host it forever, no strings attached. 
 
 <div align="center">
 
-[**☁️ Evaluate hosted Cloud — $1 trial →**](https://www.xalgorix.com/pricing) &nbsp;·&nbsp; [**⚖️ Compare Cloud and self-hosting →**](https://www.xalgorix.com/hosted-vs-self-hosted)
+[**☁️ Explore hosted Cloud plans →**](https://www.xalgorix.com/pricing) &nbsp;·&nbsp; [**⚖️ Compare Cloud and self-hosting →**](https://www.xalgorix.com/hosted-vs-self-hosted)
 
 </div>
 
