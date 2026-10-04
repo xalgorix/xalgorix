@@ -88,3 +88,31 @@ func TestFinishRecoveryCategoryOnlyForPendingNextRequest(t *testing.T) {
 		t.Fatalf("report repair must take precedence: %q", got)
 	}
 }
+
+func TestPlanGuidanceKeepsExploratoryCompletionPath(t *testing.T) {
+	state := NewScanState()
+	state.Plan = NewPlan()
+	state.Plan.add(&Task{
+		ID: "test-novel-testing", VulnClass: "novel-testing", Origin: "auto",
+		WholeTarget: true, Status: TaskPending,
+	})
+	a := &Agent{state: state}
+	result, err := a.updatePlanTool(map[string]string{
+		"task_id": "test-novel-testing", "status": "completed",
+		"notes": "Compared baseline and mutated parser requests on observed inputs; no reproducible anomaly remained.",
+	})
+	if err != nil || result.Error != "" || state.Plan.Get("test-novel-testing").Status != TaskCompleted {
+		t.Fatalf("exploratory completion must remain available: result=%+v err=%v", result, err)
+	}
+
+	promptAgent, _ := newBoundedContextAgent(t, false)
+	prompt := promptAgent.buildSystemPrompt([]string{"https://example.test"}, "Perform an authorized assessment.",
+		scanctx.RequestRatePolicy{MaxRPS: 2, Source: "test"})
+	if !strings.Contains(prompt, "complete an exploratory task") {
+		t.Fatal("system prompt must mention explicit exploratory completion")
+	}
+	tool, ok := promptAgent.registry.Get("update_plan")
+	if !ok || !strings.Contains(tool.Description, "complete exploratory work") {
+		t.Fatal("tool schema must mention explicit exploratory completion")
+	}
+}
