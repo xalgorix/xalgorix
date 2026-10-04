@@ -599,6 +599,27 @@ func ApplicableEndpointsForClass(state *ScanState, class string) []string {
 	return out
 }
 
+// observedReDoSInputs excludes the conservative baseline for paths with no
+// observed input. A repeated-input probe is required when parameters, a
+// request-bearing method, or a GraphQL endpoint provide a concrete surface.
+func observedReDoSInputs(state *ScanState) []string {
+	var out []string
+	for _, endpoint := range ApplicableEndpointsForClass(state, "redos") {
+		se := buildSurfaceEndpoint(state, endpoint)
+		input := se.HasFeature("parameterized") || se.HasFeature("graphql")
+		for _, method := range se.Methods {
+			if method != "GET" && method != "HEAD" && method != "OPTIONS" {
+				input = true
+				break
+			}
+		}
+		if input {
+			out = append(out, endpoint)
+		}
+	}
+	return out
+}
+
 // ── Observation recording ─────────────────────────────────────────────────────
 
 // curlMethodRe matches curl's explicit method flag.

@@ -266,6 +266,14 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	if st == TaskCompleted && isReDoSTask(t) && !a.state.VulnClassesTested["redos"] {
 		return tools.Result{Error: "ReDoS testing requires a completed bounded probe against an input before this task can be marked done. A plan update alone is not test evidence."}, nil
 	}
+	if st == TaskSkipped && isReDoSTask(t) && !a.state.VulnClassesTested["redos"] {
+		inputs := observedReDoSInputs(a.state)
+		if len(inputs) > 0 && (disposition == DispositionNotApplicable || disposition == DispositionExhausted || disposition == DispositionSuperseded || disposition == DispositionBlockedMissingSecondID) {
+			return tools.Result{Error: fmt.Sprintf(
+				"ReDoS remains testable on %d observed endpoint(s) (%s). Run a bounded probe in the final stage; only a concrete access, reachability, or policy blocker can disposition this task without a probe.",
+				len(inputs), truncList(inputs, 3))}, nil
+		}
+	}
 	// Engine coverage-floor tasks (Origin "auto" with a vulnerability class)
 	// cannot be hand-completed: a single update_plan call must not substitute
 	// for actually testing the discovered surface. reconcilePlan closes them

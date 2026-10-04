@@ -202,13 +202,13 @@ Xalgorix is free and open source — self-host it forever, no strings attached. 
 
 |                                    | **Self-hosted** (this repo)              | **[Hosted cloud](https://www.xalgorix.com/)**   |
 | ---------------------------------- | ---------------------------------------- | ----------------------------------------------- |
-| Price to start                     | Free engine, Apache-2.0                  | Free account · one-time $1 evaluation           |
+| Price to start                     | Free engine, Apache-2.0                  | [Credit packs or subscriptions](https://www.xalgorix.com/pricing) |
 | LLM API key                        | Bring & manage your own                  | Included — none to wrangle                      |
-| Cost per scan                      | Raw LLM tokens — variable, can spike     | 1 credit per live host — predictable            |
+| Cost per scan                      | Raw LLM tokens — variable, can spike     | Credit-based; see [current pricing](https://www.xalgorix.com/pricing) |
 | Setup & ops                        | You install, update & run the toolchain  | Nothing to run — scan in ~60s                   |
 | Out-of-band infra (SSRF/blind RCE) | Stand up your own OOB server             | Managed OOB included                            |
 | Scheduling                         | Built-in scheduler on your infrastructure | Managed daily / hourly schedules             |
-| Team · RBAC · shared credits        | Single-operator instance                 | Organization workspaces on Team                 |
+| Team · RBAC · shared credits        | Single-operator instance                 | Organization workspaces on Teams / Enterprise  |
 | Updates                            | `git pull` + rebuild                     | Always on the latest engine                     |
 | Data residency / offline           | ✅ stays on your infra · air-gap OK       | Runs on our infra (DPA available)               |
 

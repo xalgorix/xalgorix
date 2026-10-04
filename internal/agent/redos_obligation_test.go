@@ -77,6 +77,54 @@ func TestReDoSCoverageRequiresExecutedAuthorizedProbe(t *testing.T) {
 	}
 }
 
+func TestReDoSInputCannotBeDispositionedWithoutProbe(t *testing.T) {
+	state := NewScanState()
+	state.DiscoveredEndpoints = []string{"/search"}
+	recordEndpointMethod(state, "/search", "GET")
+	recordEndpointParameters(state, "/search", []SurfaceParameter{{Name: "q", Location: "query"}})
+	state.Plan = NewPlan()
+	state.Plan.add(newReDoSTask())
+	if inputs := observedReDoSInputs(state); len(inputs) != 1 {
+		t.Fatalf("search input must be testable for ReDoS, got %v", inputs)
+	}
+	agent := &Agent{state: state}
+	for _, status := range []string{"skipped", "not_applicable", "exhausted", "superseded", "blocked_missing_second_identity"} {
+		result, err := agent.updatePlanTool(map[string]string{
+			"task_id": "test-redos", "status": status,
+			"notes": "The observed search query accepts repeatable text but the agent would prefer to stop here.",
+		})
+		if err != nil || !strings.Contains(result.Error, "bounded probe") {
+			t.Fatalf("%s bypassed the ReDoS probe obligation: %v %+v", status, err, result)
+		}
+		if got := state.Plan.Get("test-redos").Status; got != TaskPending {
+			t.Fatalf("%s changed the pending ReDoS task to %s", status, got)
+		}
+	}
+
+	static := NewScanState()
+	static.DiscoveredEndpoints = []string{"/robots.txt"}
+	static.Plan = NewPlan()
+	static.Plan.add(newReDoSTask())
+	result, err := (&Agent{state: static}).updatePlanTool(map[string]string{
+		"task_id": "test-redos", "status": "not_applicable",
+		"notes": "Only a static robots document was observed; no application input accepts repeated text.",
+	})
+	if err != nil || result.Error != "" || static.Plan.Get("test-redos").Status != TaskSkipped {
+		t.Fatalf("ReDoS should allow a concrete no-input disposition: %v %+v", err, result)
+	}
+	plain := NewScanState()
+	plain.DiscoveredEndpoints = []string{"/about"}
+	plain.Plan = NewPlan()
+	plain.Plan.add(newReDoSTask())
+	result, err = (&Agent{state: plain}).updatePlanTool(map[string]string{
+		"task_id": "test-redos", "status": "not_applicable",
+		"notes": "The only observed page is informational and has no form, query, or request body input.",
+	})
+	if err != nil || result.Error != "" || plain.Plan.Get("test-redos").Status != TaskSkipped {
+		t.Fatalf("ReDoS should allow a concrete no-input disposition on a plain page: %v %+v", err, result)
+	}
+}
+
 func TestReDoSDispositionWaitsForFinalStage(t *testing.T) {
 	state := NewScanState()
 	state.PlanBuilt = true
