@@ -97,3 +97,17 @@ func TestReDoSDispositionWaitsForFinalStage(t *testing.T) {
 		t.Fatalf("final ReDoS disposition remained blocked: %+v", result)
 	}
 }
+
+func TestReDoSWaitsForProfessionalFinishReconPrerequisites(t *testing.T) {
+	state := NewScanState()
+	state.ProfessionalAssessment = true
+	state.PlanBuilt = true
+	state.Plan = NewPlan()
+	state.Plan.add(&Task{ID: "recon", Title: "Map routes", Status: TaskCompleted})
+	state.Plan.add(newReDoSTask())
+	probe := map[string]string{"tool_name": "terminal_execute", "command": "curl -sk https://target.test/widget?name=" + strings.Repeat("a", 30)}
+	result := hookReDoSLast(state, probe)
+	if !result.ForceSkip || !strings.Contains(result.Nudge, "reconnaissance requirements") {
+		t.Fatalf("ReDoS ran before the finish recon predicate was settled: %+v", result)
+	}
+}

@@ -763,7 +763,17 @@ func hookReDoSLast(state *ScanState, args map[string]string) HookResult {
 		isReDoSTask(&Task{VulnClass: state.AssignedClasses[0]}) {
 		return HookResult{}
 	}
-	if state.PlanBuilt && state.Plan.readyForReDoS() && !state.DelegatedAgent {
+	var reconMissing []string
+	if state.ProfessionalAssessment && !state.DelegatedAgent {
+		maxRejections := state.MaxFinishRejections
+		if maxRejections <= 0 {
+			maxRejections = 15
+		}
+		if state.FinishAttempts <= maxRejections {
+			reconMissing = ComprehensiveReconMissing(state)
+		}
+	}
+	if state.PlanBuilt && state.Plan.readyForReDoS() && !state.DelegatedAgent && len(reconMissing) == 0 {
 		return HookResult{}
 	}
 	var unfinished []string
@@ -778,6 +788,9 @@ func hookReDoSLast(state *ScanState, args map[string]string) HookResult {
 	if len(unfinished) > 0 {
 		guidance = fmt.Sprintf("Finish or disposition the remaining non-ReDoS tasks first (%d): %s.",
 			len(unfinished), truncList(unfinished, 6))
+	} else if len(reconMissing) > 0 {
+		guidance = fmt.Sprintf("Complete the remaining reconnaissance requirements first (%d): %s.",
+			len(reconMissing), truncList(reconMissing, 4))
 	}
 	return HookResult{ForceSkip: true, Nudge: "⛔ ReDoS testing is the final availability stage. " + guidance +
 		" Split benign requests out of this batch, then run the smallest bounded ReDoS probe and report its result at the end."}
