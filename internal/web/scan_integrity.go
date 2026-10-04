@@ -181,6 +181,43 @@ func (s *Server) initializeSessionCounters(sess *scanSession) {
 	}
 }
 
+// reconcileSessionTokenLedger captures charged requests that arrived after the
+// last event snapshot, including requests from delegated agents. Cleanup calls
+// this after stopping child runners and before its final scan-record save.
+func (s *Server) reconcileSessionTokenLedger(sess *scanSession) {
+	if sess == nil || sess.record == nil || sess.sctx == nil || sess.sctx.Tokens == nil {
+		return
+	}
+	tokens := sess.sctx.Tokens.Summary().TotalTokens
+	if tokens <= sess.record.TotalTokens {
+		return
+	}
+	sess.record.TotalTokens = tokens
+	if sess.instanceID == "" {
+		return
+	}
+	s.instancesMu.RLock()
+	defer s.instancesMu.RUnlock()
+	if inst := s.instances[sess.instanceID]; inst != nil {
+		inst.mu.Lock()
+		if _, known := inst.UsageBySession[sess.id]; known {
+			accountSessionUsageLocked(inst, sess.id, tokens, sess.record.AssessmentProgress)
+		} else {
+			if inst.UsageBySession == nil {
+				inst.UsageBySession = make(map[string]sessionUsage)
+			}
+			inst.UsageBySession[sess.id] = sessionUsage{tokens, sess.record.AssessmentProgress}
+			if sess.parentTarget == "" && sess.scanMode != "wildcard" {
+				inst.TotalTokens = max(inst.TotalTokens, tokens)
+			}
+		}
+		if sess.parentTarget == "" {
+			sess.record.UsageBySession = cloneSessionUsage(inst.UsageBySession)
+		}
+		inst.mu.Unlock()
+	}
+}
+
 func cloneSessionUsage(usage map[string]sessionUsage) map[string]sessionUsage {
 	if usage == nil {
 		return nil

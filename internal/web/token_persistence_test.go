@@ -6,7 +6,35 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
+
+func TestResumeUsesPersistedRequestLedgerWhenScanRecordLags(t *testing.T) {
+	s := newTestServer(t, nil)
+	dir := filepath.Join(s.dataDir, "resume-ledger")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s.saveScanRecordTo(&ScanRecord{ID: "scan-1", Target: "example.invalid", Status: "paused", TotalTokens: 100}, dir)
+	prior := scanctx.New("scan-1", dir)
+	prior.Tokens.Record(scanctx.TokenAttribution{PromptTokens: 100, TotalTokens: 100})
+	prior.Tokens.Record(scanctx.TokenAttribution{PromptTokens: 25, TotalTokens: 25})
+	prior.Tokens.Close()
+	prior.Close()
+
+	restored := scanctx.New("scan-1", dir)
+	t.Cleanup(restored.Close)
+	if loaded := restored.Tokens.LoadPersisted(); loaded != 2 {
+		t.Fatalf("loaded %d persisted requests, want 2", loaded)
+	}
+	sess := &scanSession{id: "scan-1", target: "example.invalid", scanDir: dir,
+		scanMode: "single", sctx: restored}
+	rec := s.scanRecordForSession(sess)
+	if rec.TotalTokens != 125 || sess.recordTokenOffset != 125 {
+		t.Fatalf("resumed budget used stale scan record: tokens=%d offset=%d", rec.TotalTokens, sess.recordTokenOffset)
+	}
+}
 
 func TestQueueStateTokenFieldsSerialization(t *testing.T) {
 	state := QueueState{

@@ -40,6 +40,38 @@ func TestRestoredBudgetDoesNotDoubleCountExactSnapshot(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionTokenLedgerAccountsLateDelegatedUsageOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mode         string
+		parentTarget string
+		instanceBase int
+		wantInstance int
+	}{
+		{name: "single", mode: "single", instanceBase: 100, wantInstance: 125},
+		{name: "wildcard child", mode: "wildcard", parentTarget: "example.invalid", instanceBase: 500, wantInstance: 525},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx := scanctx.New("child", t.TempDir())
+			t.Cleanup(sctx.Close)
+			sctx.Tokens.Record(scanctx.TokenAttribution{PromptTokens: 100, TotalTokens: 100})
+			sctx.Tokens.Record(scanctx.TokenAttribution{PromptTokens: 25, TotalTokens: 25})
+			inst := &ScanInstance{ID: "instance", TotalTokens: tc.instanceBase,
+				UsageBySession: map[string]sessionUsage{"child": {Tokens: 100}}}
+			s := &Server{instances: map[string]*ScanInstance{"instance": inst}}
+			sess := &scanSession{id: "child", instanceID: "instance", scanMode: tc.mode,
+				parentTarget: tc.parentTarget, sctx: sctx, record: &ScanRecord{TotalTokens: 100}}
+			for range 2 {
+				s.reconcileSessionTokenLedger(sess)
+				if sess.record.TotalTokens != 125 || inst.TotalTokens != tc.wantInstance || inst.UsageBySession["child"].Tokens != 125 {
+					t.Fatalf("late usage was lost or counted twice: record=%d instance=%d session=%+v",
+						sess.record.TotalTokens, inst.TotalTokens, inst.UsageBySession["child"])
+				}
+			}
+		})
+	}
+}
+
 func TestIntegritySnapshotCarriesKnownZerosAndEnvelope(t *testing.T) {
 	inst := &ScanInstance{ID: "instance", Status: "finished", Completion: "partial", PlanPresent: true, PlanTasksTotal: 2, PlanTasksSkipped: 2}
 	events := []WSEvent{{Type: "finished"}}

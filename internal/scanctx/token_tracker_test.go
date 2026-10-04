@@ -228,6 +228,34 @@ func TestUniqueBytesAddedHeuristic(t *testing.T) {
 	}
 }
 
+func TestRecordAfterCloseKeepsSummaryAlignedWithLedger(t *testing.T) {
+	dir := t.TempDir()
+	tr := NewTokenTracker()
+	tr.SetPersistDir(dir)
+	tr.Record(TokenAttribution{PromptTokens: 100, TotalTokens: 100})
+	tr.Close()
+	tr.Record(TokenAttribution{RequestCategory: CategoryVerifier})
+	tr.Record(TokenAttribution{PromptTokens: 25, TotalTokens: 25})
+
+	data, err := os.ReadFile(filepath.Join(dir, tokenSummaryFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary TokenDiagnostics
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := NewTokenTracker()
+	reloaded.SetPersistDir(dir)
+	if loaded := reloaded.LoadPersisted(); loaded != 3 {
+		t.Fatalf("loaded %d requests, want 3", loaded)
+	}
+	if summary.TotalLLMRequests != 3 || summary.TotalTokens != 125 || reloaded.Summary().TotalTokens != summary.TotalTokens {
+		t.Fatalf("late rows and summary disagree: requests=%d tokens=%d ledger=%d",
+			summary.TotalLLMRequests, summary.TotalTokens, reloaded.Summary().TotalTokens)
+	}
+}
+
 func TestFormatLogShape(t *testing.T) {
 	tr := NewTokenTracker()
 	tr.Record(sampleRecord(AgentTypeRoot, "root", 1, 28000, 24000, 105000, CategoryNormalReasoning))

@@ -277,6 +277,7 @@ type TokenTracker struct {
 	persistDir  string
 	persistFile *os.File
 	sinceFlush  int
+	closed      bool
 }
 
 // NewTokenTracker initializes a new TokenTracker.
@@ -326,6 +327,16 @@ func (t *TokenTracker) Record(rec TokenAttribution) {
 	t.records = append(t.records, rec)
 	t.sinceFlush++
 	t.appendPersistedLocked(rec)
+	if t.closed {
+		// A canceled child may return after the bounded shutdown wait. Keep the
+		// durable summary in step with any such late attribution record.
+		t.writeSummaryLocked()
+		if t.persistFile != nil {
+			_ = t.persistFile.Close()
+			t.persistFile = nil
+		}
+		return
+	}
 	if t.sinceFlush >= persistSummaryEveryRecords {
 		t.sinceFlush = 0
 		t.writeSummaryLocked()
@@ -429,6 +440,7 @@ func (t *TokenTracker) Close() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.closed = true
 	t.writeSummaryLocked()
 	if t.persistFile != nil {
 		_ = t.persistFile.Close()

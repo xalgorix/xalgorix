@@ -3096,6 +3096,7 @@ func (sess *scanSession) cleanup() {
 			if sess.record == nil {
 				return
 			}
+			sess.server.reconcileSessionTokenLedger(sess)
 			before := len(sess.record.Vulns)
 			mergeReportedVulnerabilitiesIntoRecord(sess.record, reporting.GetVulnerabilitiesForContext(sess.sctx.ID))
 			if added := len(sess.record.Vulns) - before; added > 0 {

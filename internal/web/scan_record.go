@@ -29,6 +29,11 @@ func (s *Server) scanRecordForSession(sess *scanSession) *ScanRecord {
 	rec = existing
 	s.reconcileSavedFindingUpgrades(rec, sess.scanDir)
 	s.refreshResumedScanRecord(rec, sess, startedAt)
+	// A delegated request can finish after the last progress event. Restore its
+	// persisted usage before seeding the next run's budget and record counters.
+	if sess.sctx != nil && sess.sctx.Tokens != nil {
+		rec.TotalTokens = max(rec.TotalTokens, sess.sctx.Tokens.Summary().TotalTokens)
+	}
 	sess.recordTokenOffset = rec.TotalTokens
 	return rec
 }
