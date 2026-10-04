@@ -38,6 +38,7 @@ func TestCanonicalClassPhaseMapping(t *testing.T) {
 		"cmdi":                6,
 		"path_traversal":      6,
 		"crlf":                6,
+		"redos":               6,
 		"prototype-pollution": 6,
 		// Phase 7
 		"ssrf": 7,

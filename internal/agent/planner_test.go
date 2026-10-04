@@ -370,9 +370,9 @@ func TestBuildPlanToolValidation(t *testing.T) {
 		{"id":"x","title":"x","phase":1},
 		{"id":"x","title":"dup","phase":2}
 	]`})
-	// 1 deduped model task + the required-class coverage floor (empty techs map:
-	// nil suppresses the tech lanes inside defaultVulnClasses).
-	wantTasks := 1 + len(defaultVulnClasses(map[string]bool{}))
+	// 1 deduped model task + the required-class coverage floor + the final
+	// ReDoS obligation (empty techs map suppresses the tech lanes).
+	wantTasks := 2 + len(defaultVulnClasses(map[string]bool{}))
 	if a.state.Plan == nil || len(a.state.Plan.Tasks) != wantTasks {
 		t.Errorf("duplicate ids: expected %d task(s) kept (1 deduped + coverage floor), got %d", wantTasks, len(a.state.Plan.Tasks))
 	}

@@ -107,6 +107,10 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 			Notes:     strings.TrimSpace(in.Notes),
 			Origin:    "llm",
 		}
+		if isReDoSTask(t) {
+			t.VulnClass = "redos"
+			t.WholeTarget = true
+		}
 		if t.Title == "" {
 			t.Title = id
 		}
@@ -156,6 +160,11 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 		}
 		if plan.add(t) {
 			floorClasses = append(floorClasses, class)
+		}
+	}
+	if !a.state.DelegatedAgent && classAllowedForState(a.state, "redos") && !hasReDoSTask(plan) {
+		if plan.add(newReDoSTask()) {
+			floorClasses = append(floorClasses, "redos")
 		}
 	}
 
@@ -253,6 +262,9 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		disposition = status
 	default:
 		return tools.Result{Error: "status must be one of: active, completed, skipped, or a typed disposition (not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded) — got " + args["status"]}, nil
+	}
+	if st == TaskCompleted && isReDoSTask(t) && !a.state.VulnClassesTested["redos"] {
+		return tools.Result{Error: "ReDoS testing requires a completed bounded probe against an input before this task can be marked done. A plan update alone is not test evidence."}, nil
 	}
 	// Engine coverage-floor tasks (Origin "auto" with a vulnerability class)
 	// cannot be hand-completed: a single update_plan call must not substitute

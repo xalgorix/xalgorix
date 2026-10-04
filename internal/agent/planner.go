@@ -215,6 +215,27 @@ func isReDoSTask(t *Task) bool {
 		strings.Contains(name, "catastrophic backtracking")
 }
 
+func hasReDoSTask(p *Plan) bool {
+	if p == nil {
+		return false
+	}
+	for _, task := range p.Tasks {
+		if isReDoSTask(task) {
+			return true
+		}
+	}
+	return false
+}
+
+func newReDoSTask() *Task {
+	return &Task{
+		ID: "test-redos", Title: "Bounded ReDoS testing on input validation", Phase: 6,
+		VulnClass: "redos", Status: TaskPending, WholeTarget: true, Origin: "auto",
+		DependsOn: []string{"recon", "dirbust"},
+		Notes:     "Final testing stage only: after all other plan tasks and delegated work settle, choose an input likely to reach regular-expression validation. Compare an accepted benign control with one bounded repeated-character probe. Stop on a material delay or availability loss; an authentication rejection is not a completed test.",
+	}
+}
+
 func (p *Plan) readyForReDoS() bool {
 	if p.IsEmpty() {
 		return false
@@ -739,6 +760,9 @@ func MergeRequiredEngineTasks(state *ScanState, plan *Plan) int {
 	}
 	added := 0
 	for _, t := range required.Tasks {
+		if isReDoSTask(t) && hasReDoSTask(plan) {
+			continue
+		}
 		existing := plan.Get(t.ID)
 		if existing != nil || plan.Get(t.ID+"-coverage") != nil {
 			// Reevaluate recorded N/A skips: the surface change that
@@ -962,6 +986,9 @@ func buildEnginePlan(state *ScanState, endpoints []string, detectedTechs map[str
 		// task until it completes.
 		t.DependsOn = []string{"recon", "dirbust"}
 		p.add(t)
+	}
+	if scope.classAllowed("redos") {
+		p.add(newReDoSTask())
 	}
 
 	// Phase 5: full authentication & session testing - always a complete lane,

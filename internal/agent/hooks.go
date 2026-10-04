@@ -665,6 +665,7 @@ func RegisterDefaultHooks(reg *HookRegistry) {
 	reg.Register(OnToolResult, hookWAFDetector)
 	reg.Register(OnToolResult, hookRedirectDetector)
 	reg.Register(OnToolResult, hookTargetHealthDetector)
+	reg.Register(OnToolResult, hookReDoSResultTracker)
 	reg.Register(OnToolResult, hookTechDetector)
 	reg.Register(OnToolResult, hookAdvisoryLeadCommitment)
 	reg.Register(OnToolResult, hookClientRouteWorkflow)
@@ -803,12 +804,18 @@ func isReDoSAction(state *ScanState, args map[string]string) bool {
 	case "spawn_agent", "create_agent":
 		return isReDoSTask(&Task{Title: args["name"] + " " + args["task"]})
 	case "update_plan":
-		status := strings.ToLower(strings.TrimSpace(args["status"]))
-		if state.Plan == nil || status == "skipped" || status == "skip" ||
-			status == "not_applicable" || status == "not-applicable" || status == "blocked_unreachable" {
+		if state.Plan == nil {
 			return false
 		}
-		return isReDoSTask(state.Plan.Get(args["task_id"]))
+		id := strings.TrimSpace(args["task_id"])
+		if id == "" {
+			status := strings.ToLower(strings.TrimSpace(args["status"]))
+			if status == "" {
+				status = "active"
+			}
+			id = inferPlanTaskID(state.Plan, status)
+		}
+		return isReDoSTask(state.Plan.Get(id))
 	default:
 		if strings.HasPrefix(toolName, "verify_") {
 			value := toolName + " " + joinedToolArgs(args)
@@ -839,6 +846,43 @@ var repeatedPayloadExpression = regexp.MustCompile(`(?i)(?:['"][a-z0-9]['"]\s*\*
 
 func hasRepeatedPayloadExpression(value string) bool {
 	return repeatedPayloadExpression.MatchString(value)
+}
+
+// A ReDoS task closes only after a probe reached the request tool and returned
+// a result. Labels and plan updates alone are not testing evidence.
+func hookReDoSResultTracker(state *ScanState, args map[string]string) HookResult {
+	if state == nil || strings.TrimSpace(args["error"]) != "" || strings.TrimSpace(args["output"]) == "" {
+		return HookResult{}
+	}
+	toolName := args["tool_name"]
+	switch toolName {
+	case "terminal_execute", "python_action", "http_request", "send_request", "browser_action", "page_agent":
+	default:
+		if !strings.HasPrefix(toolName, "verify_") {
+			return HookResult{}
+		}
+	}
+	requestArgs := make(map[string]string, len(args))
+	for key, value := range args {
+		if key != "output" && key != "error" {
+			requestArgs[key] = value
+		}
+	}
+	if !isReDoSAction(state, requestArgs) {
+		return HookResult{}
+	}
+	request := joinedToolArgs(requestArgs)
+	if !hasLongRepeatedInput(request) && !hasRepeatedPayloadExpression(request) {
+		return HookResult{}
+	}
+	output := strings.ToLower(args["output"])
+	for _, denied := range []string{"unauthorized", "forbidden", "must provide valid token", "must provide valid admin token"} {
+		if strings.Contains(output, denied) {
+			return HookResult{}
+		}
+	}
+	markEndpointClassCoverage(state, endpointFromToolArgs(args), "redos")
+	return HookResult{}
 }
 
 // hookOASTSelfProbeGuard blocks requests sent directly from the scanner to the

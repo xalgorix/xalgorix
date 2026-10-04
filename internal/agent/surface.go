@@ -487,7 +487,7 @@ func (se *SurfaceEndpoint) ApplicableClasses() []string {
 		}
 	}
 	if se.HasFeature("parameterized") || nonGetMethod {
-		add("sqli", "xss", "parameter_mining")
+		add("sqli", "xss", "parameter_mining", "redos")
 	}
 	// State-changing obligations.
 	if se.stateChanging() {
