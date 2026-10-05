@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
 // newTestCtxState creates an active ScanContext (with an in-memory ledger, no
@@ -15,7 +16,10 @@ func newTestCtxState(t *testing.T) (*scanctx.ScanContext, *ScanState) {
 	id := "ledger-hooks-test-" + t.Name()
 	ctx := scanctx.New(id, "")
 	scanctx.Activate(ctx)
-	t.Cleanup(func() { scanctx.Deactivate(id) })
+	t.Cleanup(func() {
+		scanctx.Deactivate(id)
+		reporting.CleanupContext(id)
+	})
 	state := NewScanState()
 	state.ScanContextID = id
 	return ctx, state
@@ -233,8 +237,11 @@ func TestHookLedgerSeedNoActiveContext(t *testing.T) {
 }
 
 func TestProvenUnreportedHypotheses(t *testing.T) {
-	ctx, _ := newTestCtxState(t)
+	ctx, state := newTestCtxState(t)
 	l := ctx.Ledger
+	reporting.SeedVulnsForContext(ctx.ID, []reporting.Vulnerability{
+		{ID: "XALG-1", Title: "Reported finding", Description: "Confirmed", Endpoint: "/c"},
+	})
 
 	l.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Endpoint: "/a"}) // queued — ignored
 
@@ -245,7 +252,7 @@ func TestProvenUnreportedHypotheses(t *testing.T) {
 	l.SetStatus(reported.ID, scanctx.HypothesisProven, "")
 	l.AddEvidence(reported.ID, scanctx.Evidence{Kind: scanctx.EvidenceFindingRef, FindingID: "XALG-1", Summary: "confirmed"})
 
-	un := provenUnreportedHypotheses(l)
+	un := provenUnreportedHypothesesForOwner(l, "", state.ScanContextID)
 	if len(un) != 1 || un[0] != proven.ID {
 		t.Fatalf("expected only %s unreported, got %v", proven.ID, un)
 	}
@@ -255,6 +262,9 @@ func TestHookLedgerFinishGate(t *testing.T) {
 	ctx, state := newTestCtxState(t)
 	state.FinishAttempts = 1
 	l := ctx.Ledger
+	reporting.SeedVulnsForContext(ctx.ID, []reporting.Vulnerability{
+		{ID: "XALG-2", Title: "Filed finding", Description: "Confirmed", Endpoint: "/x"},
+	})
 
 	p := l.Upsert(scanctx.Hypothesis{VulnClass: "rce", Endpoint: "/x"})
 	l.SetStatus(p.ID, scanctx.HypothesisProven, "")
@@ -273,13 +283,53 @@ func TestHookLedgerFinishGate(t *testing.T) {
 		t.Fatal("expected gate to clear after linking a finding")
 	}
 
-	// Even with a fresh proven-unreported hypothesis, the gate must release once
-	// the attempt bound is exceeded so it can never deadlock the scan.
+	// A proven-unreported hypothesis must remain actionable after the first
+	// three attempts; the overall finish-attempt ceiling still prevents a loop.
 	p2 := l.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Endpoint: "/y"})
 	l.SetStatus(p2.ID, scanctx.HypothesisProven, "")
+	l.AddEvidence(p2.ID, scanctx.Evidence{Kind: scanctx.EvidenceFindingRef, FindingID: "XALG-404"})
+	state.MaxFinishRejections = 5
 	state.FinishAttempts = 4
+	if r := hookLedgerFinishGate(state, nil); !r.Block || !strings.Contains(r.BlockReason, p2.ID) {
+		t.Fatalf("expected proven-unreported hypothesis to block attempt four, got %+v", r)
+	}
+	if status, _ := scanCompletionAssessment(state); status != CompletionStatusIncomplete {
+		t.Fatalf("a nonexistent finding ID must not complete the scan, got %s", status)
+	}
+	state.FinishAttempts = 5
+	if !hookLedgerFinishGate(state, nil).Block {
+		t.Fatal("expected gate to block through the configured attempt ceiling")
+	}
+	state.FinishAttempts = 6
 	if hookLedgerFinishGate(state, nil).Block {
-		t.Fatal("expected gate to release after FinishAttempts exceeds the bound")
+		t.Fatal("expected gate to release after the overall attempt ceiling")
+	}
+}
+
+func TestAddHypothesisEvidenceRejectsUnfiledFindingID(t *testing.T) {
+	ctx, _ := newTestCtxState(t)
+	a := &Agent{scanCtx: ctx}
+	h := ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Endpoint: "/x"})
+	args := map[string]string{
+		"hypothesis_id": h.ID,
+		"summary":       "Confirmed injection",
+		"finding_id":    "XALG-7",
+	}
+	if result, err := a.addHypothesisEvidenceTool(args); err != nil || !strings.Contains(result.Error, "does not match a saved report") {
+		t.Fatalf("expected missing report to be rejected, got result=%+v err=%v", result, err)
+	}
+	if got, _ := ctx.Ledger.Get(h.ID); len(got.Evidence) != 0 {
+		t.Fatalf("rejected reference must not be added to the ledger, got %+v", got.Evidence)
+	}
+	reporting.SeedVulnsForContext(ctx.ID, []reporting.Vulnerability{
+		{ID: "XALG-7", Title: "Filed finding", Description: "Confirmed", Endpoint: "/x"},
+	})
+	if result, err := a.addHypothesisEvidenceTool(args); err != nil || result.Error != "" {
+		t.Fatalf("expected filed report link to succeed, got result=%+v err=%v", result, err)
+	}
+	got, _ := ctx.Ledger.Get(h.ID)
+	if len(got.Evidence) != 1 || got.Evidence[0].Kind != scanctx.EvidenceFindingRef || got.Evidence[0].FindingID != "XALG-7" {
+		t.Fatalf("expected canonical saved finding reference, got %+v", got.Evidence)
 	}
 }
 
@@ -409,6 +459,9 @@ func TestHookLedgerFinishGateScopesDelegatedOwnership(t *testing.T) {
 	if r = hookLedgerFinishGate(state, nil); !r.Block || !strings.Contains(r.BlockReason, created.ID) {
 		t.Fatalf("expected origin-owned proven work to block sub-a, got: %+v", r)
 	}
+	reporting.SeedVulnsForContext(ctx.ID, []reporting.Vulnerability{
+		{ID: "XALG-A", Title: "Specialist finding", Description: "Confirmed", Endpoint: "/created"},
+	})
 	ctx.Ledger.AddEvidence(created.ID, scanctx.Evidence{Kind: scanctx.EvidenceFindingRef, FindingID: "XALG-A"})
 	if hookLedgerFinishGate(state, nil).Block {
 		t.Fatal("expected delegated gate to clear after its origin-owned finding was linked")

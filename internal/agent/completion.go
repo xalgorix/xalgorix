@@ -68,7 +68,7 @@ func scanCompletionAssessment(state *ScanState) (string, []string) {
 		if testing := testingHypothesesForOwner(l, owner); len(testing) > 0 {
 			reasons = append(reasons, "hypotheses claimed but not closed: "+strings.Join(testing, ", "))
 		}
-		if unreported := provenUnreportedHypothesesForOwner(l, owner); len(unreported) > 0 {
+		if unreported := provenUnreportedHypothesesForOwner(l, owner, state.ScanContextID); len(unreported) > 0 {
 			reasons = append(reasons, "hypotheses proven but unreported: "+strings.Join(unreported, ", "))
 		}
 	}

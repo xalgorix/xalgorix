@@ -143,11 +143,10 @@ func TestRunInterruptsAndResumesPlanBeforeBoundingBlockedRequest(t *testing.T) {
 func TestAlternatingPlanErrorsCannotEvadeRecovery(t *testing.T) {
 	state := NewScanState()
 	state.Plan = AutoPlan([]string{"/users"}, nil)
-	a := &Agent{state: state, scanBudget: newScanBudget()}
+	a := &Agent{state: state}
 	hooks := NewHookRegistry()
 	RegisterDefaultHooks(hooks)
 	for i := 0; i < planValidationRecoveryLimit; i++ {
-		state.Iteration = i
 		id := "test-sqli"
 		if i%2 != 0 {
 			id = "test-xss"
@@ -157,65 +156,9 @@ func TestAlternatingPlanErrorsCannotEvadeRecovery(t *testing.T) {
 			t.Fatalf("expected rejected update: %+v %v", result, err)
 		}
 		outcome := hooks.Fire(OnToolResult, state, map[string]string{"tool_name": "update_plan", "error": result.Error})
-		if outcome.StopReason != "" {
-			t.Fatalf("plan recovery stopped before feedback could be delivered: %+v", outcome)
+		if i == planValidationRecoveryLimit-1 && outcome.StopReason != "stuck_loop_limit" {
+			t.Fatalf("alternating validation errors were not bounded: %+v", outcome)
 		}
-		check := a.semanticLivenessCheck()
-		if i < planValidationRecoveryLimit-1 && check.StopReason != "" {
-			t.Fatalf("plan recovery stopped before the turn limit: %+v", check)
-		}
-		if i == planValidationRecoveryLimit-1 && check.StopReason != "stuck_loop_limit" {
-			t.Fatalf("alternating validation turns were not bounded: %+v", check)
-		}
-	}
-}
-
-func TestPlanValidationBatchWaitsForFeedbackAndLaterProgress(t *testing.T) {
-	state := NewScanState()
-	state.Plan = NewPlan()
-	task := &Task{ID: "test-xss", Phase: 6, VulnClass: "xss", Endpoint: "/users", Status: TaskActive}
-	state.Plan.add(task)
-	state.PlanValidationErrors = planValidationRecoveryLimit - 1
-	state.LastPlanValidationErrorIteration = 8
-	state.PlanValidationErrorIterationSeen = true
-	state.Iteration = 9
-	a := &Agent{state: state, scanBudget: newScanBudget()}
-	args := map[string]string{"tool_name": "update_plan", "error": "invalid transition"}
-	for i := 0; i < 26; i++ {
-		if result := hookPlanValidationTracker(state, args); result.StopReason != "" {
-			t.Fatalf("batch stopped before feedback was delivered: %+v", result)
-		}
-	}
-	if state.PlanValidationErrors != planValidationRecoveryLimit {
-		t.Fatalf("one response counted as %d recovery attempts", state.PlanValidationErrors)
-	}
-	// A valid result later in the same response must still be able to rescue it.
-	task.Status = TaskCompleted
-	if result := hookPlanValidationTracker(state, map[string]string{"tool_name": "update_plan"}); result.StopReason != "" {
-		t.Fatalf("completed work was rejected: %+v", result)
-	}
-	if result := a.semanticLivenessCheck(); result.StopReason != "" || state.PlanValidationErrors != 0 {
-		t.Fatalf("completed work did not reset the recovery deadline: %+v", result)
-	}
-}
-
-func TestRepeatedPlanSkipFeedbackKeepsTaskAndGuidance(t *testing.T) {
-	seen := false
-	firstError := tools.Result{Error: fmt.Sprintf("task %q (%s)%s", "first", "xss", planSkipNoteGuidance)}
-	secondError := tools.Result{Error: strings.Replace(firstError.Error, `"first"`, `"second"`, 1)}
-	first := formatBatchToolResult("update_plan", firstError, &seen)
-	second := formatBatchToolResult("update_plan", secondError, &seen)
-	if !seen || !strings.Contains(first, "blocked_unreachable") || !strings.Contains(second, `task "second" (xss)`) ||
-		!strings.Contains(second, "concrete surface fact") || len(second) >= len(first) {
-		t.Fatalf("batch feedback lost task identity or actionable guidance: first=%q second=%q", first, second)
-	}
-	other := tools.Result{Error: "unknown task ID"}
-	if got := formatBatchToolResult("update_plan", other, &seen); got != formatToolResult("update_plan", other) {
-		t.Fatalf("unrelated rejection was shortened: %q", got)
-	}
-	other.Error = `task "third" (xss) cannot be skipped without a justification note. Additional task-specific evidence is required.`
-	if got := formatBatchToolResult("update_plan", other, &seen); got != formatToolResult("update_plan", other) {
-		t.Fatalf("task-specific rejection was shortened: %q", got)
 	}
 }
 
@@ -225,22 +168,18 @@ func TestPlanRecoveryResetsOnlyForNewCompletedWork(t *testing.T) {
 	task := &Task{ID: "first", Phase: 6, VulnClass: "sqli", Endpoint: "/search", Status: TaskCompleted}
 	state.Plan.add(task)
 	args := map[string]string{"tool_name": "update_plan", "error": "invalid transition"}
-	state.Iteration = 1
 	hookPlanValidationTracker(state, args)
 	for i := 0; i < 10; i++ {
 		task.Status = TaskActive
-		state.Iteration++
 		hookPlanValidationTracker(state, args)
 		task.ID = fmt.Sprintf("replacement-%d", i)
 		task.Status = TaskCompleted
-		state.Iteration++
 		hookPlanValidationTracker(state, args)
 	}
 	if state.PlanValidationErrors != 21 {
 		t.Fatalf("regression/replacement reset recovery: %d", state.PlanValidationErrors)
 	}
 	state.ReconCoverage.HTTPProbed = true
-	state.Iteration++
 	hookPlanValidationTracker(state, args)
 	if state.PlanValidationErrors != 1 {
 		t.Fatalf("new validated recon did not reset recovery: %d", state.PlanValidationErrors)

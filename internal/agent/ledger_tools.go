@@ -191,6 +191,20 @@ func (a *Agent) addHypothesisEvidenceTool(args map[string]string) (tools.Result,
 	if summary == "" {
 		return tools.Result{Error: "summary is required"}, nil
 	}
+	kind := strings.ToLower(strings.TrimSpace(args["kind"]))
+	findingID := strings.TrimSpace(args["finding_id"])
+	if kind == scanctx.EvidenceFindingRef || findingID != "" {
+		if findingID == "" {
+			return tools.Result{Error: "finding_id is required for a finding_ref"}, nil
+		}
+		if kind != "" && kind != scanctx.EvidenceFindingRef {
+			return tools.Result{Error: "finding_id requires kind=finding_ref"}, nil
+		}
+		if !reportedFindingIDs(a.scanCtx.ID)[strings.ToUpper(findingID)] {
+			return tools.Result{Error: "finding_id does not match a saved report; call report_vulnerability first, then use its returned ID"}, nil
+		}
+		kind = scanctx.EvidenceFindingRef
+	}
 	conf := 0.0
 	if raw := strings.TrimSpace(args["confidence"]); raw != "" {
 		if f, err := strconv.ParseFloat(raw, 64); err == nil {
@@ -198,11 +212,11 @@ func (a *Agent) addHypothesisEvidenceTool(args map[string]string) (tools.Result,
 		}
 	}
 	ev := scanctx.Evidence{
-		Kind:       strings.TrimSpace(args["kind"]),
+		Kind:       kind,
 		Summary:    summary,
 		Request:    args["request"],
 		Response:   args["response"],
-		FindingID:  strings.TrimSpace(args["finding_id"]),
+		FindingID:  findingID,
 		AgentID:    a.ledgerOrigin(),
 		Confidence: conf,
 	}

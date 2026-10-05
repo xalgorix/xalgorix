@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"encoding/xml"
 	"strings"
 	"sync"
 	"testing"
@@ -170,49 +169,6 @@ func TestSchemaXML_EscapesUnsafeChars(t *testing.T) {
 	}
 	if !strings.Contains(out, "&lt;tag&gt;") {
 		t.Errorf("schema missing &lt;tag&gt; escaped form: %s", out)
-	}
-}
-
-func TestSchemaXMLCompactLayoutPreservesToolContract(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&Tool{
-		Name:        `request&probe"quoted'`,
-		Description: `Send a "controlled" <request> & inspect its result's value.`,
-		Parameters: []Parameter{
-			{Name: `url"quoted'`, Description: `Target URL's "value"`, Required: true},
-			{Name: "note", Description: "Optional context"},
-		},
-	})
-	schema := r.SchemaXML()
-	if !strings.Contains(schema, `<tool name="request&amp;probe&#34;quoted&#39;">`) ||
-		!strings.Contains(schema, `<description>Send a "controlled" &lt;request&gt; &amp; inspect its result's value.</description>`) ||
-		!strings.Contains(schema, `<parameter name="url&#34;quoted&#39;" required="true">Target URL's "value"</parameter>`) {
-		t.Fatalf("schema escaping changed: %s", schema)
-	}
-	var parsed struct {
-		XMLName xml.Name `xml:"tools"`
-		Tools   []struct {
-			Name        string `xml:"name,attr"`
-			Description string `xml:"description"`
-			Parameters  []struct {
-				Name        string `xml:"name,attr"`
-				Required    bool   `xml:"required,attr"`
-				Description string `xml:",chardata"`
-			} `xml:"parameters>parameter"`
-		} `xml:"tool"`
-	}
-	if err := xml.Unmarshal([]byte(schema), &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if len(parsed.Tools) != 1 || parsed.Tools[0].Name != `request&probe"quoted'` ||
-		parsed.Tools[0].Description != `Send a "controlled" <request> & inspect its result's value.` ||
-		len(parsed.Tools[0].Parameters) != 2 ||
-		parsed.Tools[0].Parameters[0].Name != `url"quoted'` ||
-		!parsed.Tools[0].Parameters[0].Required ||
-		parsed.Tools[0].Parameters[0].Description != `Target URL's "value"` ||
-		parsed.Tools[0].Parameters[1].Required ||
-		parsed.Tools[0].Parameters[1].Description != "Optional context" {
-		t.Fatalf("serialized tool contract changed: %+v", parsed.Tools)
 	}
 }
 

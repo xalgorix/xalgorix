@@ -2226,7 +2226,6 @@ func (a *Agent) Run(targets []string, instruction string) {
 		}
 		a.hooks.Fire(OnHealthyResponse, a.state, nil)
 
-		planSkipGuidanceSeen := false
 		for _, tc := range toolCalls {
 			if a.stopped.Load() {
 				break
@@ -2480,7 +2479,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 				return
 			}
 
-			resultMsg := formatBatchToolResult(tc.Name, result, &planSkipGuidanceSeen)
+			resultMsg := formatToolResult(tc.Name, result)
 			if a.boundedContextEnabled() && result.Error == "" {
 				// Information-complete archiving: persist the COMPLETE raw
 				// output (pre-truncation) so aged stubs can point at a

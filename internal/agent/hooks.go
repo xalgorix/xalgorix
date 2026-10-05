@@ -128,9 +128,8 @@ type ScanState struct {
 	ReconCoverage  ReconCoverage
 	ScannerUsed    bool
 	FinishAttempts int
-	// FinishRecoveryPending marks only the next charged model request after
-	// an actual rejected finish, so token telemetry does not label later
-	// productive, nudged reasoning as finish-rejection overhead.
+	// FinishRecoveryPending labels only the next charged request after a
+	// rejected finish in token telemetry.
 	FinishRecoveryPending    bool
 	MaxFinishRejections      int
 	MinIterations            int
@@ -239,20 +238,18 @@ type ScanState struct {
 	// browser/search stuck logic, so it cannot conflict with StuckDomain.
 	// These counters are NOT reset by OnHealthyResponse: a "healthy" response
 	// that re-issues the same call is exactly the loop we want to catch.
-	LastToolName                     string
-	LastToolArgsHash                 string
-	ConsecutiveSameCall              int // same (tool, normalized args) called back-to-back
-	ConsecutiveSameCallNudges        int // consecutive repeat-call nudges without a different call
-	LastResultFP                     string
-	ConsecutiveSameResult            int // same result-output fingerprint back-to-back
-	ConsecutiveSameResultNudges      int // consecutive repeat-result nudges without a different result
-	ConsecutiveNoOpCalls             int // consecutive trivial/no-op terminal calls (e.g. echo done/ok/a, pwd)
-	PlanValidationErrors             int
-	LastPlanValidationErrorIteration int
-	PlanValidationErrorIterationSeen bool
-	PlanProgressSeen                 map[string]bool
-	ProgressIdleIterations           int
-	LastAssessmentProgress           int
+	LastToolName                string
+	LastToolArgsHash            string
+	ConsecutiveSameCall         int // same (tool, normalized args) called back-to-back
+	ConsecutiveSameCallNudges   int // consecutive repeat-call nudges without a different call
+	LastResultFP                string
+	ConsecutiveSameResult       int // same result-output fingerprint back-to-back
+	ConsecutiveSameResultNudges int // consecutive repeat-result nudges without a different result
+	ConsecutiveNoOpCalls        int // consecutive trivial/no-op terminal calls (e.g. echo done/ok/a, pwd)
+	PlanValidationErrors        int
+	PlanProgressSeen            map[string]bool
+	ProgressIdleIterations      int
+	LastAssessmentProgress      int
 
 	// Blocked-call loop detection. The three block guards (activity policy,
 	// phase restriction, out-of-scope) short-circuit the dispatch BEFORE the

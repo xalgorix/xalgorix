@@ -390,29 +390,29 @@ func (r *Registry) SchemaXML() string {
 			hidden = append(hidden, t.Name)
 			continue
 		}
-		out += fmt.Sprintf("<tool name=\"%s\">\n", attrEscape(t.Name))
-		out += fmt.Sprintf("<description>%s</description>\n", textEscape(t.Description))
+		out += fmt.Sprintf("  <tool name=\"%s\">\n", attrEscape(t.Name))
+		out += fmt.Sprintf("    <description>%s</description>\n", textEscape(t.Description))
 		if len(t.Parameters) > 0 {
-			out += "<parameters>\n"
+			out += "    <parameters>\n"
 			for _, p := range t.Parameters {
 				req := ""
 				if p.Required {
 					req = " required=\"true\""
 				}
-				out += fmt.Sprintf("<parameter name=\"%s\"%s>%s</parameter>\n",
+				out += fmt.Sprintf("      <parameter name=\"%s\"%s>%s</parameter>\n",
 					attrEscape(p.Name), req, textEscape(p.Description))
 			}
-			out += "</parameters>\n"
+			out += "    </parameters>\n"
 		}
-		out += "</tool>\n"
+		out += "  </tool>\n"
 	}
 	// Role-scoped schema: tools hidden from the prompt stay REGISTERED and
 	// callable — only their documentation is withheld. The one-line index
 	// keeps the model aware they exist (no phantom gaps), so the reachable
 	// tool set is unchanged; the coordinator retains full documentation.
 	if len(hidden) > 0 {
-		out += fmt.Sprintf("<hidden_tools>%s</hidden_tools>\n", strings.Join(hidden, ", "))
-		out += "<note>hidden_tools exist and remain callable but are outside your delegated lane; your coordinator retains them. If your assigned lane genuinely requires one, say so in your lane results instead of improvising.</note>\n"
+		out += fmt.Sprintf("  <hidden_tools>%s</hidden_tools>\n", strings.Join(hidden, ", "))
+		out += "  <note>hidden_tools exist and remain callable but are outside your delegated lane; your coordinator retains them. If your assigned lane genuinely requires one, say so in your lane results instead of improvising.</note>\n"
 	}
 	out += "</tools>\n"
 	return out
@@ -447,12 +447,6 @@ func (r *Registry) SchemaHiddenNames() []string {
 
 // textEscape escapes characters that are unsafe in XML text nodes.
 func textEscape(s string) string {
-	escaped := xmlEscape(s)
-	// Quotes are safe in text nodes and need no entity encoding.
-	return strings.ReplaceAll(strings.ReplaceAll(escaped, "&#34;", "\""), "&#39;", "'")
-}
-
-func xmlEscape(s string) string {
 	var buf bytes.Buffer
 	if err := xml.EscapeText(&buf, []byte(s)); err != nil {
 		// EscapeText only fails on the io.Writer; we use bytes.Buffer.
@@ -464,5 +458,5 @@ func xmlEscape(s string) string {
 // attrEscape escapes characters that are unsafe in XML attribute values.
 func attrEscape(s string) string {
 	// xml.EscapeText handles attribute-safe escaping for &, <, >, " and '.
-	return xmlEscape(s)
+	return textEscape(s)
 }

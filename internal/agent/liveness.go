@@ -68,20 +68,19 @@ func hookPlanValidationTracker(state *ScanState, args map[string]string) HookRes
 		if !state.PlanProgressSeen[fact] {
 			state.PlanProgressSeen[fact] = true
 			state.PlanValidationErrors = 0
-			state.PlanValidationErrorIterationSeen = false
 		}
 	}
 	if (args["tool_name"] != "update_plan" && args["tool_name"] != "build_plan") || args["error"] == "" {
 		return HookResult{}
 	}
-	// A response can contain many rejected calls before the model sees any
-	// feedback. Count it once, then let the full batch finish.
-	if state.PlanValidationErrorIterationSeen && state.LastPlanValidationErrorIteration == state.Iteration {
-		return HookResult{}
-	}
-	state.LastPlanValidationErrorIteration = state.Iteration
-	state.PlanValidationErrorIterationSeen = true
 	state.PlanValidationErrors++
+	if state.PlanValidationErrors >= planValidationRecoveryLimit {
+		return HookResult{
+			StopReason: "stuck_loop_limit",
+			EmitMessage: "Scan stopped: repeated plan validation failures made no progress after bounded recovery. " +
+				"Assessment remains partial; saved findings are preserved.",
+		}
+	}
 	if state.PlanValidationErrors == 4 || state.PlanValidationErrors == 12 {
 		return HookResult{Nudge: "Plan changes keep failing without completed work. Read the current plan and use its exact task IDs, " +
 			"required evidence and concrete disposition notes. Changing IDs or repeating rejected transitions cannot satisfy the plan."}
@@ -219,17 +218,8 @@ func (a *Agent) semanticLivenessCheck() HookResult {
 	if progress > a.state.LastAssessmentProgress {
 		a.state.ProgressIdleIterations = 0
 		a.state.LastAssessmentProgress = progress
-		a.state.PlanValidationErrors = 0
-		a.state.PlanValidationErrorIterationSeen = false
 	} else {
 		a.state.ProgressIdleIterations++
-	}
-	if a.state.PlanValidationErrors >= planValidationRecoveryLimit {
-		return HookResult{
-			StopReason: "stuck_loop_limit",
-			EmitMessage: "Scan stopped: repeated plan validation failures made no progress after bounded recovery. " +
-				"Assessment remains partial; saved findings are preserved.",
-		}
 	}
 	if a.state.ProgressIdleIterations >= semanticNonProgressLimit {
 		return HookResult{StopReason: "stuck_loop_limit", EmitMessage: "Scan stopped: bounded recovery produced no new assessment evidence. Assessment remains partial; saved findings are preserved."}

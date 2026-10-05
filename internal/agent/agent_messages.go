@@ -54,24 +54,6 @@ func formatToolResult(toolName string, result tools.Result) string {
 	return msg
 }
 
-const planSkipNoteGuidance = " cannot be skipped without a justification note. Use a typed status (not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded) and state the concrete surface fact (for example: 'no XML input surface exists'); otherwise test it."
-
-// Keep each rejected task visible while sending the shared skip guidance once
-// per response. The full tool result remains available in the scan journal.
-func formatBatchToolResult(toolName string, result tools.Result, planSkipGuidanceSeen *bool) string {
-	const skipNoteError = " cannot be skipped without a justification note."
-	if toolName == "update_plan" {
-		if task, ok := strings.CutSuffix(result.Error, planSkipNoteGuidance); ok && strings.HasPrefix(task, "task ") {
-			if *planSkipGuidanceSeen {
-				return fmt.Sprintf("Tool '%s' error: %s%s Use a typed status and concrete surface fact; otherwise test it.\n",
-					toolName, task, skipNoteError)
-			}
-			*planSkipGuidanceSeen = true
-		}
-	}
-	return formatToolResult(toolName, result)
-}
-
 // getToolSuggestion provides helpful suggestions when a tool fails
 func getToolSuggestion(toolName, errorMsg string) string {
 	lower := strings.ToLower(errorMsg)

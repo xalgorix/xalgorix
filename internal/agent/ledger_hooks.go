@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
 var (
@@ -722,26 +723,31 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 	// finish-attempt ceiling and the whole scan terminates incomplete
 	// (observed in production: one testing hypothesis cost 500+ iterations
 	// and drove finish_gate_exhausted). The conversion is auditable and the
-	// work stays resumable; proven-but-unreported leads keep their honest
-	// completion reasons.
-	if state.FinishAttempts > 3 {
-		if l := ledgerForState(state); l != nil {
-			for _, h := range l.All() {
-				if h.Status != scanctx.HypothesisTesting || !hypothesisBelongsToOwner(h, ownerForGate(state)) {
-					continue
-				}
-				l.SetStatus(h.ID, scanctx.HypothesisExhausted,
-					"auto-dispositioned: claimed but not closed across repeated finish attempts; work preserved for resume")
-			}
-		}
-		return HookResult{}
-	}
+	// work stays resumable. Proven-but-unreported leads still block until the
+	// overall finish-attempt ceiling, so they get the full bounded recovery
+	// window rather than disappearing after three attempts.
 	l := ledgerForState(state)
 	if l == nil {
 		return HookResult{}
 	}
 	owner := ownerForGate(state)
-	unreported := provenUnreportedHypothesesForOwner(l, owner)
+	if state.FinishAttempts > 3 {
+		for _, h := range l.All() {
+			if h.Status != scanctx.HypothesisTesting || !hypothesisBelongsToOwner(h, owner) {
+				continue
+			}
+			l.SetStatus(h.ID, scanctx.HypothesisExhausted,
+				"auto-dispositioned: claimed but not closed across repeated finish attempts; work preserved for resume")
+		}
+	}
+	maxRejections := state.MaxFinishRejections
+	if maxRejections <= 0 {
+		maxRejections = 15
+	}
+	if state.FinishAttempts > maxRejections {
+		return HookResult{}
+	}
+	unreported := provenUnreportedHypothesesForOwner(l, owner, state.ScanContextID)
 	inProgress := testingHypothesesForOwner(l, owner)
 	// Lane completion (Part 15): a specialist's lane is exhausted only when
 	// its ASSIGNED work is settled too. Pre-assigned hypotheses still queued
@@ -812,16 +818,28 @@ func testingHypothesesForOwner(l *scanctx.LedgerStore, owner string) []string {
 	return out
 }
 
-// provenUnreportedHypotheses returns the IDs of hypotheses marked proven that
-// carry no finding reference (no finding_ref evidence and no evidence FindingID).
-func provenUnreportedHypotheses(l *scanctx.LedgerStore) []string {
-	return provenUnreportedHypothesesForOwner(l, "")
+// reportedFindingIDs resolves links against findings actually saved for this
+// scan. A model-supplied ID in ledger evidence is not proof of a filed report.
+func reportedFindingIDs(contextID string) map[string]bool {
+	ids := make(map[string]bool)
+	if contextID == "" {
+		return ids
+	}
+	for _, finding := range reporting.GetVulnerabilitiesForContext(contextID) {
+		if id := strings.ToUpper(strings.TrimSpace(finding.ID)); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
 }
 
-func provenUnreportedHypothesesForOwner(l *scanctx.LedgerStore, owner string) []string {
+// provenUnreportedHypothesesForOwner returns proven hypotheses without a link
+// to a finding persisted for this scan.
+func provenUnreportedHypothesesForOwner(l *scanctx.LedgerStore, owner, contextID string) []string {
 	if l == nil {
 		return nil
 	}
+	reported := reportedFindingIDs(contextID)
 	var out []string
 	for _, h := range l.All() {
 		if h.Status != scanctx.HypothesisProven || !hypothesisBelongsToOwner(h, owner) {
@@ -829,7 +847,7 @@ func provenUnreportedHypothesesForOwner(l *scanctx.LedgerStore, owner string) []
 		}
 		linked := false
 		for _, ev := range h.Evidence {
-			if ev.Kind == scanctx.EvidenceFindingRef || strings.TrimSpace(ev.FindingID) != "" {
+			if reported[strings.ToUpper(strings.TrimSpace(ev.FindingID))] {
 				linked = true
 				break
 			}
