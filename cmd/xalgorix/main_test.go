@@ -7,6 +7,28 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/config"
 )
 
+func TestResolvedVersion(t *testing.T) {
+	tests := []struct {
+		name          string
+		override      string
+		moduleVersion string
+		want          string
+	}{
+		{"release build", "4.7.0", "v4.6.9", "4.7.0"},
+		{"tagged install", "", "v4.6.9", "4.6.9"},
+		{"local build", "", "(devel)", "dev"},
+		{"missing build info", "", "", "dev"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolvedVersion(tt.override, tt.moduleVersion); got != tt.want {
+				t.Errorf("resolvedVersion(%q, %q) = %q, want %q", tt.override, tt.moduleVersion, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsNewer covers the semver comparison used by the auto-update path.
 // Pre-release ordering is intentionally not modeled (the comment in main.go
 // documents this): we only need the major/minor/patch numeric comparison

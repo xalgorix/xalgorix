@@ -24,19 +24,29 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/web"
 )
 
-// version is the build-time version string. CI/release flow should
-// override it with -ldflags so the released binary reports the actual tag:
-//
-//	go build -ldflags "-X main.version=$(git describe --tags --dirty)" ./cmd/xalgorix
-//
-// The hardcoded fallback is only used when developers `go run` the package
-// without ldflags. It is a `var` (not `const`) precisely so ldflags can
-// rewrite it.
-var version = "4.6.133"
+// version can be set by the release build with -ldflags. Tagged Go installs
+// use their module version when no build-time override is provided.
+var version string
 
 const defaultWebPort = 9137
 
+func resolvedVersion(override, moduleVersion string) string {
+	if override != "" {
+		return strings.TrimPrefix(override, "v")
+	}
+	if moduleVersion != "" && moduleVersion != "(devel)" {
+		return strings.TrimPrefix(moduleVersion, "v")
+	}
+	return "dev"
+}
+
 func main() {
+	moduleVersion := ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		moduleVersion = info.Main.Version
+	}
+	version = resolvedVersion(version, moduleVersion)
+
 	// Top-level crash recovery — catches panics that escape all other handlers.
 	// Critical for service mode where stderr may not be visible.
 	defer func() {

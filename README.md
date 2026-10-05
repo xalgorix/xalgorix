@@ -83,7 +83,17 @@ Residential proxies from **$0.70/GB**. **Free testing is available**, and Xalgor
 curl -sSL https://www.xalgorix.com/install | bash
 ```
 
-This downloads the prebuilt binary for your platform (Linux or macOS, amd64/arm64) from the latest release. Then run the interactive setup wizard:
+This downloads the prebuilt binary for your platform (Linux or macOS, amd64/arm64) from the latest release.
+
+**Or install with Go 1.26 or newer:**
+
+```bash
+go install github.com/xalgord/xalgorix/v4/cmd/xalgorix@latest
+```
+
+Ensure `$(go env GOPATH)/bin` (or your `GOBIN`) is on your `PATH` before running `xalgorix`.
+
+Then run the interactive setup wizard:
 
 ```bash
 xalgorix --setup
@@ -248,7 +258,7 @@ If Xalgorix saves you a triage cycle, please **[⭐ star the repo](https://githu
 
 ## 📥 Installation
 
-The fastest paths need no toolchain at all.
+Use a prebuilt binary, Go, or a container.
 
 ### ⚡ One-line install (prebuilt binary)
 
@@ -265,6 +275,16 @@ xalgorix --setup
 ```
 
 The wizard preserves existing settings when rerun, hides API-key input in a terminal, and optionally launches the Web UI when finished.
+
+### 📦 Install with Go
+
+With Go 1.26 or newer:
+
+```bash
+go install github.com/xalgord/xalgorix/v4/cmd/xalgorix@latest
+```
+
+Go installs the binary to `GOBIN`, or to `$(go env GOPATH)/bin` when `GOBIN` is unset. Add that directory to your `PATH`, then run `xalgorix --setup`.
 
 ### 🐳 Docker
 
@@ -330,12 +350,6 @@ sudo install -m 755 build/xalgorix /usr/local/bin/xalgorix
 ```
 
 `make build` builds the React Web UI into `internal/web/static`, then builds the Go binary.
-
-### 📦 Install With Go
-
-```bash
-GOPROXY=direct GOSUMDB=off go install github.com/xalgord/xalgorix/v4/cmd/xalgorix@latest
-```
 
 ## 🔩 Configuration
 
