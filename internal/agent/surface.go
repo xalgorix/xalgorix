@@ -85,7 +85,7 @@ func (se *SurfaceEndpoint) hasMethod(method string) bool {
 
 // ── Feature detection (path/param/content-type evidence only) ────────────────
 
-var staticAssetExts = []string{".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map"}
+var staticAssetExts = []string{".css", ".js", ".mjs", ".cjs", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map"}
 var staticAssetPaths = []string{"/robots.txt", "/sitemap.xml", "/favicon", "/.well-known/", "/static/", "/assets/", "/vendor/"}
 var apiSchemaPaths = map[string]bool{"/openapi.json": true, "/openapi.yaml": true, "/swagger.json": true, "/swagger.yaml": true}
 
@@ -571,6 +571,12 @@ func (se *SurfaceEndpoint) ApplicableClasses() []string {
 // classAppliesToEndpoint answers whether a (class, endpoint) pair is an
 // applicable coverage obligation. Unknown classes conservatively apply.
 func classAppliesToEndpoint(state *ScanState, endpoint, class string) bool {
+	if endpoint == "/.dockerenv" || endpoint == "/dev/null" {
+		return false
+	}
+	if host := hostOfEndpoint(endpoint); host != "" && !hostOwesContentDiscovery(state, host) {
+		return false
+	}
 	classID := CanonicalVulnClassID(class)
 	if classID == "" {
 		return true // unknown class: never silently drop obligations

@@ -317,7 +317,7 @@ func hostOfEndpoint(endpoint string) string {
 		return ""
 	}
 	rest := endpoint
-	for _, prefix := range []string{"https://", "http://"} {
+	for _, prefix := range []string{"https://", "http://", "wss://", "ws://"} {
 		if strings.HasPrefix(rest, prefix) {
 			rest = rest[len(prefix):]
 			break

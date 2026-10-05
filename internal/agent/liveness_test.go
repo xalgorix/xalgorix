@@ -147,6 +147,7 @@ func TestAlternatingPlanErrorsCannotEvadeRecovery(t *testing.T) {
 	hooks := NewHookRegistry()
 	RegisterDefaultHooks(hooks)
 	for i := 0; i < planValidationRecoveryLimit; i++ {
+		state.Iteration = i + 1
 		id := "test-sqli"
 		if i%2 != 0 {
 			id = "test-xss"
@@ -162,16 +163,39 @@ func TestAlternatingPlanErrorsCannotEvadeRecovery(t *testing.T) {
 	}
 }
 
+func TestPlanValidationBatchCountsOneRecoveryTurn(t *testing.T) {
+	state := NewScanState()
+	state.Iteration = 42
+	hooks := NewHookRegistry()
+	RegisterDefaultHooks(hooks)
+	args := map[string]string{"tool_name": "update_plan", "error": "needs coverage evidence"}
+	for i := 0; i < planValidationRecoveryLimit+10; i++ {
+		if outcome := hooks.Fire(OnToolResult, state, args); outcome.StopReason != "" {
+			t.Fatalf("one batch stopped the scan after %d rejected calls: %+v", i+1, outcome)
+		}
+	}
+	if state.PlanValidationErrors != 1 {
+		t.Fatalf("one failed model turn counted as %d recovery attempts", state.PlanValidationErrors)
+	}
+	state.Iteration++
+	if outcome := hooks.Fire(OnToolResult, state, args); outcome.StopReason != "" || state.PlanValidationErrors != 2 {
+		t.Fatalf("next failed turn did not count separately: %+v, count=%d", outcome, state.PlanValidationErrors)
+	}
+}
+
 func TestPlanRecoveryResetsOnlyForNewCompletedWork(t *testing.T) {
 	state := NewScanState()
 	state.Plan = NewPlan()
 	task := &Task{ID: "first", Phase: 6, VulnClass: "sqli", Endpoint: "/search", Status: TaskCompleted}
 	state.Plan.add(task)
 	args := map[string]string{"tool_name": "update_plan", "error": "invalid transition"}
+	state.Iteration = 1
 	hookPlanValidationTracker(state, args)
 	for i := 0; i < 10; i++ {
+		state.Iteration++
 		task.Status = TaskActive
 		hookPlanValidationTracker(state, args)
+		state.Iteration++
 		task.ID = fmt.Sprintf("replacement-%d", i)
 		task.Status = TaskCompleted
 		hookPlanValidationTracker(state, args)
@@ -180,6 +204,7 @@ func TestPlanRecoveryResetsOnlyForNewCompletedWork(t *testing.T) {
 		t.Fatalf("regression/replacement reset recovery: %d", state.PlanValidationErrors)
 	}
 	state.ReconCoverage.HTTPProbed = true
+	state.Iteration++
 	hookPlanValidationTracker(state, args)
 	if state.PlanValidationErrors != 1 {
 		t.Fatalf("new validated recon did not reset recovery: %d", state.PlanValidationErrors)

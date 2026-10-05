@@ -87,6 +87,47 @@ func TestDistinctApplicationHostsFiltersArtifactsAndOutOfScopeHosts(t *testing.T
 	}
 }
 
+func TestCoverageIgnoresInventoryArtifactsAndExternalReferences(t *testing.T) {
+	state := NewScanState()
+	state.ScanTargets = []string{"https://app.example.com:9000"}
+	state.DiscoveredEndpoints = []string{
+		"/search", "https://app.example.com:9000/tokens",
+		"https://cdn.example.net/library.js", "https://other.example.net/profile",
+		"/.dockerenv", "/dev/null",
+	}
+	want := map[string]bool{"/search": true, "https://app.example.com:9000/tokens": true}
+	for _, endpoint := range ApplicableEndpointsForClass(state, "sqli") {
+		if !want[endpoint] {
+			t.Errorf("inventory artifact or external reference became a SQLi obligation: %q", endpoint)
+		}
+		delete(want, endpoint)
+	}
+	if len(want) != 0 {
+		t.Fatalf("target endpoints lost their SQLi obligation: %v", want)
+	}
+	markEndpointClassCoverage(state, "/search", "sqli")
+	markEndpointClassCoverage(state, "https://app.example.com:9000/tokens", "sqli")
+	if !taskCoverageComplete(state, &Task{Origin: "auto", VulnClass: "sqli"}) {
+		t.Fatal("external references blocked completion after all target endpoints were tested")
+	}
+	paths := extractPaths("/search\n/.dockerenv\n/dev/null\nhttps://cdn.example.net/library.js?v=1")
+	if len(paths) != 1 || paths[0] != "/search" {
+		t.Fatalf("notes parser retained local or static artifacts: %v", paths)
+	}
+}
+
+func TestCoverageKeepsInScopeWebSocket(t *testing.T) {
+	state := NewScanState()
+	state.ScanTargets = []string{"https://app.example.com"}
+	state.DiscoveredEndpoints = []string{
+		"wss://app.example.com/ws", "wss://outside.example.net/ws",
+	}
+	endpoints := ApplicableEndpointsForClass(state, "websocket")
+	if len(endpoints) != 1 || endpoints[0] != "wss://app.example.com/ws" {
+		t.Fatalf("WebSocket scope filtered incorrectly: %v", endpoints)
+	}
+}
+
 // TestHostOwesContentDiscoveryIPScopeFallback: with no domain scope (IP or
 // unknown targets) the historical behavior is preserved — every
 // non-artifact host owes a disposition.

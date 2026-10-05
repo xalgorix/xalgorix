@@ -68,11 +68,18 @@ func hookPlanValidationTracker(state *ScanState, args map[string]string) HookRes
 		if !state.PlanProgressSeen[fact] {
 			state.PlanProgressSeen[fact] = true
 			state.PlanValidationErrors = 0
+			state.PlanValidationTurnRecorded = false
 		}
 	}
 	if (args["tool_name"] != "update_plan" && args["tool_name"] != "build_plan") || args["error"] == "" {
 		return HookResult{}
 	}
+	// One model turn can submit many plan calls; count recovery by turn.
+	if state.PlanValidationTurnRecorded && state.PlanValidationErrorIteration == state.Iteration {
+		return HookResult{}
+	}
+	state.PlanValidationErrorIteration = state.Iteration
+	state.PlanValidationTurnRecorded = true
 	state.PlanValidationErrors++
 	if state.PlanValidationErrors >= planValidationRecoveryLimit {
 		return HookResult{
