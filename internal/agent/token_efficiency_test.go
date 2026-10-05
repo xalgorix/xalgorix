@@ -51,7 +51,7 @@ func TestPlanGuidanceKeepsExploratoryCompletionPath(t *testing.T) {
 		t.Fatal("system prompt must mention explicit exploratory completion")
 	}
 	tool, ok := promptAgent.registry.Get("update_plan")
-	if !ok || !strings.Contains(tool.Description, "complete exploratory work") {
+	if !ok || !strings.Contains(strings.ToLower(tool.Description), "exploratory completion") {
 		t.Fatal("tool schema must mention explicit exploratory completion")
 	}
 }

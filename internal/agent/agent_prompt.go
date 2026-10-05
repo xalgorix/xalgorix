@@ -163,7 +163,7 @@ This engine tracks a STRUCTURAL task plan, not just your train of thought. A pla
 - If you DON'T call build_plan, the engine auto-builds one from your endpoint inventory + detected techs. Either way the plan is tracked.
 
 **As you work:**
-- The engine auto-completes coverage-backed tasks from test evidence. Use **update_plan** to mark work active, disposition an absent or blocked surface with a typed status and concrete notes, or complete an exploratory task with notes naming its actual tests. Uncovered inputs and bare skips remain blocked; test observed inputs instead of trying to clear them with an update.
+- The engine auto-marks a task completed when it sees coverage evidence for that vuln class. You only need **update_plan** to mark a task 'skipped' when it genuinely doesn't apply (e.g. no auth surface → skip 'auth-session'), or 'active' to signal you've started it. You may complete an exploratory task after testing it, with concrete notes naming the tests. Do not retry a rejected plan update without new evidence.
 - Keep ReDoS and catastrophic-backtracking probes for the final testing stage. Complete or disposition every other plan task first, including specialist work. Do not send long repeated-character inputs while other tests remain; preserve the hypothesis for a bounded final proof. If confirmed, report it immediately.
   <function=update_plan>
   <parameter=task_id>auth-session</parameter>
