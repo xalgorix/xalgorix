@@ -1789,7 +1789,6 @@ func (a *Agent) Run(targets []string, instruction string) {
 		}
 
 		// ── Hook: OnIterationStart ──
-		previousPlanBrief := a.state.LastPlanBrief
 		iterResult := a.hooks.Fire(OnIterationStart, a.state, nil)
 		if autoDelegation := a.maybeAutoDelegate(targets); autoDelegation != "" {
 			// If the hook also produced its model-directed decomposition prompt on
@@ -1802,10 +1801,6 @@ func (a *Agent) Run(targets []string, instruction string) {
 			}
 		}
 		if iterResult.Nudge != "" {
-			if current := a.state.LastPlanBrief; current != "" && current != previousPlanBrief &&
-				strings.Contains(iterResult.Nudge, current) {
-				a.removeSupersededPlanBrief(previousPlanBrief, current)
-			}
 			a.msgMu.Lock()
 			a.messages = append(a.messages, llm.Message{Role: "user", Content: iterResult.Nudge})
 			a.msgMu.Unlock()
