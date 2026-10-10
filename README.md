@@ -33,18 +33,6 @@
 
 ---
 
-## 🎬 Launch Overview
-
-<div align="center">
-
-[![Xalgorix Open Source — Autonomous AI Pentesting & Exploit Verification (launch overview video)](assets/launch-overview.jpg)](https://youtu.be/B23boh51u8A)
-
-**▶️ [Watch the 50-second launch video](https://youtu.be/B23boh51u8A)** — Xalgorix in action: autonomous scanning and exploit-verified findings in under a minute.
-
-</div>
-
----
-
 ## 📸 Screenshots
 
 **🖥️ Self-hosted dashboard** — runs locally on `127.0.0.1:9137`
@@ -168,10 +156,9 @@ For merge gating and full exploit-verified pentests in CI, use the [hosted scann
 | | | |
 | --- | --- | --- |
 | 📸 [Screenshots](#-screenshots) | 🔩 [Configuration](#-configuration) | 🧾 [Environment Variables](#-environment-variables) |
-| 🎬 [Launch Overview](#-launch-overview) | 🚀 [Quick Start](#-quick-start) | 🆙 [Upgrading](#-upgrading-from-previous-versions) |
-| 🔎 [Overview](#-overview) | 🏃 [Running](#-running) | 🔤 [Provider Prefixes](#-provider-prefixes) |
-| 💡 [Why Xalgorix](#-why-xalgorix) | 🧰 [Service Mode](#-service-mode) | 💻 [CLI Reference](#-cli-reference) |
-| 🎯 [Use Cases](#-use-cases) | 🔁 [Web UI Workflow](#-web-ui-workflow) | 📡 [API Summary](#-api-summary) |
+| 🚀 [Quick Start](#-quick-start) | 🆙 [Upgrading](#-upgrading-from-previous-versions) | 🔤 [Provider Prefixes](#-provider-prefixes) |
+| 🔎 [Overview](#-overview) | 🏃 [Running](#-running) | 💻 [CLI Reference](#-cli-reference) |
+| 💡 [Why Xalgorix](#-why-xalgorix) | 🧰 [Service Mode](#-service-mode) | 📡 [API Summary](#-api-summary) |
 | 🎯 [Use Cases](#-use-cases) | 🔁 [Web UI Workflow](#-web-ui-workflow) | 💾 [Data Storage](#-data-storage) |
 | ✨ [Features](#-features) | 🔀 [Scan Modes](#-scan-modes) | 🧪 [Development](#-development) |
 | 📥 [Installation](#-installation) | 📂 [Scan Your Code](#-scan-your-code-no-target-needed) | 🚨 [Safety Notes](#-safety-notes) |
