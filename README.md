@@ -59,6 +59,10 @@
 
 ---
 
+<!--
+SPONSORS BLOCK — hidden. Delete the `<!--` and `-->` lines to restore it.
+Asset assets/swiftproxy_xalgorix.webp is kept in the repo for that purpose.
+
 ## 🤝 Sponsors
 
 Thanks to **[Swiftproxy](https://www.swiftproxy.net/?ref=xalgorix)** for sponsoring Xalgorix.
@@ -72,6 +76,7 @@ Your app can behave differently depending on where a request comes from. For Xal
 Residential proxies from **$0.70/GB**. **Free testing is available**, and Xalgorix users get **10% off** with code **`PROXY90`**.
 
 [**Explore Swiftproxy and request a free test →**](https://www.swiftproxy.net/?ref=xalgorix)
+-->
 
 ---
 
@@ -171,7 +176,7 @@ For merge gating and full exploit-verified pentests in CI, use the [hosted scann
 | ✨ [Features](#-features) | 🔀 [Scan Modes](#-scan-modes) | 🧪 [Development](#-development) |
 | 📥 [Installation](#-installation) | 📂 [Scan Your Code](#-scan-your-code-no-target-needed) | 🚨 [Safety Notes](#-safety-notes) |
 | 🧭 [Methodology](#-methodology) | 📄 [Reports](#-reports) | 📜 [License](#-license) |
-| 🔧 [Settings](#-settings) | 🔗 [Links](#-links) | 🤝 [Sponsors](#-sponsors) |
+| 🔧 [Settings](#-settings) | 🔗 [Links](#-links) | <!-- 🤝 Sponsors --> |
 
 ## 🔎 Overview
 
