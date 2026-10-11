@@ -12,8 +12,6 @@
 [![GitHub forks](https://img.shields.io/github/forks/xalgorix/xalgorix?style=for-the-badge&logo=github&color=blue)](https://github.com/xalgorix/xalgorix/network/members)
 [![GitHub release](https://img.shields.io/github/v/release/xalgorix/xalgorix?style=for-the-badge&logo=github&color=green)](https://github.com/xalgorix/xalgorix/releases)
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/xalgorix/xalgorix)
-
 </div>
 
 <h1 align="center">Xalgorix — Open-source AI pentester that <em>proves</em> vulnerabilities</h1>
