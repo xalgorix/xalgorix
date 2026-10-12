@@ -45,6 +45,22 @@
 
 ---
 
+## 🤝 Sponsors
+
+Thanks to **[Swiftproxy](https://www.swiftproxy.net/?ref=xalgorix)** for sponsoring Xalgorix.
+
+<a href="https://www.swiftproxy.net/?ref=xalgorix">
+  <img src="assets/swiftproxy_xalgorix.webp" alt="Swiftproxy sponsors Xalgorix — residential proxies for authorized testing across locations" width="860" />
+</a>
+
+Your app can behave differently depending on where a request comes from. For Xalgorix users checking their own applications across regions, Swiftproxy offers **location targeting** to review regional behavior and **sticky sessions** to help keep a consistent IP during a test session. It supports **HTTP(S) and SOCKS5**, the same proxy protocols Xalgorix supports.
+
+Residential proxies from **$0.70/GB**. **Free testing is available**, and Xalgorix users get **10% off** with code **`PROXY90`**.
+
+[**Explore Swiftproxy and request a free test →**](https://www.swiftproxy.net/?ref=xalgorix)
+
+---
+
 ## 🚀 Quick Start
 
 **Install (one line):**
@@ -140,7 +156,7 @@ For merge gating and full exploit-verified pentests in CI, use the [hosted scann
 | ✨ [Features](#-features) | 🔀 [Scan Modes](#-scan-modes) | 🧪 [Development](#-development) |
 | 📥 [Installation](#-installation) | 📂 [Scan Your Code](#-scan-your-code-no-target-needed) | 🚨 [Safety Notes](#-safety-notes) |
 | 🧭 [Methodology](#-methodology) | 📄 [Reports](#-reports) | 📜 [License](#-license) |
-| 🔧 [Settings](#-settings) | 🔗 [Links](#-links) |  |
+| 🔧 [Settings](#-settings) | 🔗 [Links](#-links) | 🤝 [Sponsors](#-sponsors) |
 
 ## 🔎 Overview
 
