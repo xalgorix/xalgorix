@@ -261,6 +261,16 @@ export default function SettingsPage() {
     ollamaPortDetected ||
     llmForm.ollamaCompatible;
 
+  // Local runtimes (Ollama, LM Studio) default to a loopback endpoint that
+  // a container cannot reach, so their base URL must be editable the same
+  // way a custom provider's is. Without this the operator has no way to
+  // point Xalgorix at a non-default host/port (e.g. llama.cpp on
+  // 172.17.0.1:8080).
+  const isCustomProvider = selectedProvider?.id === "custom";
+  const isLocalRuntime = (selectedProvider?.authMethods ?? []).includes("none");
+  const baseURLEditable =
+    !!selectedProvider && (isCustomProvider || isLocalRuntime);
+
   // Auth methods come straight from the catalog entry. Custom
   // provider always supports api_key (it's just a free-form base
   // URL + key); local-runtime providers (Ollama, LM Studio) only
@@ -359,11 +369,23 @@ export default function SettingsPage() {
       profileId,
       model: llmForm.model,
       reasoningEffort: llmForm.reasoningEffort,
-      ollamaCompatible: llmForm.ollamaCompatible,
       llmMaxRetries: llmForm.llmMaxRetries,
       memoryCompressorTimeout: llmForm.memoryCompressorTimeout,
       maxIterations: llmForm.maxIterations,
     };
+    // The Ollama-compatible switch is only rendered for custom providers,
+    // so only send it there — echoing it elsewhere would overwrite a saved
+    // value the operator never saw. Provider ids that are themselves local
+    // runtimes already get Ollama semantics server-side.
+    if (isCustomProvider) {
+      req.ollamaCompatible = llmForm.ollamaCompatible;
+    }
+    // Echo the base URL for every provider whose endpoint is editable.
+    // Omitting it makes the server fall back to the catalog default (a
+    // loopback URL for local runtimes) and clobber a working endpoint.
+    if (baseURLEditable && llmForm.apiBase) {
+      req.apiBase = llmForm.apiBase;
+    }
     if (llmForm.authMethod === "api_key") {
       // Only send the apiKey when the user actually typed
       // something — the masked **** value means "leave the
@@ -373,9 +395,6 @@ export default function SettingsPage() {
       }
       if (llmForm.apiBaseOverride) {
         req.apiBaseOverride = llmForm.apiBaseOverride;
-      }
-      if (selectedProvider?.id === "custom" && llmForm.apiBase) {
-        req.apiBase = llmForm.apiBase;
       }
     }
     if (llmForm.authMethod === "oauth" && llmForm.provider) {
@@ -676,6 +695,36 @@ export default function SettingsPage() {
                       {selectedProvider.displayName} runs locally — no
                       credential required. Select or enter the model above.
                     </p>
+                    <div className="space-y-2">
+                      <Label htmlFor="llm-local-api-base">Base URL</Label>
+                      <Input
+                        id="llm-local-api-base"
+                        value={llmForm.apiBase}
+                        onChange={(e) => {
+                          const apiBase = e.target.value;
+                          const nextOllamaMode =
+                            hasOllamaPort(apiBase) || llmForm.ollamaCompatible;
+                          setLLMForm({
+                            ...llmForm,
+                            apiBase,
+                            reasoningEffort: normalizeReasoningEffort(
+                              llmForm.reasoningEffort,
+                              nextOllamaMode,
+                            ),
+                          });
+                        }}
+                        placeholder={
+                          selectedProvider.baseURL || "http://localhost:11434/v1"
+                        }
+                        className="font-mono"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Where this runtime's OpenAI-compatible API listens. Inside
+                        Docker use the host gateway (e.g.
+                        http://172.17.0.1:8080/v1), not localhost — the container
+                        cannot reach its own loopback.
+                      </p>
+                    </div>
                   </div>
                 )}
 

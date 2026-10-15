@@ -2163,6 +2163,55 @@ func TestLLMSettings_CustomProviderPersistsOllamaCompatibility(t *testing.T) {
 	}
 }
 
+func TestLLMSettings_LocalRuntimeReSavePreservesAPIBase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	envFile := filepath.Join(home, ".xalgorix.env")
+	if err := os.WriteFile(envFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("seed env file: %v", err)
+	}
+	// Mimic a local llama.cpp / Ollama endpoint that is NOT the catalog
+	// default loopback URL: the operator already pointed Xalgorix at the
+	// host gateway so the container can reach it.
+	s := newTestServer(t, &config.Config{
+		LLMProvider:     "ollama",
+		APIBase:         "http://172.17.0.1:8080/v1",
+		LLM:             "dolphin3-cyber-8b",
+		ReasoningEffort: "none",
+	})
+
+	// A same-provider re-save that omits apiBase (what the WebUI did for
+	// every non-custom provider) must keep the working local endpoint
+	// instead of resetting it to the catalog default.
+	rr := httptest.NewRecorder()
+	body := strings.NewReader(`{"provider":"ollama","authMethod":"none","profileId":"default","model":"dolphin3-cyber-8b","reasoningEffort":"none"}`)
+	s.handleLLMSettings(rr, httptest.NewRequest(http.MethodPost, "/api/settings/llm", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST code = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if s.cfg.APIBase != "http://172.17.0.1:8080/v1" {
+		t.Fatalf("APIBase = %q, want preserved local endpoint %q", s.cfg.APIBase, "http://172.17.0.1:8080/v1")
+	}
+
+	// A real provider switch must still fall back to the new provider's
+	// catalog default rather than keeping the previous endpoint. Compared
+	// loosely on the port so the assertion holds both on the host and
+	// inside a container (where the loopback default is rewritten to
+	// host.docker.internal).
+	rr = httptest.NewRecorder()
+	body = strings.NewReader(`{"provider":"lmstudio","authMethod":"none","profileId":"default","model":"local-model","reasoningEffort":"none"}`)
+	s.handleLLMSettings(rr, httptest.NewRequest(http.MethodPost, "/api/settings/llm", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("switch POST code = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if s.cfg.APIBase == "http://172.17.0.1:8080/v1" {
+		t.Fatalf("provider switch kept the previous local endpoint %q", s.cfg.APIBase)
+	}
+	if !strings.Contains(s.cfg.APIBase, ":1234") {
+		t.Fatalf("APIBase after provider switch = %q, want LM Studio catalog default on :1234", s.cfg.APIBase)
+	}
+}
+
 func TestLLMSettingsPreservesProviderNativeModelPath(t *testing.T) {
 	s := newTestServer(t, &config.Config{
 		LLM: "zai-org/glm-4.5", LLMProvider: "novita",

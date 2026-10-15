@@ -471,9 +471,20 @@ func (s *Server) applyCatalogLLMSettings(ctx context.Context, req llmSettingsReq
 		if base == "" {
 			base = strings.TrimSpace(req.APIBaseOverride)
 		}
-		if base == "" && provider != "" && s.catalog != nil {
-			if entry, ok, err := s.catalog.Get(ctx, provider); err == nil && ok {
-				base = strings.TrimSpace(entry.BaseURL)
+		if base == "" {
+			// A same-provider re-save must not silently reset a working
+			// local endpoint to the catalog default: for local runtimes
+			// (Ollama, LM Studio) that default is a loopback URL the
+			// container cannot reach. Prefer the persisted base when the
+			// provider is unchanged; fall back to the catalog only on a
+			// real provider switch (or when nothing is configured yet).
+			sameProvider := provider != "" && strings.TrimSpace(s.cfg.LLMProvider) == provider
+			if sameProvider && strings.TrimSpace(s.cfg.APIBase) != "" {
+				base = strings.TrimSpace(s.cfg.APIBase)
+			} else if provider != "" && s.catalog != nil {
+				if entry, ok, err := s.catalog.Get(ctx, provider); err == nil && ok {
+					base = strings.TrimSpace(entry.BaseURL)
+				}
 			}
 		}
 		ollamaCompatible := req.OllamaCompatible != nil && *req.OllamaCompatible
