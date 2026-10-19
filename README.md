@@ -212,7 +212,7 @@ Xalgorix is free and open source — self-host it forever, no strings attached. 
 | Setup & ops                        | One-line installer, or Docker (~6–8 GB image, `--privileged`) | Nothing to run — start from the browser               |
 | Blind-vuln callbacks (OOB)         | Public Interactsh by default, or your own OOB server         | Managed DNS/HTTP/SMTP listeners                        |
 | Scheduling & alerts                | Built-in scheduler + Discord/Telegram, on your host          | Managed daily schedules + Slack/Discord/webhooks (Pro/Max) |
-| Sharing                            | Single-operator dashboard, PDF reports                       | Share links (password-protected on Pro/Max); private deployments via [sales](mailto:hello@xalgorix.com) |
+| Sharing                            | Single-operator dashboard, PDF reports                       | Share links (password-protected on Pro/Max); private deployments via [sales](mailto:sales@xalgorix.com) |
 | Updates                            | Binary auto-updates from GitHub Releases; Docker: pull a new tag | Engine updates managed for you                     |
 | Data residency / offline           | ✅ stays on your infra · air-gap OK with local models         | Runs on our infra (DPA available)                      |
 
