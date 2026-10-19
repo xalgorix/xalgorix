@@ -23,11 +23,12 @@ xalgorix-data/
 *_assessment/
 
 # Secrets / local env (never commit — contains tokens like DOCKERHUB_TOKEN).
-# release.sh does `git add -A`, so an un-ignored .env would be swept into the
-# release commit and blocked by push protection (or worse, leaked).
 .env
 .env.*
 !.env.example
+
+# Release build output (scripts/release.py writes binaries + manifest here).
+/dist/
 
 # AI agent config (local only)
 .agent/

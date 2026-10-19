@@ -88,10 +88,23 @@ open task or proposes a clearly scoped addition.
 
 ## Releases
 
-Releases are cut with `./release.sh <version>` (e.g. `./release.sh 4.5.0`),
-which bumps the version, builds, tags, pushes a `release/<version>` branch, and
-opens a PR against `main`. `main` is branch-protected — never push to it
-directly.
+Releases are cut from `main` with `scripts/release.py`, a reproducible
+pipeline that tags and publishes a version **only after its commit is on
+`main`**. The version number lives in the `vX.Y.Z` tag and is baked into the
+binary at build time — there is no version file to bump. Run the phases in
+order:
+
+```bash
+python3 scripts/release.py prepare --version X.Y.Z   # verify the commit is the origin/main tip; stage a clean build tree
+python3 scripts/release.py build   --version X.Y.Z   # cross-compile every platform; write manifest.json + SHA256SUMS
+python3 scripts/release.py publish --version X.Y.Z --notes-file NOTES.md
+```
+
+`publish` creates the annotated `vX.Y.Z` tag on the released commit, publishes
+the GitHub Release as a draft, verifies every uploaded asset against the
+locally built bytes, then promotes it to published. Container images are built
+and pushed by the Docker workflow, which triggers on the new tag. `main` is
+branch-protected — never push to it directly.
 
 ## Reporting issues
 
