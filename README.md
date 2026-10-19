@@ -4,10 +4,10 @@
 
 <br />
 
-[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-10b981?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux-111111?style=for-the-badge&logo=linux&logoColor=white)](#-installation)
-[![Hosted](https://img.shields.io/badge/Hosted-www.xalgorix.com-6d28d9?style=for-the-badge&logo=icloud&logoColor=white)](https://www.xalgorix.com/)
+[![Platform](https://img.shields.io/badge/Platform-Linux_%7C_macOS-111111?style=for-the-badge&logo=linux&logoColor=white)](#-installation)
+[![Xalgorix Cloud](https://img.shields.io/badge/Cloud-no_install-C51C39?style=for-the-badge)](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=hero_badge)
 [![GitHub stars](https://img.shields.io/github/stars/xalgorix/xalgorix?style=for-the-badge&logo=github&color=yellow)](https://github.com/xalgorix/xalgorix/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/xalgorix/xalgorix?style=for-the-badge&logo=github&color=blue)](https://github.com/xalgorix/xalgorix/network/members)
 [![GitHub release](https://img.shields.io/github/v/release/xalgorix/xalgorix?style=for-the-badge&logo=github&color=green)](https://github.com/xalgorix/xalgorix/releases)
@@ -25,9 +25,17 @@
   <a href="#-why-xalgorix">💡 Why Xalgorix</a> ·
   <a href="#-features">✨ Features</a> ·
   <a href="#-use-cases">🎯 Use Cases</a> ·
-  <a href="https://www.xalgorix.com/">☁️ Hosted Cloud</a> ·
-  <a href="https://docs.xalgorix.com">📖 Docs</a>
+  <a href="#self-host-or-cloud">☁️ Self-host or Cloud</a> ·
+  <a href="https://docs.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_docs&utm_content=hero_nav">📖 Docs</a> ·
+  <a href="https://github.com/xalgorix/xalgorix/discussions">💬 Discussions</a>
 </p>
+
+| 🖥️ **Self-host** — this repo | ☁️ **[Xalgorix Cloud](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=two_ways_title)** — nothing to install |
+| --- | --- |
+| Free and Apache-2.0. Runs on your machine with your own LLM key, or fully local with Ollama. Findings and reports stay on your infrastructure. | The same exploit-verified engine in your browser. Model, out-of-band callbacks and scheduling are managed for you. Packs from $10; credits never expire. |
+| [**Install in two commands ↓**](#-quick-start) | [**Compare self-hosted vs Cloud →**](https://www.xalgorix.com/hosted-vs-self-hosted?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=two_ways_compare) |
+
+<p align="center">🤖 Only need PR reviews? The <a href="https://github.com/apps/xalgorix">free Xalgorix GitHub App</a> comments a security review on every pull request — no account, no API key.</p>
 
 ---
 
@@ -39,9 +47,11 @@
 | ------------------------------------------------------- | ------------------------------------------------ | --------------------------------------------- |
 | ![Xalgorix overview dashboard](assets/screenshot-1.png) | ![Xalgorix scan detail](assets/screenshot-2.png) | ![Xalgorix findings](assets/screenshot-3.png) |
 
-**☁️ Hosted cloud dashboard** — the fully managed version at [www.xalgorix.com](https://www.xalgorix.com/)
+**☁️ Xalgorix Cloud dashboard** — the managed version at [www.xalgorix.com](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=screenshot_caption)
 
-<img src="assets/SaaS-dashboard.png?v=4.5.154" alt="Xalgorix hosted cloud dashboard showing security score, vulnerability trends, remediation metrics, and open issues by category" width="860" />
+<a href="https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=screenshot"><img src="assets/SaaS-dashboard.png?v=4.5.154" alt="Xalgorix Cloud dashboard showing security score, vulnerability trends, remediation metrics, and open issues by category" width="860" /></a>
+
+---
 
 ---
 
@@ -124,7 +134,7 @@ sudo install -m 755 build/xalgorix /usr/local/bin/xalgorix
 ```
 
 > [!TIP]
-> Prefer zero setup? A fully managed version runs at [www.xalgorix.com](https://www.xalgorix.com/) — click-to-scan, no install or API keys required.
+> **Rather skip the setup?** [Xalgorix Cloud](https://www.xalgorix.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=quickstart_tip) runs the same exploit-verified engine in your browser — no install, no LLM key, no token bill. Packs from $10, no subscription; credits never expire.
 
 ### 🤖 Review pull requests automatically — free GitHub App
 
@@ -136,13 +146,10 @@ Want a security review on every pull request with zero setup? Install the **[Xal
 
 </div>
 
-For merge gating and full exploit-verified pentests in CI, use the [hosted scanner](https://www.xalgorix.com/) or the GitHub Action.
+Need merge gating or a full exploit-verified pentest of the running app? Start a [Cloud scan from your CI](https://www.xalgorix.com/docs/api?utm_source=github&utm_medium=readme&utm_campaign=gh_app_to_cloud&utm_content=app_block_ci) with the REST API and gate on verified findings at the severity you choose.
 
 > [!IMPORTANT]
 > Use Xalgorix only on systems you own or have explicit permission to test.
-
-> [!TIP]
-> Prefer not to self-host? A fully managed version is available at [www.xalgorix.com](https://www.xalgorix.com/) — click-to-scan, no install or API keys required.
 
 ## 📚 Contents
 
@@ -162,7 +169,7 @@ For merge gating and full exploit-verified pentests in CI, use the [hosted scann
 
 Xalgorix is a self-hosted AI penetration testing platform for authorized security testing, vulnerability assessment, and bug bounty workflows. It combines an LLM-driven autonomous agent, browser automation, terminal tooling, a comprehensive 22-phase testing methodology, live WebSocket telemetry, finding management with CVSS scoring, branded PDF report generation, and integrations for AgentMail, Discord, and Telegram.
 
-Unlike cloud-only DAST scanners, Xalgorix runs entirely on your machine. You bring your own LLM provider (OpenAI, Anthropic, DeepSeek, Gemini, Groq, Ollama, MiniMax) and control the model, reasoning effort, rate limits, and proxy configuration. No scan data, API keys, or target information leaves your infrastructure.
+Unlike cloud-only DAST scanners, Xalgorix runs entirely on your machine. You bring your own LLM provider (OpenAI, Anthropic, DeepSeek, Gemini, Groq, Ollama, MiniMax) and control the model, reasoning effort, rate limits, and proxy configuration. Nothing is sent to Xalgorix: scan context goes only to the LLM provider you configure (or stays local with Ollama), and blind-vulnerability callbacks use public Interactsh servers unless you set `XALGORIX_INTERACTSH_SERVER` to your own.
 
 The default experience is the Web UI. From one local dashboard you can start scans, monitor active runs, inspect findings, configure model/provider settings, manage environment variables, generate branded PDF reports, and delete or resume historical scans.
 
@@ -172,7 +179,7 @@ Most scanners **detect**. Xalgorix **proves**. An autonomous agent works through
 
 - 🧠 **An AI agent, not a template engine** — reasons about auth flows, business logic, IDOR/BOLA, and chained exploits that signature scanners miss.
 - ✅ **Exploit-verified findings** — a separate verifier independently reproduces each finding; inconclusive ones are flagged for review, never dressed up as confirmed.
-- 🔒 **Self-hosted and private** — runs on your machine with your own LLM key; no target data, keys, or findings leave your infrastructure.
+- 🔒 **Self-hosted and private** — runs on your machine with your own LLM key; nothing is sent to Xalgorix, and with a local model plus your own OOB server, nothing leaves your network except traffic to the target.
 - 🧩 **Bring your own LLM** — OpenAI, Anthropic, DeepSeek, Gemini, Groq, Ollama, or MiniMax — or any OpenAI-compatible gateway like [LiteLLM](#-litellm--openai-compatible-gateways-github-copilot-claude-opus-codex-openrouter-azure-local-models) (GitHub Copilot, Codex, OpenRouter, Azure). You control model, reasoning effort, and cost.
 - 📄 **Audit-ready reports** — branded PDFs with CVSS scores, proof-of-concept, and remediation.
 
@@ -183,7 +190,7 @@ Most scanners **detect**. Xalgorix **proves**. An autonomous agent works through
 | Approach                                     | Autonomous AI agent      | Signatures / templates          | Spider + active rules              | Signatures + heuristics |
 | Business logic / IDOR / auth-bypass coverage | ✅                       | Limited                         | Limited                            | Partial                |
 | Exploit-verified (proves impact)             | ✅ independent verifier  | ❌                              | ❌                                 | Partial                |
-| False-positive load                          | Low (proven)             | Template-dependent              | High                               | Medium                 |
+| False-positive load                          | Low — re-exploited first | Template-dependent              | High                               | Medium                 |
 | Self-hosted / data stays local               | ✅                       | ✅                              | ✅                                 | Usually cloud          |
 | Bring-your-own LLM                           | ✅                       | —                               | —                                  | ❌                     |
 | Branded PDF reports                          | ✅                       | ❌                              | Basic                              | ✅                     |
@@ -191,27 +198,29 @@ Most scanners **detect**. Xalgorix **proves**. An autonomous agent works through
 
 > Directional comparison — Nuclei and ZAP are excellent at what they do. Xalgorix adds the reasoning-heavy discovery and exploit-verification layer on top.
 
-### ☁️ Self-hosted vs Hosted cloud
+<a name="self-host-or-cloud"></a>
 
-Xalgorix is free and open source — self-host it forever, no strings attached. The [hosted cloud](https://www.xalgorix.com/) runs the **same** exploit-verified engine; it exists for people who'd rather not manage API keys, infrastructure, and unpredictable LLM bills. Both are first-class — pick what fits.
+### ☁️ Self-hosted or Xalgorix Cloud?
 
-|                                    | **Self-hosted** (this repo)              | **[Hosted cloud](https://www.xalgorix.com/)**   |
-| ---------------------------------- | ---------------------------------------- | ----------------------------------------------- |
-| Price to start                     | Free engine, Apache-2.0                  | [Credit packs or subscriptions](https://www.xalgorix.com/pricing) |
-| LLM API key                        | Bring & manage your own                  | Included — none to wrangle                      |
-| Cost per scan                      | Raw LLM tokens — variable, can spike     | Credit-based; see [current pricing](https://www.xalgorix.com/pricing) |
-| Setup & ops                        | You install, update & run the toolchain  | Nothing to run — scan in ~60s                   |
-| Out-of-band infra (SSRF/blind RCE) | Stand up your own OOB server             | Managed OOB included                            |
-| Scheduling                         | Built-in scheduler on your infrastructure | Managed daily / hourly schedules             |
-| Team · RBAC · shared credits        | Single-operator instance                 | Organization workspaces on Teams / Enterprise  |
-| Updates                            | `git pull` + rebuild                     | Always on the latest engine                     |
-| Data residency / offline           | ✅ stays on your infra · air-gap OK       | Runs on our infra (DPA available)               |
+Xalgorix is free and open source — self-host it forever, no strings attached. [Xalgorix Cloud](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=compare_intro) runs the **same** exploit-verified engine for people who would rather not manage LLM keys and token bills, a ~6–8 GB privileged toolbox container, or their own callback infrastructure. Both are first-class — pick what fits.
 
-**Self-host if** data must stay on your network, you want full control, or you'll run offline/air-gapped — that's exactly what it's for. **Use the cloud if** you'd rather skip the API keys, infra, and surprise token bills, and pay only for the live hosts you actually scan.
+|                                    | **Self-hosted** (this repo)                                  | **[Xalgorix Cloud](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=compare_table_header)** |
+| ---------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------ |
+| Price to start                     | Free engine, Apache-2.0                                      | Packs from $10 (no subscription) or plans from $49/mo — [pricing](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=compare_table_price) |
+| LLM                                | Bring your own key — or run fully local with Ollama          | Included — no key, no token bill                       |
+| Cost per scan                      | Your LLM tokens — varies with target size and model          | 1 credit per target or live host (very long scans: up to 3) — [how credits work](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=compare_table_credits) |
+| Setup & ops                        | One-line installer, or Docker (~6–8 GB image, `--privileged`) | Nothing to run — start from the browser               |
+| Blind-vuln callbacks (OOB)         | Public Interactsh by default, or your own OOB server         | Managed DNS/HTTP/SMTP listeners                        |
+| Scheduling & alerts                | Built-in scheduler + Discord/Telegram, on your host          | Managed daily schedules + Slack/Discord/webhooks (Pro/Max) |
+| Sharing                            | Single-operator dashboard, PDF reports                       | Share links (password-protected on Pro/Max); private deployments via [sales](mailto:hello@xalgorix.com) |
+| Updates                            | Binary auto-updates from GitHub Releases; Docker: pull a new tag | Engine updates managed for you                     |
+| Data residency / offline           | ✅ stays on your infra · air-gap OK with local models         | Runs on our infra (DPA available)                      |
+
+**Self-host if** data must stay on your network, you want full control, or you'll run offline/air-gapped — that's exactly what it's for. **Use Cloud if** you'd rather skip the API keys, infrastructure and surprise token bills, and pay per target instead of per token.
 
 <div align="center">
 
-[**☁️ Explore hosted Cloud plans →**](https://www.xalgorix.com/pricing) &nbsp;·&nbsp; [**⚖️ Compare Cloud and self-hosting →**](https://www.xalgorix.com/hosted-vs-self-hosted)
+[**☁️ Start a Cloud scan →**](https://www.xalgorix.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_signup) &nbsp;·&nbsp; [**💳 See pricing**](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_pricing) &nbsp;·&nbsp; [**⚖️ Full comparison & cost calculator**](https://www.xalgorix.com/hosted-vs-self-hosted?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_compare)
 
 </div>
 
@@ -862,7 +871,10 @@ Xalgorix is released under the Apache License 2.0. See [LICENSE](LICENSE).
 
 | Resource      | Link                                                                             |
 | ------------- | -------------------------------------------------------------------------------- |
-| ☁️ Hosted (Cloud) | [www.xalgorix.com](https://www.xalgorix.com/)                                   |
-| 📖 Documentation | [docs.xalgorix.com](https://docs.xalgorix.com)                                   |
+| ☁️ Xalgorix Cloud | [www.xalgorix.com](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=links_table) · [pricing](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=links_table_pricing) |
+| 🤖 GitHub App     | [Free security review on every PR](https://github.com/apps/xalgorix)              |
+| 📖 Documentation | [docs.xalgorix.com](https://docs.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_docs&utm_content=links_table)   |
+| 💬 Questions     | [GitHub Discussions](https://github.com/xalgorix/xalgorix/discussions)             |
 | 🐛 Issues        | [github.com/xalgorix/xalgorix/issues](https://github.com/xalgorix/xalgorix/issues) |
+| 🔒 Security      | [SECURITY.md](SECURITY.md) · [Disclosure program](https://www.xalgorix.com/vdp)    |
 | ☕ Support       | [buymeacoffee.com/xalgord](https://buymeacoffee.com/xalgord)                     |
