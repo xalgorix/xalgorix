@@ -273,6 +273,16 @@ func isIdentifier(s string) bool {
 
 // normalizeFormat converts alternative XML formats to the expected one.
 func normalizeFormat(content string) string {
+	// Strip provider internal channel delimiters (e.g. MiniMax's `<]minimax[>`)
+	// before any tool-call parsing. They are protocol noise, never part of a
+	// call; left in place they break the XML parse, so a call wrapped in or
+	// abutting a control token is misread as "no tool call" and then classified
+	// as provider_control_token_leak — driving the malformed-recovery ladder
+	// (hard context reset at 5) even though the model did emit a real call.
+	if strings.Contains(content, "<]") {
+		content = providerControlStripRe.ReplaceAllString(content, "")
+	}
+
 	// Handle <invoke name="X"> ... </invoke> format
 	if strings.Contains(content, "<invoke") || strings.Contains(content, "<function_calls") {
 		content = funcCallsTag.ReplaceAllString(content, "")

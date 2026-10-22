@@ -3246,11 +3246,22 @@ func hookNoToolHandler(state *ScanState, args map[string]string) HookResult {
 			}
 		}
 		// At the context-reset threshold, the model's conversation is likely
-		// corrupted (provider control-token leaks, oversized context, or a
-		// poisoned message history from repeated failed recovery attempts).
-		// Repeating the same recovery prompt into the same context doesn't
-		// work — the model needs a completely different framing.
-		if state.MalformedToolOutputCount >= MalformedToolContextResetAt {
+		// corrupted (oversized context, or a poisoned message history from
+		// repeated failed recovery attempts). Repeating the same recovery
+		// prompt into the same context doesn't work — the model needs a
+		// completely different framing.
+		//
+		// Exception: a bare provider_control_token_leak is a provider protocol
+		// artifact on the LATEST turn, not whole-conversation corruption. The
+		// parser now strips these tokens before parsing, so a leak that still
+		// reaches here carried no executable call. Hard-truncating the whole
+		// conversation over it discards real scan progress (observed: MiniMax
+		// leaks its `<]minimax[>` delimiter frequently, so a healthy scan hit
+		// the reset ceiling ~5× and completed only 4/40 plan tasks). Keep
+		// nudging (and the abort ceiling at MalformedToolAbortAt still applies)
+		// instead of wiping the context.
+		if state.MalformedToolOutputCount >= MalformedToolContextResetAt &&
+			malformedReason != "provider_control_token_leak" {
 			return HookResult{
 				// HARD context reset: the conversation itself is causing the
 				// corruption (oversized, poisoned by provider control-token
