@@ -116,6 +116,21 @@ FROM kalilinux/kali-rolling
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Pin the Kali mirror instead of going through the http.kali.org redirector.
+# The redirector hands each client a geo-selected third-party mirror, and for
+# about a day it kept sending CI runners to a mirror they could not connect to,
+# so every image build died in apt. kali.download is Kali's own CDN-backed
+# mirror; override with --build-arg KALI_MIRROR=<url> if needed. Rewrites both
+# the deb822 (kali.sources) and legacy one-line formats, then fails fast if the
+# redirector is still referenced.
+ARG KALI_MIRROR=http://kali.download/kali
+RUN set -eux; \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
+      [ -f "$f" ] || continue; \
+      sed -i -E "s#https?://http\.kali\.org/kali/?#${KALI_MIRROR}#g" "$f"; \
+    done; \
+    ! grep -rqs 'http\.kali\.org' /etc/apt/sources.list /etc/apt/sources.list.d/
+
 # Kali metapackages = the extensive toolset. Recommends are left ON so the
 # metapackages pull their full tool set. Covers the web/app-pentest domains the
 # agent uses plus general coverage, and adds the package managers required for
@@ -126,17 +141,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 # progress?"), failing `apt-get update` with exit 100 even though the same
 # index is consistent minutes later — release builds died on this race
 # twice, 40 minutes apart. Retry the index fetch with backoff instead of
-# failing the whole container build on a mirror sync.
+# failing the whole container build on a mirror sync. Error-Mode=any makes a
+# partially fetched index count as a failure (and so get retried) instead of
+# exiting 0 and failing later with "Unable to locate package kali-tools-*".
 RUN set -eux; \
     ok=0; \
     for i in 1 2 3 4 5; do \
-      if apt-get -o Acquire::Retries=3 update; then ok=1; break; fi; \
+      if apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update; then ok=1; break; fi; \
       echo "apt index fetch failed (mirror sync?); retry $i/5 in 45s"; \
       rm -rf /var/lib/apt/lists/*; \
       sleep 45; \
     done; \
     [ "$ok" = "1" ]; \
-    apt-get install -y \
+    apt-get -o Acquire::Retries=3 install -y \
       kali-linux-headless \
       kali-tools-information-gathering \
       kali-tools-web \
@@ -145,7 +162,7 @@ RUN set -eux; \
       kali-tools-passwords \
       kali-tools-exploitation \
       kali-tools-post-exploitation \
-    && apt-get install -y --no-install-recommends \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       ca-certificates curl wget git jq unzip zip p7zip-full file tree bc xxd \
       seclists wordlists \
       python3 python3-pip python3-venv pipx \
