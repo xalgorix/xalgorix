@@ -64,6 +64,21 @@ var (
 	slashFnOpenRe = regexp.MustCompile(`</function\s*=\s*["']?([A-Za-z_][A-Za-z0-9_-]*)["']?\s*>`)
 	funcCallsTag  = regexp.MustCompile(`</?function_calls>`)
 
+	// Some models (observed through a model-routing aggregator) emit their
+	// native "DSML" tool-call markup as plain text:
+	//     <｜DSML｜function_calls>
+	//     <｜DSML｜invoke name="terminal_execute">
+	//     <｜DSML｜parameter name="command" string="true">id</｜DSML｜parameter>
+	//     </｜DSML｜invoke>
+	//     </｜DSML｜function_calls>
+	// The body is the invoke/parameter vocabulary we already parse, only with a
+	// "｜DSML｜" namespace marker (fullwidth or ASCII bars) inside every tag and
+	// a string="true|false" type hint on parameters. Unrecognized, every turn
+	// counted as "no tool call" until the scan was force-stopped. Stripping the
+	// marker and the type hint reduces it to the supported <invoke> form.
+	dsmlTagRe        = regexp.MustCompile(`<(/?)\s*[|｜]\s*DSML\s*[|｜]\s*`)
+	dsmlStringAttrRe = regexp.MustCompile(`(<parameter\s+name=["'][^"']+["'])\s+string=["'](?:true|false)["']\s*>`)
+
 	// Space-attribute function form: <function name="X">...</function>. The
 	// body is well-formed but fnRegex requires "<function=", so these turns
 	// were previously classified as unparsable "unparsed_tool_call" output
@@ -345,6 +360,12 @@ func normalizeFormat(content string) string {
 	// (hard context reset at 5) even though the model did emit a real call.
 	if strings.Contains(content, "<]") {
 		content = providerControlStripRe.ReplaceAllString(content, "")
+	}
+
+	// Reduce DSML-namespaced tags to the plain invoke/parameter vocabulary.
+	if strings.Contains(content, "DSML") {
+		content = dsmlTagRe.ReplaceAllString(content, "<${1}")
+		content = dsmlStringAttrRe.ReplaceAllString(content, "${1}>")
 	}
 
 	// Handle <invoke name="X"> ... </invoke> format
