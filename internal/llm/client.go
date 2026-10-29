@@ -402,9 +402,9 @@ type chatChoice struct {
 	Message struct {
 		Content   contentField   `json:"content"`
 		ToolCalls []chatToolCall `json:"tool_calls"`
-		Refusal   string         `json:"refusal,omitempty"`
-		// Reasoning output is only inspected for presence, so the raw
-		// form tolerates providers that send it as a string or a list.
+		// Refusal and reasoning are only inspected for presence, so the
+		// raw form tolerates providers that send a string, list or object.
+		Refusal          json.RawMessage `json:"refusal,omitempty"`
 		Reasoning        json.RawMessage `json:"reasoning,omitempty"`
 		ReasoningContent json.RawMessage `json:"reasoning_content,omitempty"`
 	} `json:"message"`
@@ -1942,7 +1942,7 @@ func (c *Client) doChatWithUsage(messages []Message, tools []ToolDefinition, cal
 			completionTokens = usage.CompletionTokens
 		}
 		log.Printf("[llm] Empty completion from %s (model=%s, finish_reason=%q, native_finish_reason=%q, refusal=%t, reasoning=%t, completion_tokens=%d)",
-			endpoint, model, choice.FinishReason, choice.NativeFinishReason, strings.TrimSpace(choice.Message.Refusal) != "",
+			endpoint, model, choice.FinishReason, choice.NativeFinishReason, hasRawContent(choice.Message.Refusal),
 			hasRawContent(choice.Message.Reasoning) || hasRawContent(choice.Message.ReasoningContent), completionTokens)
 	}
 	return content, usage, nil

@@ -79,6 +79,20 @@ func TestDoChat_EmptyCompletionLogsDiagnostics(t *testing.T) {
 	}
 }
 
+// A refusal sent as an object must not break decoding of the response.
+func TestDoChat_RefusalObjectStillParses(t *testing.T) {
+	buf := captureLog(t)
+	c := newEmptyCompletionClient(t, `{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":null,"refusal":{"reason":"policy"}}}]}`)
+
+	got, err := c.doChat([]Message{{Role: "user", Content: "hi"}})
+	if err != nil || got != "" {
+		t.Fatalf("doChat = %q, %v; want \"\", nil", got, err)
+	}
+	if !strings.Contains(buf.String(), "refusal=true") {
+		t.Fatalf("log missing refusal=true:\n%s", buf.String())
+	}
+}
+
 func TestDoChat_NonEmptyCompletionDoesNotLogDiagnostics(t *testing.T) {
 	buf := captureLog(t)
 	c := newEmptyCompletionClient(t, `{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hello","reasoning_content":"thought"}}]}`)
