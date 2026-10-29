@@ -402,7 +402,43 @@ type chatChoice struct {
 	Message struct {
 		Content   contentField   `json:"content"`
 		ToolCalls []chatToolCall `json:"tool_calls"`
+		Refusal   string         `json:"refusal,omitempty"`
+		// Reasoning output is only inspected for presence, so the raw
+		// form tolerates providers that send it as a string or a list.
+		Reasoning        json.RawMessage `json:"reasoning,omitempty"`
+		ReasoningContent json.RawMessage `json:"reasoning_content,omitempty"`
 	} `json:"message"`
+	FinishReason       string `json:"finish_reason,omitempty"`
+	NativeFinishReason string `json:"native_finish_reason,omitempty"`
+	// Error is set by some OpenAI-compatible gateways when the upstream
+	// model failed after the HTTP 200 was already committed.
+	Error json.RawMessage `json:"error,omitempty"`
+}
+
+// choiceErrorMessage extracts a readable message from a per-choice error
+// object, which gateways send either as {"message": "...", "code": ...} or
+// as a bare string. Returns "" when there is no error.
+func choiceErrorMessage(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &obj) == nil && strings.TrimSpace(obj.Message) != "" {
+		return strings.TrimSpace(obj.Message)
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return strings.TrimSpace(str)
+	}
+	return trimmed
+}
+
+func hasRawContent(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null" && trimmed != `""` && trimmed != "[]"
 }
 
 // chatResponse is the OpenAI-compatible response.
@@ -1888,8 +1924,26 @@ func (c *Client) doChatWithUsage(messages []Message, tools []ToolDefinition, cal
 		c.totalCached += cached
 		c.mu.Unlock()
 	}
+	choice := chatResp.Choices[0]
+	calls := parseOpenAIToolCalls(choice.Message.ToolCalls)
 	if callsOut != nil {
-		*callsOut = parseOpenAIToolCalls(chatResp.Choices[0].Message.ToolCalls)
+		*callsOut = calls
 	}
-	return string(chatResp.Choices[0].Message.Content), usage, nil
+	content := string(choice.Message.Content)
+	if strings.TrimSpace(content) == "" && len(calls) == 0 {
+		// An empty completion is otherwise indistinguishable from a model
+		// that chose to say nothing. Surface gateway-reported failures as
+		// errors and record why the rest came back empty.
+		if msg := choiceErrorMessage(choice.Error); msg != "" {
+			return "", usage, fmt.Errorf("provider returned an error inside the completion (finish_reason: %s): %s", choice.FinishReason, msg)
+		}
+		completionTokens := 0
+		if usage != nil {
+			completionTokens = usage.CompletionTokens
+		}
+		log.Printf("[llm] Empty completion from %s (model=%s, finish_reason=%q, native_finish_reason=%q, refusal=%t, reasoning=%t, completion_tokens=%d)",
+			endpoint, model, choice.FinishReason, choice.NativeFinishReason, strings.TrimSpace(choice.Message.Refusal) != "",
+			hasRawContent(choice.Message.Reasoning) || hasRawContent(choice.Message.ReasoningContent), completionTokens)
+	}
+	return content, usage, nil
 }
