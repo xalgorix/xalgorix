@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xalgord/xalgorix/v4/internal/agent"
 	"github.com/xalgord/xalgorix/v4/internal/config"
 )
 
@@ -74,5 +75,21 @@ func TestFormatCostNote(t *testing.T) {
 	}
 	if !strings.Contains(local, "local model") {
 		t.Errorf("local cost note should mention the local model:\n%s", local)
+	}
+}
+
+func TestOnlyTheRootAgentsFinishEndsTheCLIRun(t *testing.T) {
+	const root = "agent_1"
+	if rootFinished(agent.Event{Type: "finished", AgentID: "agent_2"}, root) {
+		t.Error("a subagent's finished event must not end the run")
+	}
+	if !rootFinished(agent.Event{Type: "finished", AgentID: root}, root) {
+		t.Error("the root agent's finished event must end the run")
+	}
+	if !rootFinished(agent.Event{Type: "finished"}, root) {
+		t.Error("an unattributed finished event must still end the run")
+	}
+	if rootFinished(agent.Event{Type: "message", AgentID: root}, root) {
+		t.Error("only finished events end the run")
 	}
 }

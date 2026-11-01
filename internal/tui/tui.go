@@ -667,7 +667,7 @@ func RunCLI(cfg *config.Config, targets []string, instruction string, codeScan s
 		defer close(done)
 		for evt := range events {
 			fmt.Print(FormatEvent(evt))
-			if evt.Type == "finished" {
+			if rootFinished(evt, ag.ID) {
 				totalTokens = evt.TotalTokens
 				return
 			}
@@ -680,6 +680,13 @@ func RunCLI(cfg *config.Config, targets []string, instruction string, codeScan s
 
 	fmt.Print(FormatVulnSummary())
 	fmt.Print(FormatCostNote(cfg, totalTokens))
+}
+
+// rootFinished reports whether evt ends the CLI run. Subagents forward their own "finished"
+// event on the same channel when their lane completes; stopping there hid the rest of the
+// root agent's work and reported a subagent's partial token total as the scan's.
+func rootFinished(evt agent.Event, rootID string) bool {
+	return evt.Type == "finished" && (evt.AgentID == "" || evt.AgentID == rootID)
 }
 
 // cliPickLoopbackPort returns a free loopback TCP port for a provision scan.
