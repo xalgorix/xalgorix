@@ -306,6 +306,14 @@ var builtinList = []Entry{
 		Notes:       "OAuth flow is beta — DashScope OAuth client metadata is not publicly stable yet; API key path is fully tested.",
 	},
 	{
+		ID:          "runcrate",
+		DisplayName: "Runcrate",
+		BaseURL:     "https://api.runcrate.ai/v1",
+		HeaderStyle: "openai",
+		AuthMethods: []string{"api_key"},
+		Notes:       "OpenAI-compatible API for open-weight models. Model IDs are vendor-prefixed (for example deepseek-ai/DeepSeek-V4-Flash); choose Custom model for any ID returned by GET /v1/models.",
+	},
+	{
 		ID:          "sglang",
 		DisplayName: "SGLang",
 		BaseURL:     "http://localhost:30000/v1",
