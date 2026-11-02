@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/llm"
 )
 
 func TestScanBudgetAtomicallyCapsParallelToolReservations(t *testing.T) {
@@ -102,5 +105,29 @@ func TestDelegatedAgentInheritsRootScanBudget(t *testing.T) {
 	}
 	if child.delegatedAgentID != "sub_test" {
 		t.Fatalf("delegated id = %q, want sub_test", child.delegatedAgentID)
+	}
+}
+
+func TestScanCostSumsEveryAgentsReportedCost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],` +
+			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.5}}`))
+	}))
+	defer srv.Close()
+
+	budget := newScanBudget()
+	root := &Agent{client: llm.NewClient(&config.Config{LLM: "openai/gpt-test", APIBase: srv.URL, APIKey: "test"}), scanBudget: budget}
+	child := &Agent{client: root.client.Clone(), scanBudget: budget}
+	for _, a := range []*Agent{root, child, child} {
+		if _, err := a.client.Chat([]llm.Message{{Role: "user", Content: "ping"}}); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		a.syncBudgetTokens()
+	}
+	// Syncing again must not count the same spend twice.
+	child.syncBudgetTokens()
+	if got := root.ScanCostUSD(); got != 1.5 {
+		t.Fatalf("scan cost = %v, want 1.5 (root 0.5 + subagent 1.0)", got)
 	}
 }

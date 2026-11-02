@@ -50,12 +50,12 @@ func TestIsLocalProvider(t *testing.T) {
 
 func TestFormatCostNote(t *testing.T) {
 	// No tokens → stays silent.
-	if got := FormatCostNote(&config.Config{}, 0); got != "" {
+	if got := FormatCostNote(&config.Config{}, 0, 0); got != "" {
 		t.Errorf("FormatCostNote(_, 0) = %q, want empty", got)
 	}
 
 	// Remote provider: names the provider bill, the hosted nudge, and the URL.
-	remote := FormatCostNote(&config.Config{LLMProvider: "openai"}, 2_000_000)
+	remote := FormatCostNote(&config.Config{LLMProvider: "openai"}, 2_000_000, 0)
 	for _, want := range []string{
 		"2.00M tokens",
 		"billed to your own LLM provider",
@@ -67,8 +67,14 @@ func TestFormatCostNote(t *testing.T) {
 		}
 	}
 
+	// A provider-reported charge is printed as the scan's cost.
+	charged := FormatCostNote(&config.Config{LLMProvider: "openrouter"}, 2_000_000, 1.23456)
+	if !strings.Contains(charged, "reported a charge of $1.2346") {
+		t.Errorf("cost note missing the reported charge:\n%s", charged)
+	}
+
 	// Local provider: must NOT claim a provider bill.
-	local := FormatCostNote(&config.Config{LLMProvider: "ollama"}, 500_000)
+	local := FormatCostNote(&config.Config{LLMProvider: "ollama"}, 500_000, 0)
 	if strings.Contains(local, "billed to your own LLM provider") {
 		t.Errorf("local cost note wrongly claims a provider bill:\n%s", local)
 	}

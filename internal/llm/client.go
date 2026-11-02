@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -61,6 +62,9 @@ type Client struct {
 	totalIn       int
 	totalOut      int
 	totalCached   int
+	// totalCostNanoUSD sums the charge the provider reported for each
+	// response (OpenRouter's usage.cost), in billionths of a dollar.
+	totalCostNanoUSD int64
 	// ctx is read concurrently by chatWithRetry / ChatStream and written by
 	// SetContext. Use atomic.Value to avoid a race; loadCtx() is the only
 	// reader, storeCtx() is the only writer.
@@ -108,6 +112,41 @@ type TokenUsage struct {
 	// cached-token field in this response, so zero is never fabricated into
 	// "not reported" (or the reverse).
 	HasCachedTokens bool `json:"has_cached_tokens,omitempty"`
+	// Cost is the charge OpenRouter reports for the response, in USD. With
+	// a BYOK key it holds only OpenRouter's fee, and the provider's charge is
+	// in CostDetails.UpstreamInferenceCost. Other providers omit both.
+	Cost        *float64          `json:"cost,omitempty"`
+	IsBYOK      bool              `json:"is_byok,omitempty"`
+	CostDetails *UsageCostDetails `json:"cost_details,omitempty"`
+}
+
+// UsageCostDetails is OpenRouter's breakdown of usage.cost.
+type UsageCostDetails struct {
+	UpstreamInferenceCost *float64 `json:"upstream_inference_cost,omitempty"`
+}
+
+// ReportedCostUSD is what the provider charged for the response, or 0 when
+// it reported no cost. A BYOK response adds the upstream provider's charge
+// to OpenRouter's fee.
+func (u *TokenUsage) ReportedCostUSD() float64 {
+	if u == nil {
+		return 0
+	}
+	total := 0.0
+	if u.Cost != nil && *u.Cost > 0 {
+		total += *u.Cost
+	}
+	if u.IsBYOK && u.CostDetails != nil && u.CostDetails.UpstreamInferenceCost != nil && *u.CostDetails.UpstreamInferenceCost > 0 {
+		total += *u.CostDetails.UpstreamInferenceCost
+	}
+	return total
+}
+
+func usdToNano(usd float64) int64 {
+	if !(usd > 0) || math.IsInf(usd, 0) {
+		return 0
+	}
+	return int64(math.Round(usd * 1e9))
 }
 
 // GetCachedTokens returns the cached prompt token count from any provider-reported field.
@@ -143,6 +182,14 @@ func (c *Client) GetTokens() (promptTokens, completionTokens, totalTokens int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.totalIn, c.totalOut, c.totalIn + c.totalOut
+}
+
+// GetReportedCostUSD returns the cumulative charge the provider reported for
+// this client's responses, or 0 when the provider reports no cost.
+func (c *Client) GetReportedCostUSD() float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return float64(c.totalCostNanoUSD) / 1e9
 }
 
 // GetCachedTokens returns cumulative cached prompt tokens reported by the provider.
@@ -1663,6 +1710,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					c.totalIn += sseResp.Usage.PromptTokens
 					c.totalOut += sseResp.Usage.CompletionTokens
 					c.totalCached += cached
+					c.totalCostNanoUSD += usdToNano(sseResp.Usage.ReportedCostUSD())
 					c.mu.Unlock()
 				}
 				if len(sseResp.Choices) > 0 {
@@ -1922,6 +1970,7 @@ func (c *Client) doChatWithUsage(messages []Message, tools []ToolDefinition, cal
 		c.totalIn += usage.PromptTokens
 		c.totalOut += usage.CompletionTokens
 		c.totalCached += cached
+		c.totalCostNanoUSD += usdToNano(usage.ReportedCostUSD())
 		c.mu.Unlock()
 	}
 	choice := chatResp.Choices[0]
