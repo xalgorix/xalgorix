@@ -2385,9 +2385,10 @@ func TestTemplatePathParams(t *testing.T) {
 }
 
 func TestDedupEndpointKey_NormalizesThenTemplates(t *testing.T) {
-	// Uppercase + query + fragment + trailing slash, then id templating.
+	// Host case + query + fragment + trailing slash, then id templating. The
+	// path keeps its case (case-variant routes are distinct surface).
 	got := dedupEndpointKey("https://App.example.com/Orders/1042/Items/9?x=1#frag")
-	want := "https://app.example.com/orders/{id}/items/{id}"
+	want := "https://app.example.com/Orders/{id}/Items/{id}"
 	if got != want {
 		t.Fatalf("dedupEndpointKey = %q, want %q", got, want)
 	}
@@ -2395,10 +2396,10 @@ func TestDedupEndpointKey_NormalizesThenTemplates(t *testing.T) {
 
 func TestDedupEndpointKeyForTarget_RelativeAndAbsoluteMatch(t *testing.T) {
 	target := "https://pentest-ground.com:9000"
-	if got, want := dedupEndpointKeyForTarget(target, "https://pentest-ground.com:9000/User/1042?q=x"), "/user/{id}"; got != want {
+	if got, want := dedupEndpointKeyForTarget(target, "https://pentest-ground.com:9000/User/1042?q=x"), "/User/{id}"; got != want {
 		t.Fatalf("same-origin absolute endpoint key = %q, want %q", got, want)
 	}
-	if got, want := dedupEndpointKeyForTarget(target, "/User/2087#proof"), "/user/{id}"; got != want {
+	if got, want := dedupEndpointKeyForTarget(target, "/User/2087#proof"), "/User/{id}"; got != want {
 		t.Fatalf("relative endpoint key = %q, want %q", got, want)
 	}
 }
@@ -3448,5 +3449,31 @@ func TestReportVuln_TypeCapHoldsOverModelCVSS(t *testing.T) {
 	}
 	if severityFromCVSS(v.CVSS) != "low" || v.CVSSVector != "" {
 		t.Fatalf("score/vector disagree with the capped severity: cvss=%.1f vector=%q", v.CVSS, v.CVSSVector)
+	}
+}
+
+// A finding on a case-variant route is not a duplicate of the canonical one:
+// /Api/account reaching handlers unauthenticated is its own vulnerability.
+// Host case and UUID case still normalize.
+func TestFindDuplicateVulnerability_PathCaseVariantsRemainDistinct(t *testing.T) {
+	existing := []Vulnerability{{
+		ID: "XALG-1", Title: "Authentication bypass on account endpoint", Description: "auth bypass",
+		Target: "https://app.example.com", Endpoint: "/api/account",
+	}}
+	if _, _, isDup := findDuplicateVulnerability(existing, "Authentication bypass on account endpoint", "auth bypass", "", "CWE-287",
+		"https://app.example.com", "/Api/account"); isDup {
+		t.Fatal("/Api/account must not dedup into /api/account")
+	}
+	if _, _, isDup := findDuplicateVulnerability(existing, "Authentication bypass on account endpoint", "auth bypass", "", "CWE-287",
+		"https://app.example.com", "https://APP.Example.com/api/account/"); !isDup {
+		t.Fatal("host case and a trailing slash must still dedup")
+	}
+	ids := []Vulnerability{{
+		ID: "XALG-2", Title: "IDOR on object", Description: "idor",
+		Target: "https://app.example.com", Endpoint: "/api/objects/0F8FAD5B-D9CB-469F-A165-70867728950E",
+	}}
+	if _, _, isDup := findDuplicateVulnerability(ids, "IDOR on object", "idor", "", "",
+		"https://app.example.com", "/api/objects/7c9e6679-7425-40de-944b-e07fc1f90ae7"); !isDup {
+		t.Fatal("object-id variants must still dedup whatever the id's case")
 	}
 }

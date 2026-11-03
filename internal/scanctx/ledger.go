@@ -656,11 +656,13 @@ func (ls *LedgerStore) LoadFromDisk() int {
 		if h == nil {
 			continue
 		}
+		// Ledgers written before endpoint keys kept their path case store a
+		// lowercased key; re-derive it so new records for the same route merge.
 		key := h.DedupKey
-		if key == "" {
-			key = dedupKey(h.VulnClass, h.Endpoint, h.Parameter, h.Role)
-			h.DedupKey = key
+		if derived := dedupKey(h.VulnClass, h.Endpoint, h.Parameter, h.Role); key == "" || strings.EqualFold(key, derived) {
+			key = derived
 		}
+		h.DedupKey = key
 		if _, exists := ls.byDedup[key]; exists {
 			continue // do not clobber live state
 		}
@@ -915,18 +917,37 @@ func dedupKey(vulnClass, endpoint, parameter, role string) string {
 	}, "|")
 }
 
-// normalizeEndpoint lowercases, drops the query/fragment, and trims a trailing
-// slash so "/a/?x=1" and "/A/" collapse to the same key.
+// normalizeEndpoint drops the query/fragment, trims a trailing slash and
+// lowercases only a URL's scheme and host, so "/a/?x=1" and "/a/" share a key.
+// The path keeps its case: most servers route paths case-sensitively, and a
+// case variant of a route (/Api/ next to /api/) is separate surface — an
+// authorization bypass through a case-variant mount is exactly that, and
+// merging the two records loses its evidence.
 func normalizeEndpoint(endpoint string) string {
 	e := strings.TrimSpace(endpoint)
 	if i := strings.IndexAny(e, "?#"); i >= 0 {
 		e = e[:i]
 	}
-	e = strings.ToLower(e)
+	e = lowerSchemeHost(e)
 	if len(e) > 1 {
 		e = strings.TrimRight(e, "/")
 	}
 	return e
+}
+
+// lowerSchemeHost lowercases the "scheme://host[:port]" prefix of an absolute
+// URL and leaves the path as written. Paths without a scheme are unchanged.
+func lowerSchemeHost(e string) string {
+	i := strings.Index(e, "://")
+	if i < 0 {
+		return e
+	}
+	rest := e[i+3:]
+	j := strings.IndexByte(rest, '/')
+	if j < 0 {
+		return strings.ToLower(e)
+	}
+	return strings.ToLower(e[:i+3+j]) + rest[j:]
 }
 
 func clampConfidence(f float64) float64 {

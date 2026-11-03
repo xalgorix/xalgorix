@@ -4130,6 +4130,9 @@ func extractVulnTypeWithCWE(title, description, cwe string) string {
 
 // normalizeEndpoint strips query params, fragments, and trailing slashes
 // so "/api/search?q=test" and "/api/search?q=foo" match as the same endpoint.
+// Only a URL's scheme and host are lowercased: paths are case-sensitive on most
+// servers, and a finding on a case-variant route (/Api/ next to /api/) must not
+// be deduplicated into the finding on the canonical one.
 func normalizeEndpoint(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
@@ -4146,8 +4149,16 @@ func normalizeEndpoint(endpoint string) string {
 	}
 	// Strip trailing slashes
 	endpoint = strings.TrimRight(endpoint, "/")
-	// Lowercase for consistent comparison
-	return strings.ToLower(endpoint)
+	// Lowercase the scheme and host only; the path keeps its case.
+	if i := strings.Index(endpoint, "://"); i >= 0 {
+		rest := endpoint[i+3:]
+		j := strings.IndexByte(rest, '/')
+		if j < 0 {
+			return strings.ToLower(endpoint)
+		}
+		return strings.ToLower(endpoint[:i+3+j]) + rest[j:]
+	}
+	return endpoint
 }
 
 type dedupTargetOrigin struct {
@@ -4277,14 +4288,14 @@ func isIDPathSegment(seg string) bool {
 	if numPathSegment.MatchString(seg) {
 		return true
 	}
-	// normalizeEndpoint already lowercased, but be defensive for direct callers.
+	// Paths keep their case, so match hex/UUID identifiers case-insensitively.
 	low := strings.ToLower(seg)
 	return uuidPathSegment.MatchString(low) || hexPathSegment.MatchString(low)
 }
 
 // templatePathParams collapses opaque per-object identifier segments in a path
 // to "{id}", so ID variants of the same endpoint share a key. It expects an
-// already query/fragment-stripped, lowercased path (see dedupEndpointKey).
+// already query/fragment-stripped path (see dedupEndpointKey).
 func templatePathParams(path string) string {
 	if path == "" || !strings.Contains(path, "/") {
 		return path

@@ -51,13 +51,17 @@ func TestLedgerUpsertDedupMergesBlanks(t *testing.T) {
 
 func TestLedgerEndpointNormalizationDedup(t *testing.T) {
 	ls := NewLedgerStore()
-	a := ls.Upsert(Hypothesis{VulnClass: "xss", Endpoint: "/Search/?q=1"})
+	a := ls.Upsert(Hypothesis{VulnClass: "xss", Endpoint: "/search/?q=1"})
 	b := ls.Upsert(Hypothesis{VulnClass: "xss", Endpoint: "/search"})
 	if a.ID != b.ID {
-		t.Fatalf("expected /Search/?q=1 and /search to dedup to one hypothesis, got %q and %q", a.ID, b.ID)
+		t.Fatalf("expected /search/?q=1 and /search to dedup to one hypothesis, got %q and %q", a.ID, b.ID)
 	}
 	if ls.Len() != 1 {
 		t.Fatalf("expected 1 hypothesis, got %d", ls.Len())
+	}
+	// Path case is kept (see TestLedgerEndpointKeyKeepsPathCase).
+	if c := ls.Upsert(Hypothesis{VulnClass: "xss", Endpoint: "/Search"}); c.ID == a.ID {
+		t.Fatal("/Search must not merge into /search")
 	}
 }
 
@@ -449,5 +453,51 @@ func TestIsModelOrigin(t *testing.T) {
 		if got := IsModelOrigin(origin); got != want {
 			t.Errorf("IsModelOrigin(%q) = %v, want %v", origin, got, want)
 		}
+	}
+}
+
+// Endpoint keys keep the path's case: a case-variant route (/Api/ next to
+// /api/) is separate surface and must not merge into the canonical record.
+// Query, fragment, trailing slash and the URL's scheme/host still normalize.
+func TestLedgerEndpointKeyKeepsPathCase(t *testing.T) {
+	ls := NewLedgerStore()
+	lower := ls.Upsert(Hypothesis{VulnClass: "auth-bypass", Endpoint: "/api/account", Origin: "coordinator"})
+	variant := ls.Upsert(Hypothesis{VulnClass: "auth-bypass", Endpoint: "/Api/account", Origin: "coordinator"})
+	if lower.ID == variant.ID {
+		t.Fatal("/Api/account merged into /api/account")
+	}
+	if again := ls.Upsert(Hypothesis{VulnClass: "auth-bypass", Endpoint: "/Api/account/?debug=1#x"}); again.ID != variant.ID {
+		t.Fatalf("query/fragment/trailing slash should still normalize: %s vs %s", again.ID, variant.ID)
+	}
+	abs := ls.Upsert(Hypothesis{VulnClass: "sqli", Endpoint: "HTTPS://Example.COM/Api/x"})
+	if same := ls.Upsert(Hypothesis{VulnClass: "sqli", Endpoint: "https://example.com/Api/x"}); same.ID != abs.ID {
+		t.Fatal("scheme/host case should not split a record")
+	}
+	if other := ls.Upsert(Hypothesis{VulnClass: "sqli", Endpoint: "https://example.com/api/x"}); other.ID == abs.ID {
+		t.Fatal("path case was folded on an absolute URL")
+	}
+}
+
+// A ledger persisted with the old lowercased keys re-derives them on load, so a
+// new record for the same mixed-case route merges instead of duplicating.
+func TestLedgerLoadRederivesLegacyLowercaseKeys(t *testing.T) {
+	dir := t.TempDir()
+	ls := NewLedgerStore()
+	ls.SetPersistPath(dir)
+	h := ls.Upsert(Hypothesis{VulnClass: "idor", Endpoint: "/Api/Orders"})
+	ls.mu.Lock()
+	delete(ls.byDedup, ls.hyps[h.ID].DedupKey)
+	ls.hyps[h.ID].DedupKey = "idor|/api/orders||" // legacy shape
+	data, path := ls.marshalLocked()
+	ls.mu.Unlock()
+	ls.writeFile(data, path)
+
+	fresh := NewLedgerStore()
+	fresh.SetPersistPath(dir)
+	if n := fresh.LoadFromDisk(); n != 1 {
+		t.Fatalf("loaded %d, want 1", n)
+	}
+	if got := fresh.Upsert(Hypothesis{VulnClass: "idor", Endpoint: "/Api/Orders"}); got.ID != h.ID || fresh.Len() != 1 {
+		t.Fatalf("legacy key not re-derived: got %s (len %d), want merge into %s", got.ID, fresh.Len(), h.ID)
 	}
 }
