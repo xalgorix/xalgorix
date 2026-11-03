@@ -538,7 +538,7 @@ func FormatVulnSummary() string {
 // count makes it visible, and points at the outcome-based hosted alternative.
 // Returns "" when there were no tokens to report (e.g. a run that never called
 // the model), so it stays silent when there's nothing honest to say.
-func FormatCostNote(cfg *config.Config, totalTokens int) string {
+func FormatCostNote(cfg *config.Config, totalTokens int, costUSD float64) string {
 	if totalTokens <= 0 {
 		return ""
 	}
@@ -546,6 +546,8 @@ func FormatCostNote(cfg *config.Config, totalTokens int) string {
 	b.WriteString(fmt.Sprintf("\n  ═══ LLM usage this scan: ~%s tokens ═══\n\n", humanizeTokens(totalTokens)))
 	if isLocalProvider(cfg) {
 		b.WriteString("  Ran on your local model — no API bill, just your own compute and time.\n")
+	} else if costUSD > 0 {
+		b.WriteString(fmt.Sprintf("  Your LLM provider reported a charge of $%.4f for those tokens.\n", costUSD))
 	} else {
 		b.WriteString("  Those tokens were billed to your own LLM provider.\n")
 	}
@@ -679,7 +681,7 @@ func RunCLI(cfg *config.Config, targets []string, instruction string, codeScan s
 	<-done
 
 	fmt.Print(FormatVulnSummary())
-	fmt.Print(FormatCostNote(cfg, totalTokens))
+	fmt.Print(FormatCostNote(cfg, totalTokens, ag.ScanCostUSD()))
 }
 
 // rootFinished reports whether evt ends the CLI run. Subagents forward their own "finished"

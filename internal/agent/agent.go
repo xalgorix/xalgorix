@@ -274,15 +274,18 @@ type Agent struct {
 	// agentGraph is shared by every agent delegated from this root, but owned
 	// by the root scan only. The graph itself is scan-scoped, so concurrent
 	// scans cannot overwrite runners or consume one another's worker slots.
-	agentGraph         *agentsgraph.Graph
-	ownsAgentGraph     bool
-	delegatedAgentID   string
-	ctfMission         bool
-	benchmarkIsolated  bool
-	scanBudget         *scanBudget
-	lastBudgetTokens   int
-	compactionCount    int
-	rateLimitBackoffFn func(int) time.Duration
+	agentGraph        *agentsgraph.Graph
+	ownsAgentGraph    bool
+	delegatedAgentID  string
+	ctfMission        bool
+	benchmarkIsolated bool
+	scanBudget        *scanBudget
+	lastBudgetTokens  int
+	// lastBudgetCostNanoUSD is this agent's reported cost already folded
+	// into scanBudget.costNanoUSD.
+	lastBudgetCostNanoUSD int64
+	compactionCount       int
+	rateLimitBackoffFn    func(int) time.Duration
 
 	// execTimeoutStreak counts consecutive exec-channel tools
 	// (terminal_execute/python_action) that hit the agent-level hard-timeout

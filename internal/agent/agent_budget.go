@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,7 @@ type scanBudget struct {
 	toolCalls     atomic.Int64
 	iterations    atomic.Int64
 	tokens        atomic.Int64
+	costNanoUSD   atomic.Int64
 	progress      atomic.Int64
 	progressFacts map[string]bool // protected by persistMu
 	progressAt    time.Time       // protected by persistMu
@@ -153,6 +155,13 @@ func (b *scanBudget) tokenCount() int {
 	return int(b.tokens.Load())
 }
 
+func (b *scanBudget) costUSD() float64 {
+	if b == nil {
+		return 0
+	}
+	return float64(b.costNanoUSD.Load()) / 1e9
+}
+
 // syncBudgetTokens folds this agent client's cumulative token count into the
 // graph-wide total exactly once per delta. Each agent owns one client and only
 // advances lastBudgetTokens from its own loop, while scanBudget.tokens is
@@ -168,10 +177,32 @@ func (a *Agent) syncBudgetTokens() int {
 	if a.scanBudget == nil {
 		return current
 	}
+	// The provider-reported cost rides the same per-agent delta, so the
+	// scan-wide total covers every subagent's spend.
+	if cost := int64(math.Round(a.client.GetReportedCostUSD() * 1e9)); cost > a.lastBudgetCostNanoUSD {
+		a.scanBudget.costNanoUSD.Add(cost - a.lastBudgetCostNanoUSD)
+		a.lastBudgetCostNanoUSD = cost
+	}
 	delta := current - a.lastBudgetTokens
 	if delta > 0 {
 		a.lastBudgetTokens = current
 		return a.scanBudget.addTokens(delta)
 	}
 	return a.scanBudget.tokenCount()
+}
+
+// ScanCostUSD returns the scan-wide charge the LLM provider reported across
+// this agent and its subagents, or 0 when the provider reports no cost.
+func (a *Agent) ScanCostUSD() float64 {
+	if a == nil {
+		return 0
+	}
+	a.syncBudgetTokens()
+	if a.scanBudget == nil {
+		if a.client == nil {
+			return 0
+		}
+		return a.client.GetReportedCostUSD()
+	}
+	return a.scanBudget.costUSD()
 }
