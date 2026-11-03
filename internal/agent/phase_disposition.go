@@ -108,7 +108,7 @@ func dispositionForPhase(state *ScanState, phase int, surfaceKnown bool) PhaseDi
 	}
 	sort.Strings(d.TaskIDs)
 
-	var pending, active, completed, na, blocked int
+	var pending, active, completed, na, blocked, untested int
 	var blockedReason string
 	for _, t := range tasks {
 		switch {
@@ -123,9 +123,17 @@ func dispositionForPhase(state *ScanState, phase int, surfaceKnown bool) PhaseDi
 			if blockedReason == "" {
 				blockedReason = t.ID + ": " + orDefault(t.Disposition, "blocked")
 			}
+		case isUntestedAtFinish(t):
+			// Closed by the principled finish without being executed: this is
+			// untested work, never "not applicable".
+			untested++
 		case t.Status == TaskSkipped:
 			na++
 		}
+	}
+	untestedNote := ""
+	if untested > 0 {
+		untestedNote = fmt.Sprintf("%d task(s) closed untested at the principled finish", untested)
 	}
 	switch {
 	case active > 0:
@@ -136,8 +144,22 @@ func dispositionForPhase(state *ScanState, phase int, surfaceKnown bool) PhaseDi
 	case blocked > 0:
 		d.Status = PhaseBlocked
 		d.Reason = blockedReason
+		if untestedNote != "" {
+			d.Reason += "; " + untestedNote
+		}
 	case completed > 0:
 		d.Status = PhaseCompleted
+		if untestedNote != "" {
+			d.Reason = "partially executed: " + untestedNote
+		}
+	case untested > 0:
+		if ev := phaseCoverageEvidenceClasses(state, phase); len(ev) > 0 {
+			d.Status = PhaseCompleted
+			d.Reason = "engine coverage evidence: " + strings.Join(ev, ", ") + " exercised; " + untestedNote
+			return d
+		}
+		d.Status = PhasePending
+		d.Reason = "not executed: " + untestedNote
 	default:
 		// Only justified N/A dispositions remain — but classes of this
 		// phase may still carry real coverage evidence (the lane was

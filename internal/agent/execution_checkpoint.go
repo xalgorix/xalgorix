@@ -211,6 +211,7 @@ func (a *Agent) RestoreExecutionCheckpoint() (bool, error) {
 	state.ScanContextID = a.scanCtx.ID
 	if saved.Terminal == nil {
 		state.CompletionStatus = ""
+		state.CompletionStopReason = ""
 	}
 	state.TargetUnresponsiveSince = time.Time{}
 	state.ConsecutiveTargetErrors = 0

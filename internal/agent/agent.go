@@ -1276,6 +1276,21 @@ func (a *Agent) CompletionOutcome() string {
 	return a.state.CompletionStatus
 }
 
+// CompletionStopReason returns the typed reason an "incomplete" assessment
+// carries to the scan record (finish_gate_exhausted, untested_at_finish), or
+// "" when none applies.
+func (a *Agent) CompletionStopReason() string {
+	if a != nil {
+		if snapshot := a.publishedAssessment.Load(); snapshot != nil {
+			return snapshot.StopReason
+		}
+	}
+	if a == nil || a.state == nil {
+		return ""
+	}
+	return a.state.CompletionStopReason
+}
+
 // SetPhaseRestrictions configures the selected methodology phases for policy hooks.
 // An empty slice means the full methodology is allowed.
 func (a *Agent) SetPhaseRestrictions(phases []int) {
@@ -2601,8 +2616,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 					// completed". Compute the explicit terminal state, make it
 					// visible in the final summary, and emit one compact
 					// telemetry block for post-scan debugging.
-					status, reasons := scanCompletionAssessment(a.state)
-					a.state.CompletionStatus = status
+					status, reasons := settleCompletion(a.state)
 					if status != CompletionStatusCompleted {
 						content += "\n\n" + formatIncompleteSummary(status, reasons)
 					}

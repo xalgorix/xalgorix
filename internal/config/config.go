@@ -149,9 +149,17 @@ type Config struct {
 
 	// ConvergeFinishIdle is the no-new-finding tail (iterations) for the
 	// ConvergeFinish principled finish, counted only once a scan is saturated
-	// (structured work done, route coverage past threshold). 0 uses the built-in
-	// default. XALGORIX_CONVERGE_FINISH_IDLE.
+	// (structured work done, class breadth past threshold). 0 uses the built-in
+	// default; negative disables the saturated finish.
+	// XALGORIX_CONVERGE_FINISH_IDLE, default 500.
 	ConvergeFinishIdle int
+
+	// ConvergeFinishLeadWindow is the one-time verification window (iterations)
+	// the principled finish grants when the tail elapses while the model still
+	// holds recent, high-confidence, unverified leads. 0 uses the built-in
+	// default; negative disables the window.
+	// XALGORIX_CONVERGE_FINISH_LEAD_WINDOW, default 100.
+	ConvergeFinishLeadWindow int
 
 	// ToolArchiveMinBytes is the minimum raw-output size a tool result must
 	// have before it is archived/stubbed. Smaller results stay in-context
@@ -496,41 +504,42 @@ func load() *Config {
 
 	cfg := &Config{
 		// LLM
-		LLM:                     envOr("XALGORIX_LLM", ""),
-		LLMProvider:             envOr("XALGORIX_LLM_PROVIDER", ""),
-		APIBase:                 envOr("XALGORIX_API_BASE", ""),
-		APIKey:                  envOr("XALGORIX_API_KEY", ""),
-		APIKeys:                 ParseAPIKeyList(envOr("XALGORIX_API_KEYS", "")),
-		KeyPoolStrategy:         envOr("XALGORIX_KEY_POOL_STRATEGY", "roundrobin"),
-		DisableAutoDelegate:     envOrBool("XALGORIX_DISABLE_AUTO_DELEGATE", false),
-		DisabledSpecialists:     envOrStringSlice("XALGORIX_DISABLED_SPECIALISTS"),
-		Checklist:               envOrChecklist(envOr("XALGORIX_CHECKLIST", "full")),
-		LLMProfile:              envOr("XALGORIX_LLM_PROFILE", ""),
-		ReasoningEffort:         envOr("XALGORIX_REASONING_EFFORT", "high"),
-		Language:                NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
-		OllamaCompatible:        envOrBool("XALGORIX_OLLAMA_COMPATIBLE", false),
-		Temperature:             envOrFloatPtr("XALGORIX_TEMPERATURE", 0.2),
-		LLMMaxRetries:           envOrInt("XALGORIX_LLM_MAX_RETRIES", 5),
-		MaxRateLimitWaitSec:     envOrInt("XALGORIX_MAX_RATE_LIMIT_WAIT", 30*60),
-		MaxOutputTokens:         envOrInt("XALGORIX_MAX_OUTPUT_TOKENS", 8192),
-		ContextCompactTokens:    envOrInt("XALGORIX_CONTEXT_COMPACT_TOKENS", -1),
-		RoleScopedTools:         envOrBool("XALGORIX_ROLE_SCOPED_TOOLS", false),
-		LeanToolSchema:          envOrBool("XALGORIX_LEAN_TOOL_SCHEMA", false),
-		AdvancePastStuckTasks:   envOrBool("XALGORIX_ADVANCE_PAST_STUCK", false),
-		MaxStuckAdvances:        envOrInt("XALGORIX_MAX_STUCK_ADVANCES", 3),
-		BoundedContext:          envOrBool("XALGORIX_BOUNDED_CONTEXT", false),
-		EpochCoverage:           envOrBool("XALGORIX_EPOCH_COVERAGE", false),
-		ConvergeReconcile:       envOrBool("XALGORIX_CONVERGE_RECONCILE", false),
-		EndpointHygiene:         envOrBool("XALGORIX_ENDPOINT_HYGIENE", false),
-		ConvergeFinish:          envOrBool("XALGORIX_CONVERGE_FINISH", false),
-		ConvergeFinishIdle:      envOrInt("XALGORIX_CONVERGE_FINISH_IDLE", 0),
-		ToolArchiveMinBytes:     envOrInt("XALGORIX_TOOL_ARCHIVE_MIN_BYTES", 1500),
-		ToolArchiveActiveWindow: envOrInt("XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", 8),
-		LLMContextWindow:        envOrInt("XALGORIX_LLM_CONTEXT_WINDOW", 128000),
-		ContextCompactRatio:     envOrFloat("XALGORIX_CONTEXT_COMPACT_RATIO", 0.75),
-		LLMTimeoutSeconds:       envOrInt("XALGORIX_LLM_TIMEOUT_SECONDS", 600),
-		NativeToolCalls:         envOrBool("XALGORIX_NATIVE_TOOL_CALLS", false),
-		MemCompTimeout:          envOrInt("XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", 30),
+		LLM:                      envOr("XALGORIX_LLM", ""),
+		LLMProvider:              envOr("XALGORIX_LLM_PROVIDER", ""),
+		APIBase:                  envOr("XALGORIX_API_BASE", ""),
+		APIKey:                   envOr("XALGORIX_API_KEY", ""),
+		APIKeys:                  ParseAPIKeyList(envOr("XALGORIX_API_KEYS", "")),
+		KeyPoolStrategy:          envOr("XALGORIX_KEY_POOL_STRATEGY", "roundrobin"),
+		DisableAutoDelegate:      envOrBool("XALGORIX_DISABLE_AUTO_DELEGATE", false),
+		DisabledSpecialists:      envOrStringSlice("XALGORIX_DISABLED_SPECIALISTS"),
+		Checklist:                envOrChecklist(envOr("XALGORIX_CHECKLIST", "full")),
+		LLMProfile:               envOr("XALGORIX_LLM_PROFILE", ""),
+		ReasoningEffort:          envOr("XALGORIX_REASONING_EFFORT", "high"),
+		Language:                 NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
+		OllamaCompatible:         envOrBool("XALGORIX_OLLAMA_COMPATIBLE", false),
+		Temperature:              envOrFloatPtr("XALGORIX_TEMPERATURE", 0.2),
+		LLMMaxRetries:            envOrInt("XALGORIX_LLM_MAX_RETRIES", 5),
+		MaxRateLimitWaitSec:      envOrInt("XALGORIX_MAX_RATE_LIMIT_WAIT", 30*60),
+		MaxOutputTokens:          envOrInt("XALGORIX_MAX_OUTPUT_TOKENS", 8192),
+		ContextCompactTokens:     envOrInt("XALGORIX_CONTEXT_COMPACT_TOKENS", -1),
+		RoleScopedTools:          envOrBool("XALGORIX_ROLE_SCOPED_TOOLS", false),
+		LeanToolSchema:           envOrBool("XALGORIX_LEAN_TOOL_SCHEMA", false),
+		AdvancePastStuckTasks:    envOrBool("XALGORIX_ADVANCE_PAST_STUCK", false),
+		MaxStuckAdvances:         envOrInt("XALGORIX_MAX_STUCK_ADVANCES", 3),
+		BoundedContext:           envOrBool("XALGORIX_BOUNDED_CONTEXT", false),
+		EpochCoverage:            envOrBool("XALGORIX_EPOCH_COVERAGE", false),
+		ConvergeReconcile:        envOrBool("XALGORIX_CONVERGE_RECONCILE", false),
+		EndpointHygiene:          envOrBool("XALGORIX_ENDPOINT_HYGIENE", false),
+		ConvergeFinish:           envOrBool("XALGORIX_CONVERGE_FINISH", false),
+		ConvergeFinishIdle:       envOrInt("XALGORIX_CONVERGE_FINISH_IDLE", 500),
+		ConvergeFinishLeadWindow: envOrInt("XALGORIX_CONVERGE_FINISH_LEAD_WINDOW", 100),
+		ToolArchiveMinBytes:      envOrInt("XALGORIX_TOOL_ARCHIVE_MIN_BYTES", 1500),
+		ToolArchiveActiveWindow:  envOrInt("XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", 8),
+		LLMContextWindow:         envOrInt("XALGORIX_LLM_CONTEXT_WINDOW", 128000),
+		ContextCompactRatio:      envOrFloat("XALGORIX_CONTEXT_COMPACT_RATIO", 0.75),
+		LLMTimeoutSeconds:        envOrInt("XALGORIX_LLM_TIMEOUT_SECONDS", 600),
+		NativeToolCalls:          envOrBool("XALGORIX_NATIVE_TOOL_CALLS", false),
+		MemCompTimeout:           envOrInt("XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", 30),
 
 		// Gemini content-filter posture (native Gemini API path only). Default
 		// BLOCK_NONE so authorized security-testing output is not refused;
