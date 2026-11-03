@@ -44,7 +44,10 @@ package agent
 // behavior is the legacy path byte-for-byte.
 
 import (
+	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
@@ -52,9 +55,26 @@ import (
 const (
 	// convergeFinishDefaultIdle is the no-new-finding tail (iterations) required
 	// at saturation before the principled finish fires. Counted only while the
-	// scan is saturated, so a still-productive scan (each new finding resets it)
-	// is never cut.
-	convergeFinishDefaultIdle = 150
+	// scan is saturated, so a still-productive scan (each new finding, and each
+	// new model-recorded hypothesis up to maxLeadIdleResets, resets it) is never
+	// cut. 150 proved too short on real targets, where findings are rare and a
+	// single lead can take well over 150 iterations to verify.
+	convergeFinishDefaultIdle = 500
+
+	// convergeFinishDefaultLeadWindow is the one-time verification window
+	// (iterations) granted when the tail elapses while the model still holds
+	// recent, high-confidence, unverified leads. It is bounded, so the scan
+	// still ends.
+	convergeFinishDefaultLeadWindow = 100
+
+	// leadConfidenceFloor is the minimum hypothesis confidence that counts as
+	// an active lead for the verification window.
+	leadConfidenceFloor = 0.7
+
+	// maxLeadIdleResets bounds how many times a NEW model-recorded hypothesis
+	// may restart the no-new-finding tail in one scan, so termination stays
+	// guaranteed.
+	maxLeadIdleResets = 5
 
 	// convergeFinishClassBreadth is the minimum fraction of required injection
 	// classes that must have been exercised target-wide (VulnClassesTested) before
@@ -156,11 +176,10 @@ func saturatedForFinish(state *ScanState) bool {
 	return classCoverageBreadth(state) >= convergeFinishClassBreadth
 }
 
-// closeSoftTasksForFinish closes every remaining soft task at a principled finish:
-// a task with a vuln class becomes DispositionCoverageSufficient (class exercised
-// target-wide; residual endpoints recorded), a class-less exploratory task becomes
-// DispositionCoverageComplete (not individually executed). Concrete blocking tasks
-// are never touched. Returns the number closed. Only reached when saturatedForFinish
+// closeSoftTasksForFinish closes every remaining soft task at a principled finish
+// as DispositionUntestedAtFinish, because it was not executed; phase summaries
+// and the completion assessment report it that way. A stuck auth lane stays
+// typed blocked/exhausted work. Concrete blocking tasks are never touched. Returns the number closed. Only reached when saturatedForFinish
 // held and the finding-idle tail elapsed.
 func closeSoftTasksForFinish(state *ScanState) int {
 	if state == nil || state.Plan == nil {
@@ -203,22 +222,19 @@ func closeSoftTasksForFinish(state *ScanState) int {
 				}
 			}
 		case t.Origin == "llm" && t.VulnClass != "" && strings.TrimSpace(t.Endpoint) != "":
-			// A model-planned endpoint-specific hypothesis the scan never executed
-			// (the class was still exercised target-wide; this exact endpoint was not
-			// individually retested). Recorded as a residual (endpoint, class) pair.
-			t.Disposition = DispositionCoverageSufficient
+			t.Disposition = DispositionUntestedAtFinish
 			if t.Notes == "" {
-				t.Notes = "engine: model-planned endpoint-specific test (" + t.VulnClass + ") not individually executed; class exercised target-wide, this endpoint recorded as residual at principled finish"
+				t.Notes = "engine: model-planned endpoint-specific test (" + t.VulnClass + ") was not executed; closed untested at the principled finish"
 			}
 		case t.VulnClass != "":
-			t.Disposition = DispositionCoverageSufficient
+			t.Disposition = DispositionUntestedAtFinish
 			if t.Notes == "" {
-				t.Notes = "engine: injection classes exercised across the target past the breadth threshold with no new findings; residual untested endpoints recorded in the report, closed at principled finish"
+				t.Notes = "engine: " + t.VulnClass + " task was not executed (the class was exercised elsewhere on the target); closed untested at the principled finish, residual endpoints recorded in telemetry"
 			}
 		default:
-			t.Disposition = DispositionCoverageComplete
+			t.Disposition = DispositionUntestedAtFinish
 			if t.Notes == "" {
-				t.Notes = "engine: systematic coverage complete; class-less exploratory task not individually executed, closed at principled finish"
+				t.Notes = "engine: exploratory task was not executed; closed untested at the principled finish"
 			}
 		}
 		closed++
@@ -259,18 +275,87 @@ func reconcileLedgerForFinish(state *ScanState) int {
 	return n
 }
 
-// hasCoverageSufficientTask reports whether the principled finish closed any
-// class task — used to decide whether to emit the residual block in telemetry.
-func hasCoverageSufficientTask(state *ScanState) bool {
+// untestedAtFinishCount returns how many plan tasks the principled finish closed
+// without executing them.
+func untestedAtFinishCount(state *ScanState) int {
 	if state == nil || state.Plan == nil {
-		return false
+		return 0
 	}
+	n := 0
 	for _, t := range state.Plan.Tasks {
-		if t.Disposition == DispositionCoverageSufficient {
-			return true
+		if isUntestedAtFinish(t) {
+			n++
 		}
 	}
-	return false
+	return n
+}
+
+// isModelRecordedHypothesis reports whether a ledger hypothesis was recorded by
+// the model itself (record_hypothesis from the coordinator or a specialist),
+// rather than generated by the engine from the plan, the discovered surface,
+// advisories, HAR imports or verifiers. Engine-generated candidates arrive by
+// the hundred, so only the model's own leads may restart the idle tail or hold
+// the verification window.
+func isModelRecordedHypothesis(h scanctx.Hypothesis) bool {
+	return h.Origin == "coordinator" || strings.HasPrefix(h.Origin, "agent_")
+}
+
+// modelHypothesisCount counts the model-recorded hypotheses in the ledger.
+func modelHypothesisCount(state *ScanState) int {
+	l := ledgerForState(state)
+	if l == nil {
+		return 0
+	}
+	n := 0
+	for _, h := range l.All() {
+		if isModelRecordedHypothesis(h) {
+			n++
+		}
+	}
+	return n
+}
+
+// activeVerificationLeads returns the model's recent, high-confidence leads that
+// are still unresolved: model-recorded hypotheses that are queued or testing,
+// at or above leadConfidenceFloor, and updated at or after since (a zero since
+// accepts any time). Highest confidence first.
+func activeVerificationLeads(state *ScanState, since time.Time) []scanctx.Hypothesis {
+	l := ledgerForState(state)
+	if l == nil {
+		return nil
+	}
+	var leads []scanctx.Hypothesis
+	for _, h := range l.All() {
+		if !isModelRecordedHypothesis(h) || h.Confidence < leadConfidenceFloor {
+			continue
+		}
+		if h.Status != scanctx.HypothesisQueued && h.Status != scanctx.HypothesisTesting {
+			continue
+		}
+		if !since.IsZero() && h.UpdatedAt.Before(since) {
+			continue
+		}
+		leads = append(leads, h)
+	}
+	sort.SliceStable(leads, func(i, j int) bool { return leads[i].Confidence > leads[j].Confidence })
+	return leads
+}
+
+// formatLeadList renders up to max leads as "H-1 (class /endpoint, 0.80)".
+func formatLeadList(leads []scanctx.Hypothesis, max int) string {
+	parts := make([]string, 0, len(leads))
+	for i, h := range leads {
+		if i == max {
+			parts = append(parts, fmt.Sprintf("+%d more", len(leads)-max))
+			break
+		}
+		loc := h.VulnClass
+		if h.Endpoint != "" {
+			loc += " " + h.Endpoint
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s, %.2f)", h.ID, loc, h.Confidence))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // routeTouchCounts returns, over the coverage denominator, how many routes carry

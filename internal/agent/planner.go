@@ -123,7 +123,24 @@ const (
 	// NOT a blocked_* state: it reads as a terminal "coverage sufficient, residual
 	// recorded" rather than failed or blocked work.
 	DispositionCoverageSufficient = "coverage_sufficient"
+
+	// DispositionUntestedAtFinish is ENGINE-SET only: the principled finish
+	// (XALGORIX_CONVERGE_FINISH) closed this task WITHOUT executing it once the
+	// scan was saturated and the no-new-finding tail elapsed. It replaces the
+	// coverage_sufficient / coverage_complete labels the principled finish used
+	// to write: "class exercised somewhere on the target" is not the same as
+	// "this task was tested", so phase summaries and the completion assessment
+	// report these tasks as untested residual, never as not-applicable or done.
+	DispositionUntestedAtFinish = "untested_at_finish"
 )
+
+// isUntestedAtFinish reports whether a task was closed by the principled finish
+// without being executed. Older checkpoints recorded the same closure as
+// coverage_sufficient, so that label is read the same way.
+func isUntestedAtFinish(t *Task) bool {
+	return t != nil && t.Status == TaskSkipped &&
+		(t.Disposition == DispositionUntestedAtFinish || t.Disposition == DispositionCoverageSufficient)
+}
 
 // vagueDispositionReasons are the shortcut rationalizations that cannot clear
 // an engine-owned coverage task. The model must state a concrete surface fact

@@ -155,6 +155,8 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_NO_TOOL_ABORT_AT", Label: "No-tool loop limit", Category: "Runtime", Description: "Consecutive assistant responses without a parsed tool call before cleanly stopping. Default 30; 0 disables this safety limit.", DefaultValue: "30", InputType: "number"},
 		{Key: "XALGORIX_MAX_WILDCARD_SUBDOMAINS", Label: "Wildcard subdomain cap", Category: "Runtime", Description: "Optional maximum full LLM sessions expanded from one wildcard target. Default -1 means unlimited; set a positive value only for an explicit emergency resource cap.", DefaultValue: "-1", InputType: "number"},
 		{Key: "XALGORIX_MAX_FINISH_REJECTIONS", Label: "Max finish rejections", Category: "Runtime", Description: "Number of times the agent's finish call will be rejected by the gatekeeper before allowing a deadlock bypass, enforcing deeper testing coverage.", DefaultValue: "15", InputType: "number"},
+		{Key: "XALGORIX_CONVERGE_FINISH_IDLE", Label: "Principled finish: no-finding tail (iterations)", Category: "Runtime", Description: "When the principled finish (XALGORIX_CONVERGE_FINISH) is on, a saturated scan finalizes after this many consecutive iterations without a new validated finding. Each new finding, and each new hypothesis the agent records (up to 5 times per scan), restarts the count. Higher values test longer before closing. Applies to new scans.", DefaultValue: "500", InputType: "number"},
+		{Key: "XALGORIX_CONVERGE_FINISH_LEAD_WINDOW", Label: "Principled finish: lead verification window (iterations)", Category: "Runtime", Description: "When the no-finding tail elapses while the agent still holds recent high-confidence unverified leads, it gets one final window of this many iterations to verify or reject them before the scan finalizes. -1 disables the window. Applies to new scans.", DefaultValue: "100", InputType: "number"},
 		{Key: "XALGORIX_MAX_CONCURRENT_AGENTS", Label: "Max concurrent subagents", Category: "Runtime", Description: "Maximum delegated specialist subagents executing simultaneously per scan. Set to 1 to run specialists serially one at a time. Default 3.", DefaultValue: "3", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_ITERATION_DELAY", Label: "Iteration delay (seconds)", Category: "Runtime", Description: "Pause in seconds between agent reasoning iterations. Paces LLM request velocity to stay within rolling-window provider rate limits. 0 disables delay (default). Takes effect immediately.", DefaultValue: "0", InputType: "number"},
 		{Key: "XALGORIX_MAX_TOOL_CALLS", Label: "Max tool calls (budget)", Category: "Runtime", Description: "Per-scan tool-call cap; the scan stops cleanly when reached (findings preserved). 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
@@ -840,6 +842,10 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.NoToolAbortAt = parseIntSetting(value, 30)
 		case "XALGORIX_MAX_FINISH_REJECTIONS":
 			s.cfg.MaxFinishRejections = parseIntSetting(value, 15)
+		case "XALGORIX_CONVERGE_FINISH_IDLE":
+			s.cfg.ConvergeFinishIdle = parseIntSetting(value, 500)
+		case "XALGORIX_CONVERGE_FINISH_LEAD_WINDOW":
+			s.cfg.ConvergeFinishLeadWindow = parseIntSetting(value, 100)
 		case "XALGORIX_WORKSPACE":
 			if value != "" {
 				s.cfg.Workspace = value
@@ -988,6 +994,10 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.Itoa(s.cfg.NoToolAbortAt)
 	case "XALGORIX_MAX_FINISH_REJECTIONS":
 		return strconv.Itoa(s.cfg.MaxFinishRejections)
+	case "XALGORIX_CONVERGE_FINISH_IDLE":
+		return strconv.Itoa(s.cfg.ConvergeFinishIdle)
+	case "XALGORIX_CONVERGE_FINISH_LEAD_WINDOW":
+		return strconv.Itoa(s.cfg.ConvergeFinishLeadWindow)
 	case "XALGORIX_WORKSPACE":
 		return s.cfg.Workspace
 	case "XALGORIX_DISABLE_BROWSER":
@@ -1203,6 +1213,14 @@ func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, e
 		return strconv.Itoa(clampInt(parseIntSetting(value, -1), -1, 1000)), nil
 	case "XALGORIX_MAX_FINISH_REJECTIONS":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 15), 1, 100)), nil
+	case "XALGORIX_CONVERGE_FINISH_IDLE":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 500), 50, 5000)), nil
+	case "XALGORIX_CONVERGE_FINISH_LEAD_WINDOW":
+		v := parseIntSetting(value, 100)
+		if v < 0 {
+			return "-1", nil
+		}
+		return strconv.Itoa(clampInt(v, 0, 1000)), nil
 	case "XALGORIX_MAX_CONCURRENT_AGENTS":
 		return strconv.Itoa(clampInt(parseIntSetting(value, 3), 1, 10)), nil
 	case "XALGORIX_ITERATION_DELAY":

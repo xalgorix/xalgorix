@@ -6,6 +6,7 @@ type assessmentSnapshot struct {
 	WorkedPhases                          []int
 	Phases                                map[int]PhaseDisposition
 	Completion                            string
+	StopReason                            string
 }
 
 // publishAssessmentSnapshot runs at owner-loop safe points. Web consumers
@@ -14,7 +15,7 @@ func (a *Agent) publishAssessmentSnapshot() {
 	if a.state == nil {
 		return
 	}
-	snapshot := &assessmentSnapshot{Completion: a.state.CompletionStatus, Phases: ComputePhaseDispositions(a.state)}
+	snapshot := &assessmentSnapshot{Completion: a.state.CompletionStatus, StopReason: a.state.CompletionStopReason, Phases: ComputePhaseDispositions(a.state)}
 	if plan := a.state.Plan; plan != nil {
 		snapshot.PlanPresent = true
 		snapshot.Total = len(plan.Tasks)

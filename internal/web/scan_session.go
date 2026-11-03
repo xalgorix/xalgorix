@@ -1272,7 +1272,14 @@ func (s *Server) finalizeScanSessionRecord(sess *scanSession) bool {
 		// preserved, but the record must never read as full coverage.
 		sess.record.Completion = "partial"
 		if sess.record.StopReason == "" {
-			sess.record.StopReason = "finish_gate_exhausted"
+			// Typed reason from the engine (finish_gate_exhausted, or
+			// untested_at_finish when a principled finish closed plan work
+			// unexecuted with no validated finding).
+			reason := sess.agent.CompletionStopReason()
+			if reason == "" {
+				reason = agent.StopReasonFinishGateExhausted
+			}
+			sess.record.StopReason = reason
 		}
 	}
 	// Final plan dispositions: the completion label alone cannot express what

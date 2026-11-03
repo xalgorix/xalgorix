@@ -88,11 +88,11 @@ func TestCloseSoftTasksForFinish(t *testing.T) {
 	st := &ScanState{
 		Plan: &Plan{Tasks: []*Task{
 			{ID: "recon", Status: TaskPending},                                                          // foundational blocker: untouched
-			{ID: "h", VulnClass: "sqli", Origin: "llm", Endpoint: "/login", Status: TaskPending},        // specific-endpoint hypothesis → closes as residual
-			{ID: "t-sqli", VulnClass: "sqli", Origin: "auto", Status: TaskPending},                      // soft class → coverage_sufficient
+			{ID: "h", VulnClass: "sqli", Origin: "llm", Endpoint: "/login", Status: TaskPending},        // specific-endpoint hypothesis → untested residual
+			{ID: "t-sqli", VulnClass: "sqli", Origin: "auto", Status: TaskPending},                      // soft class → untested_at_finish
 			{ID: "t-redos", VulnClass: "redos", WholeTarget: true, Origin: "auto", Status: TaskPending}, // soft class
 			{ID: "auth-session", VulnClass: "auth", Status: TaskActive},                                 // soft auth → blocked_missing_auth
-			{ID: "explore", VulnClass: "", Status: TaskPending},                                         // class-less → coverage_complete
+			{ID: "explore", VulnClass: "", Status: TaskPending},                                         // class-less → untested_at_finish
 			{ID: "done", VulnClass: "xss", Origin: "auto", Status: TaskCompleted},                       // already terminal: untouched
 		}},
 	}
@@ -107,20 +107,16 @@ func TestCloseSoftTasksForFinish(t *testing.T) {
 	if by["recon"].Status != TaskPending {
 		t.Error("recon (foundational blocker) must be left pending")
 	}
-	if by["h"].Status != TaskSkipped || by["h"].Disposition != DispositionCoverageSufficient {
-		t.Errorf("specific-endpoint hypothesis = %v/%q, want skipped/coverage_sufficient (residual)", by["h"].Status, by["h"].Disposition)
-	}
-	if by["t-sqli"].Status != TaskSkipped || by["t-sqli"].Disposition != DispositionCoverageSufficient {
-		t.Errorf("t-sqli = %v/%q, want skipped/coverage_sufficient", by["t-sqli"].Status, by["t-sqli"].Disposition)
+	for _, id := range []string{"h", "t-sqli", "t-redos", "explore"} {
+		if by[id].Status != TaskSkipped || by[id].Disposition != DispositionUntestedAtFinish {
+			t.Errorf("%s = %v/%q, want skipped/untested_at_finish (closed without execution)", id, by[id].Status, by[id].Disposition)
+		}
 	}
 	if by["auth-session"].Disposition != DispositionBlockedMissingAuth {
 		t.Errorf("auth-session disposition = %q, want blocked_missing_auth", by["auth-session"].Disposition)
 	}
-	if by["explore"].Disposition != DispositionCoverageComplete {
-		t.Errorf("explore disposition = %q, want coverage_complete", by["explore"].Disposition)
-	}
-	if !hasCoverageSufficientTask(st) {
-		t.Error("hasCoverageSufficientTask should be true after close")
+	if n := untestedAtFinishCount(st); n != 4 {
+		t.Errorf("untestedAtFinishCount = %d, want 4 (auth-session stays typed blocked work)", n)
 	}
 	// auth-session WITH an auth context closes as exhausted, not blocked.
 	st2 := &ScanState{AuthContextAvailable: true, Plan: &Plan{Tasks: []*Task{

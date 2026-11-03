@@ -176,6 +176,9 @@ type ScanState struct {
 	// "completed_with_blocked_work", or "incomplete". Finish-gate exhaustion
 	// can no longer masquerade as a successful assessment.
 	CompletionStatus string
+	// CompletionStopReason is the typed reason an "incomplete" assessment
+	// carries to the scan record (finish_gate_exhausted, untested_at_finish).
+	CompletionStopReason string
 
 	// Coverage counters — track UNIQUE endpoints per test category.
 	// These replace the old boolean flags (InjectionTested, etc.) which
@@ -270,6 +273,23 @@ type ScanState struct {
 	// resets it to 0.
 	FindingIdleIterations int
 	LastFindingCount      int
+	// FindingIdleSince is when the current finding-idle tail started; leads
+	// touched after it count as recent for the verification window.
+	FindingIdleSince time.Time
+	// LastModelHypothesisCount is the number of model-recorded hypotheses seen
+	// by the finalizer; a higher count means the model queued a new lead.
+	LastModelHypothesisCount int
+	// LeadIdleResets counts tail restarts caused by new model-recorded
+	// hypotheses (bounded by maxLeadIdleResets).
+	LeadIdleResets int
+	// LeadWindowStartIteration is the iteration the one-time verification
+	// window opened (0 = never opened); LeadWindowSince is the recency cutoff
+	// of the leads it was opened for.
+	LeadWindowStartIteration int
+	LeadWindowSince          time.Time
+	// UnverifiedLeadsAtFinish lists the model's open high-confidence leads as
+	// they stood just before the principled finish settled the ledger.
+	UnverifiedLeadsAtFinish string
 
 	// Blocked-call loop detection. The three block guards (activity policy,
 	// phase restriction, out-of-scope) short-circuit the dispatch BEFORE the

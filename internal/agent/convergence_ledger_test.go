@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
 func TestReconcileLedgerForFinish(t *testing.T) {
@@ -37,13 +38,20 @@ func TestReconcileLedgerForFinish(t *testing.T) {
 }
 
 // End-to-end: a principled-finished scan (plan tasks closed) reads "incomplete"
-// while a claimed hypothesis dangles, and "completed" once reconciled.
+// while a claimed hypothesis dangles, and "completed" once reconciled. The scan
+// has a validated finding, so the untested-at-finish rule (zero findings) is
+// not what decides the status here.
 func TestReconcileLedgerMakesAssessmentCompleted(t *testing.T) {
 	ctx, st := newTestCtxState(t)
 	st.ConvergeFinish = true
 	st.Plan = &Plan{Tasks: []*Task{
-		{ID: "t-sqli", VulnClass: "sqli", Status: TaskSkipped, Disposition: DispositionCoverageSufficient},
+		{ID: "t-sqli", VulnClass: "sqli", Status: TaskSkipped, Disposition: DispositionUntestedAtFinish},
 	}}
+	if err := reporting.RestoreContext(ctx.ID, t.TempDir(), []reporting.Vulnerability{
+		{ID: "XALG-1", Title: "SQLi", Target: "https://t.invalid", Endpoint: "/q", Method: "GET"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	ctx.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Status: scanctx.HypothesisTesting})
 
 	if s, reasons := scanCompletionAssessment(st); s != CompletionStatusIncomplete {

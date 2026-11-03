@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
+	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
 // Terminal scan completion states.
@@ -28,6 +30,47 @@ const (
 	CompletionStatusCompletedWithBlocked = "completed_with_blocked_work"
 	CompletionStatusIncomplete           = "incomplete"
 )
+
+// Typed stop reasons an incomplete assessment carries to the scan record.
+const (
+	StopReasonFinishGateExhausted = "finish_gate_exhausted"
+	StopReasonUntestedAtFinish    = "untested_at_finish"
+)
+
+// completionStopReason maps incomplete-assessment reasons to the typed stop
+// reason recorded on the scan ("" when none applies). Gate exhaustion wins.
+func completionStopReason(reasons []string) string {
+	for _, prefix := range []string{StopReasonFinishGateExhausted, StopReasonUntestedAtFinish} {
+		for _, r := range reasons {
+			if strings.HasPrefix(r, prefix+":") {
+				return prefix
+			}
+		}
+	}
+	return ""
+}
+
+// validatedFindingCount is the number of reported findings for the scan.
+func validatedFindingCount(state *ScanState) int {
+	if state == nil || state.ScanContextID == "" {
+		return 0
+	}
+	return len(reporting.GetVulnerabilitiesForContext(state.ScanContextID))
+}
+
+// settleCompletion computes the terminal assessment and records it on the
+// state (status and typed stop reason). Both finish paths use it.
+func settleCompletion(state *ScanState) (string, []string) {
+	status, reasons := scanCompletionAssessment(state)
+	if state != nil {
+		state.CompletionStatus = status
+		state.CompletionStopReason = ""
+		if status == CompletionStatusIncomplete {
+			state.CompletionStopReason = completionStopReason(reasons)
+		}
+	}
+	return status, reasons
+}
 
 // defaultMaxFinishRejections mirrors hookFinishGatekeeper's fallback.
 const defaultMaxFinishRejections = 15
@@ -80,7 +123,16 @@ func scanCompletionAssessment(state *ScanState) (string, []string) {
 		maxRej = defaultMaxFinishRejections
 	}
 	if state.FinishAttempts > maxRej {
-		reasons = append(reasons, "finish_gate_exhausted: gates released the finish after the bounded rejection ceiling")
+		reasons = append(reasons, StopReasonFinishGateExhausted+": gates released the finish after the bounded rejection ceiling")
+	}
+
+	// Principled finish that closed plan work WITHOUT executing it and has no
+	// validated finding: a zero-finding report must not read as full coverage
+	// of a plan that was mostly never run.
+	if !state.DelegatedAgent {
+		if untested := untestedAtFinishCount(state); untested > 0 && validatedFindingCount(state) == 0 {
+			reasons = append(reasons, fmt.Sprintf("%s: %d plan task(s) were closed without being executed at the principled finish and no finding was validated", StopReasonUntestedAtFinish, untested))
+		}
 	}
 
 	if len(reasons) == 0 {
@@ -172,17 +224,28 @@ func scanTelemetrySummary(state *ScanState, status string, reasons []string) str
 	fmt.Fprintf(&b, "tested endpoint×class pairs: %d (endpoints discovered: %d, tested: %d)\n",
 		pairs, len(state.DiscoveredEndpoints), len(state.EndpointsTested))
 
-	// Principled-finish residual: when the scan closed per-endpoint class tasks as
-	// coverage-sufficient, record the (route,class) pairs that were NOT
-	// individually retested, so the diminishing-returns tradeoff is transparent in
-	// the report rather than silent. The class itself was exercised across the
-	// surface; these are the specific untested endpoints.
-	if hasCoverageSufficientTask(state) {
+	// Principled-finish residual: when the scan closed plan tasks without
+	// executing them, say how many and record the (route,class) pairs that were
+	// NOT tested, so the tradeoff is transparent rather than silent.
+	if untested := untestedAtFinishCount(state); untested > 0 {
 		touched, applicable := routeTouchCounts(state)
-		fmt.Fprintf(&b, "principled finish: route coverage %d/%d applicable injectable routes tested\n", touched, applicable)
+		fmt.Fprintf(&b, "principled finish: %d plan task(s) closed untested; route coverage %d/%d applicable injectable routes tested\n", untested, touched, applicable)
 		if gaps := CoverageGaps(state, coverageDenominator(state)); len(gaps) > 0 {
-			fmt.Fprintf(&b, "coverage residual (class exercised target-wide; these endpoints not individually retested):\n%s", FormatGaps(gaps))
+			fmt.Fprintf(&b, "coverage residual (not tested on these endpoints):\n%s", FormatGaps(gaps))
 		}
+	}
+	if state.LeadIdleResets > 0 || state.LeadWindowStartIteration > 0 {
+		fmt.Fprintf(&b, "lead handling: idle-tail restarts from new model hypotheses %d/%d; verification window opened at iteration %d\n",
+			state.LeadIdleResets, maxLeadIdleResets, state.LeadWindowStartIteration)
+	}
+	unverified := state.UnverifiedLeadsAtFinish
+	if unverified == "" {
+		if leads := activeVerificationLeads(state, time.Time{}); len(leads) > 0 {
+			unverified = formatLeadList(leads, 8)
+		}
+	}
+	if unverified != "" {
+		fmt.Fprintf(&b, "unverified leads at finish (manual follow-up recommended): %s\n", unverified)
 	}
 
 	// Skills.
