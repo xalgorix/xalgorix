@@ -2373,7 +2373,11 @@ func (a *Agent) Run(targets []string, instruction string) {
 					if a.scanCtx != nil {
 						contextID = a.scanCtx.ID
 					}
-					normalized, note := terminal.NormalizeCommandForRequestRatePolicy(contextID, command)
+					// Fix options the tool would reject first, so the rate policy
+					// then caps the real flag (e.g. arjun --threads → -t).
+					normalized, flagNote := terminal.NormalizeToolFlags(command)
+					normalized, note := terminal.NormalizeCommandForRequestRatePolicy(contextID, normalized)
+					note = flagNote + note
 					normalized = terminal.InjectScanHeadersIntoCommand(normalized)
 					normalized = terminal.CapDirbusterRuntime(normalized)
 					if normalized != command {

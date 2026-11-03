@@ -17,7 +17,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	egressproxy "github.com/xalgord/xalgorix/v4/internal/proxy"
@@ -124,7 +123,7 @@ func computeTimeout(command string) time.Duration {
 
 func contentDiscoveryCommandTimeout(command string) (time.Duration, bool) {
 	limitSeconds := dirbusterRuntimeCapSeconds
-	if hasToolCommand(command, "ffuf") {
+	if commandInvokesTool(command, "ffuf") {
 		if match := flagValueRegexp("-maxtime").FindStringSubmatch(command); len(match) >= 3 {
 			if explicit, err := strconv.Atoi(match[2]); err == nil && explicit > 0 && explicit < limitSeconds {
 				limitSeconds = explicit
@@ -133,7 +132,7 @@ func contentDiscoveryCommandTimeout(command string) (time.Duration, bool) {
 		return time.Duration(limitSeconds)*time.Second + dirbusterGrace, true
 	}
 	for _, tool := range []string{"gobuster", "feroxbuster", "dirsearch", "dirb"} {
-		if hasToolCommand(command, tool) {
+		if commandInvokesTool(command, tool) {
 			return time.Duration(limitSeconds)*time.Second + dirbusterGrace, true
 		}
 	}
@@ -212,58 +211,6 @@ func hasCommandFlag(command, flag string) bool {
 	return re.FindStringIndex(command) != nil
 }
 
-func rewriteShellSegments(command string, rewrite func(string) string) string {
-	var b strings.Builder
-	start := 0
-	var quote rune
-	escaped := false
-	i := 0
-	for i < len(command) {
-		r, size := utf8.DecodeRuneInString(command[i:])
-		if escaped {
-			escaped = false
-			i += size
-			continue
-		}
-		if r == '\\' && quote != '\'' {
-			escaped = true
-			i += size
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
-			i += size
-			continue
-		}
-		if r == '\'' || r == '"' {
-			quote = r
-			i += size
-			continue
-		}
-		delimiterLen := 0
-		if r == ';' || r == '|' {
-			delimiterLen = 1
-			if r == '|' && i+1 < len(command) && command[i+1] == '|' {
-				delimiterLen = 2
-			}
-		} else if r == '&' && i+1 < len(command) && command[i+1] == '&' {
-			delimiterLen = 2
-		}
-		if delimiterLen == 0 {
-			i += size
-			continue
-		}
-		b.WriteString(rewrite(command[start:i]))
-		b.WriteString(command[i : i+delimiterLen])
-		start = i + delimiterLen
-		i = start
-	}
-	b.WriteString(rewrite(command[start:]))
-	return b.String()
-}
-
 // rateExemptDiscoveryTools are subdomain-discovery / liveness-probing tools that
 // are EXEMPT from the request-rate rewrite. They either hit third-party sources
 // (passive subdomain enumeration) or fan out a single request across thousands
@@ -340,18 +287,30 @@ func rewriteCommandSegmentForRequestRatePolicy(segment string, policy scanctx.Re
 	if hasToolCommand(rewritten, "parallel") {
 		rewritten = setParallelJobs(rewritten, "1")
 	}
-	for _, tool := range []string{"gau", "hakrawler", "gospider", "arjun", "subjack"} {
-		if hasToolCommand(rewritten, tool) {
-			rewritten = capFlagValue(rewritten, []string{"--threads", "-threads", "-t", "--concurrent"}, rate)
+	if hasToolCommand(rewritten, "arjun") {
+		// arjun has no --threads option (argparse rejects the whole command);
+		// its knobs are -t THREADS and --rate-limit (requests per second). -t
+		// is matched case-sensitively because arjun's -T is the HTTP timeout.
+		rewritten = setFlagValue(rewritten, []string{"--rate-limit"}, rate)
+		rewritten = capExactFlagValue(rewritten, "-t", rate)
+	}
+	// Thread flags each tool actually accepts; the first entry is the one
+	// appended when none is present, so it must be valid for that tool.
+	for _, tf := range []struct {
+		tool  string
+		flags []string
+	}{
+		{"gau", []string{"--threads"}},
+		{"hakrawler", []string{"-t"}},
+		{"gospider", []string{"-t", "--threads", "--concurrent"}},
+		{"subjack", []string{"-t"}},
+	} {
+		if hasToolCommand(rewritten, tf.tool) {
+			rewritten = capFlagValue(rewritten, tf.flags, rate)
 		}
 	}
 
 	return rewritten
-}
-
-func hasToolCommand(segment, tool string) bool {
-	re := regexp.MustCompile(`(?i)(^|[\s(])(?:sudo\s+)?` + regexp.QuoteMeta(tool) + `($|[\s])`)
-	return re.FindStringIndex(segment) != nil
 }
 
 func replaceNmapTiming(command string) string {
@@ -444,13 +403,81 @@ func flagValueRegexp(flag string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)(^|\s)` + regexp.QuoteMeta(flag) + `(?:=|\s+)([^\s;&|]+)`)
 }
 
+// appendCommandArg adds arg to the end of a simple command's arguments. It is
+// inserted before a trailing "# comment" (where the shell would ignore it) and
+// before closing parens that belong to an enclosing subshell, e.g. the ")" of
+// "(cd dir && ffuf ...)".
 func appendCommandArg(command string, arg string) string {
-	trimmed := strings.TrimRight(command, " \t")
-	trailing := command[len(trimmed):]
-	if strings.TrimSpace(trimmed) == "" {
+	if strings.TrimSpace(command) == "" {
 		return command
 	}
-	return trimmed + " " + arg + trailing
+	end := len(command)
+	if idx := trailingCommentIndex(command); idx >= 0 {
+		end = idx
+	}
+	body := strings.TrimRight(command[:end], " \t\r")
+	for unmatched := unmatchedClosingParens(body); unmatched > 0 && strings.HasSuffix(body, ")"); unmatched-- {
+		body = strings.TrimRight(body[:len(body)-1], " \t")
+	}
+	insertAt := len(body)
+	if strings.TrimSpace(body) == "" {
+		return command
+	}
+	return command[:insertAt] + " " + arg + command[insertAt:]
+}
+
+// unmatchedClosingParens counts unquoted ")" with no matching "(" in s.
+func unmatchedClosingParens(s string) int {
+	var quote rune
+	escaped := false
+	depth, unmatched := 0, 0
+	for _, r := range s {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			quote = r
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			} else {
+				unmatched++
+			}
+		}
+	}
+	return unmatched
+}
+
+// capExactFlagValue caps a numeric flag matched CASE-SENSITIVELY (for tools
+// where -t and -T are different options), appending it when absent.
+func capExactFlagValue(command, flag, maxValue string) string {
+	maxInt, err := strconv.Atoi(maxValue)
+	if err != nil || maxInt <= 0 {
+		return command
+	}
+	re := regexp.MustCompile(`(^|\s)` + regexp.QuoteMeta(flag) + `(?:=|\s+)([^\s;&|]+)`)
+	match := re.FindStringSubmatch(command)
+	if len(match) < 3 {
+		return appendCommandArg(command, flag+" "+maxValue)
+	}
+	if current, err := strconv.Atoi(match[2]); err == nil && current > 0 && current <= maxInt {
+		return command
+	}
+	return re.ReplaceAllString(command, "${1}"+flag+" "+maxValue)
 }
 
 func collapseCommandSpaces(command string) string {
@@ -1420,7 +1447,9 @@ func runShellInternal(contextID string, command string) (string, int) {
 	}
 
 	// Compute timeout based on command type
-	cleanCmd, ratePolicyNotice := NormalizeCommandForRequestRatePolicy(contextID, command)
+	flagFixedCmd, toolFlagNotice := NormalizeToolFlags(command)
+	cleanCmd, ratePolicyNotice := NormalizeCommandForRequestRatePolicy(contextID, flagFixedCmd)
+	ratePolicyNotice = toolFlagNotice + ratePolicyNotice
 	boundedCmd := CapDirbusterRuntime(cleanCmd)
 	dirbusterNotice := ""
 	if boundedCmd != cleanCmd {
