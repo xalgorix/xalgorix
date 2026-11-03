@@ -121,22 +121,84 @@ func computeTimeout(command string) time.Duration {
 	return defaultCmdTimeout
 }
 
+var contentDiscoveryTools = []string{"ffuf", "gobuster", "feroxbuster", "dirsearch", "dirb"}
+
+// contentDiscoveryCommandTimeout bounds a command that runs a content-discovery
+// tool. One run gets its own runtime cap plus a grace period. Several runs get
+// that per run, and a loop, xargs or parallel fan-out (whose run count is not
+// known up front) gets the heavy-tool deadline: each run is already bounded by
+// its own -maxtime/--time-limit rewrite, so one shared 195 s deadline only
+// killed the loop after its first runs.
 func contentDiscoveryCommandTimeout(command string) (time.Duration, bool) {
+	invoked := false
+	for _, tool := range contentDiscoveryTools {
+		if commandInvokesTool(command, tool) {
+			invoked = true
+			break
+		}
+	}
+	if !invoked {
+		return 0, false
+	}
+	runs, repeated := contentDiscoveryRuns(command)
+	if repeated {
+		return heavyCmdTimeout, true
+	}
 	limitSeconds := dirbusterRuntimeCapSeconds
-	if commandInvokesTool(command, "ffuf") {
+	if runs <= 1 && commandInvokesTool(command, "ffuf") {
 		if match := flagValueRegexp("-maxtime").FindStringSubmatch(command); len(match) >= 3 {
 			if explicit, err := strconv.Atoi(match[2]); err == nil && explicit > 0 && explicit < limitSeconds {
 				limitSeconds = explicit
 			}
 		}
-		return time.Duration(limitSeconds)*time.Second + dirbusterGrace, true
 	}
-	for _, tool := range []string{"gobuster", "feroxbuster", "dirsearch", "dirb"} {
-		if commandInvokesTool(command, tool) {
-			return time.Duration(limitSeconds)*time.Second + dirbusterGrace, true
+	perRun := time.Duration(limitSeconds)*time.Second + dirbusterGrace
+	if runs > 1 {
+		if total := perRun * time.Duration(runs); total < heavyCmdTimeout {
+			return total, true
+		}
+		return heavyCmdTimeout, true
+	}
+	return perRun, true
+}
+
+// contentDiscoveryRuns counts the simple commands that run a content-discovery
+// tool, and reports whether any of them repeats: inside a for/while/until/
+// select loop body, or under xargs or parallel.
+func contentDiscoveryRuns(command string) (runs int, repeated bool) {
+	loopDepth := 0
+	for _, simple := range shellSegments(command) {
+		if fields := strings.Fields(simple); len(fields) > 0 {
+			switch strings.TrimLeft(fields[0], "({") {
+			case "for", "while", "until", "select":
+				loopDepth++
+			case "done":
+				if loopDepth > 0 {
+					loopDepth--
+				}
+			}
+		}
+		chain := invokedCommandChain(simple)
+		for i, name := range chain {
+			if !containsString(contentDiscoveryTools, name) {
+				continue
+			}
+			runs++
+			if loopDepth > 0 || containsString(chain[:i], "xargs") || containsString(chain[:i], "parallel") {
+				repeated = true
+			}
 		}
 	}
-	return 0, false
+	return runs, repeated
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeCommandForRequestRatePolicy rewrites known scanner flags so terminal
@@ -337,7 +399,7 @@ func setFlagValue(command string, flags []string, value string) string {
 }
 
 func setShortFlagValue(command string, flag string, value string) string {
-	sticky := regexp.MustCompile(`(?i)(^|\s)` + regexp.QuoteMeta(flag) + `[0-9]+($|\s)`)
+	sticky := regexp.MustCompile(flagCaseMode(flag) + `(^|\s)` + regexp.QuoteMeta(flag) + `[0-9]+($|\s)`)
 	if sticky.FindStringIndex(command) != nil {
 		return sticky.ReplaceAllString(command, "${1}"+flag+" "+value+"${2}")
 	}
@@ -345,7 +407,7 @@ func setShortFlagValue(command string, flag string, value string) string {
 }
 
 func setExistingShortFlagValue(command string, flag string, value string) string {
-	sticky := regexp.MustCompile(`(?i)(^|\s)` + regexp.QuoteMeta(flag) + `[0-9]+($|\s)`)
+	sticky := regexp.MustCompile(flagCaseMode(flag) + `(^|\s)` + regexp.QuoteMeta(flag) + `[0-9]+($|\s)`)
 	if sticky.FindStringIndex(command) != nil {
 		return sticky.ReplaceAllString(command, "${1}"+flag+" "+value+"${2}")
 	}
@@ -360,7 +422,7 @@ func setParallelJobs(command string, value string) string {
 	if flagValueRegexp("--jobs").FindStringIndex(command) != nil {
 		return setFlagValue(command, []string{"--jobs"}, value)
 	}
-	if regexp.MustCompile(`(?i)(^|\s)-j(?:[0-9]+|\s+[0-9]+)($|\s)`).FindStringIndex(command) != nil {
+	if regexp.MustCompile(`(^|\s)-j(?:[0-9]+|\s+[0-9]+)($|\s)`).FindStringIndex(command) != nil {
 		return setShortFlagValue(command, "-j", value)
 	}
 	option := "--jobs " + value
@@ -400,7 +462,19 @@ func removeFlagWithValue(command string, flags []string) string {
 }
 
 func flagValueRegexp(flag string) *regexp.Regexp {
-	return regexp.MustCompile(`(?i)(^|\s)` + regexp.QuoteMeta(flag) + `(?:=|\s+)([^\s;&|]+)`)
+	return regexp.MustCompile(flagCaseMode(flag) + `(^|\s)` + regexp.QuoteMeta(flag) + `(?:=|\s+)([^\s;&|]+)`)
+}
+
+// flagCaseMode returns the regexp case flag for matching a command-line flag.
+// Single-letter short flags are case-sensitive: case usually selects a
+// different option (feroxbuster -t threads vs -T timeout, xargs -P
+// parallelism vs -p prompt), and folding it rewrote the wrong option. Longer
+// flags still match case-insensitively.
+func flagCaseMode(flag string) string {
+	if len(flag) == 2 && flag[0] == '-' {
+		return ""
+	}
+	return "(?i)"
 }
 
 // appendCommandArg adds arg to the end of a simple command's arguments. It is

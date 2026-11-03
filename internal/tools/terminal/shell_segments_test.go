@@ -145,3 +145,41 @@ func TestRatePolicyArjunUsesRealFlags(t *testing.T) {
 		t.Errorf("which arjun was rewritten: %q", got)
 	}
 }
+
+// << inside (( )) or $(( )) is a left shift, not a here-document: treating it
+// as one swallowed the rest of the script as a body, so later tool lines were
+// never rewritten.
+func TestShellSegmentsArithmeticShiftIsNotHeredoc(t *testing.T) {
+	for _, cmd := range []string{
+		"n=$((1 << 4))\nffuf -u https://t.test/FUZZ -w w.txt",
+		"(( mask = 1<<3 ))\nffuf -u https://t.test/FUZZ -w w.txt",
+	} {
+		segs := shellSegments(cmd)
+		if len(segs) != 2 || !strings.Contains(segs[1], "ffuf") {
+			t.Errorf("shellSegments(%q) = %q, want the ffuf line as its own segment", cmd, segs)
+		}
+	}
+	// A real here-document body is still copied through, not split.
+	segs := shellSegments("cat <<EOF > f\nffuf -u x\nEOF\nnuclei -u https://t.test")
+	if want := []string{"cat <<EOF > f", "nuclei -u https://t.test"}; !reflect.DeepEqual(segs, want) {
+		t.Errorf("here-document handling changed: %q", segs)
+	}
+}
+
+// Single-letter flags are case-sensitive: feroxbuster -T is the timeout and
+// xargs -p is the interactive prompt, so capping -t / -P must not touch them.
+func TestRatePolicyShortFlagsAreCaseSensitive(t *testing.T) {
+	id := withRatePolicy(t, 5)
+	got, _ := NormalizeCommandForRequestRatePolicy(id, "feroxbuster -u https://t.test -T 7 -t 50")
+	if !strings.Contains(got, "-T 7") || !strings.Contains(got, "-t 5") || strings.Count(got, "-t 5") != 1 {
+		t.Errorf("feroxbuster -T/-t rewrite = %q, want -T 7 kept and -t capped once", got)
+	}
+	got, _ = NormalizeCommandForRequestRatePolicy(id, "cat hosts | xargs -p -I{} curl -s {}")
+	if !strings.Contains(got, "xargs -p -I{} curl") {
+		t.Errorf("xargs -p (prompt) was rewritten: %q", got)
+	}
+	got, _ = NormalizeCommandForRequestRatePolicy(id, "cat hosts | xargs -P8 -I{} curl -s {}")
+	if !strings.Contains(got, "-P 1") {
+		t.Errorf("xargs -P8 not capped: %q", got)
+	}
+}

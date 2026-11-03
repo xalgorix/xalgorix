@@ -77,6 +77,13 @@ func TestContentDiscoveryCommandTimeout(t *testing.T) {
 		{name: "ffuf default cap", cmd: "ffuf -u http://t/FUZZ -w wl.txt", want: 195 * time.Second, ok: true},
 		{name: "gobuster process backstop", cmd: "gobuster dir -u http://t -w wl.txt", want: 195 * time.Second, ok: true},
 		{name: "ordinary command", cmd: "curl -sk http://t", ok: false},
+		// Each run is bounded by its own -maxtime; the command deadline covers
+		// all of them instead of killing the loop after the first.
+		{name: "two sequential ffuf runs", cmd: "ffuf -u http://t/a/FUZZ -w w.txt; ffuf -u http://t/b/FUZZ -w w.txt", want: 390 * time.Second, ok: true},
+		{name: "ffuf in a for loop", cmd: "for p in a b c d; do ffuf -u http://t/$p/FUZZ -w w.txt -maxtime 60; done", want: heavyCmdTimeout, ok: true},
+		{name: "ffuf in a while-read loop", cmd: "while read u; do\n  ffuf -u $u/FUZZ -w w.txt\ndone < urls.txt", want: heavyCmdTimeout, ok: true},
+		{name: "ffuf under xargs", cmd: "cat urls | xargs -I{} ffuf -u {}/FUZZ -w w.txt", want: heavyCmdTimeout, ok: true},
+		{name: "loop before a single ffuf", cmd: "for p in a b; do echo $p; done; ffuf -u http://t/FUZZ -w w.txt", want: 195 * time.Second, ok: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

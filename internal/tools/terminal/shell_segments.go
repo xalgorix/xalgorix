@@ -24,6 +24,9 @@ func rewriteShellSegments(command string, rewrite func(string) string) string {
 	var quote rune
 	escaped := false
 	var heredocs []heredocSpec
+	// arith counts open (( ... )) / $(( ... )) arithmetic, where << is a
+	// left shift rather than a here-document operator.
+	arith := 0
 	i := 0
 	for i < len(command) {
 		r, size := utf8.DecodeRuneInString(command[i:])
@@ -59,7 +62,17 @@ func rewriteShellSegments(command string, rewrite func(string) string) string {
 			}
 			continue
 		}
-		if r == '<' && strings.HasPrefix(command[i:], "<<") && !strings.HasPrefix(command[i:], "<<<") {
+		if r == '(' && strings.HasPrefix(command[i:], "((") {
+			arith++
+			i += 2
+			continue
+		}
+		if r == ')' && arith > 0 && strings.HasPrefix(command[i:], "))") {
+			arith--
+			i += 2
+			continue
+		}
+		if r == '<' && arith == 0 && strings.HasPrefix(command[i:], "<<") && !strings.HasPrefix(command[i:], "<<<") {
 			if spec, consumed, ok := parseHeredocOperator(command[i:]); ok {
 				heredocs = append(heredocs, spec)
 				i += consumed
