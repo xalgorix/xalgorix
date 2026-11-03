@@ -119,11 +119,12 @@ func (a *Agent) verifyPathTraversalTool(args map[string]string) (tools.Result, e
 			Response:   excerpt,
 			Confidence: 0.95,
 			AgentID:    a.ledgerOrigin(),
+			Source:     "verify_path_traversal",
 		})
 		// A baseline-vs-probe differential containing captured /etc/passwd data
 		// is deterministic exploitation proof. Mark it proven immediately so the
 		// finish gate keeps the scan alive until this evidence is reported.
-		l.SetStatus(h.ID, scanctx.HypothesisProven, "raw traversal request returned captured local-file content")
+		a.settleVerifierHypothesis(l, h.ID, true, "raw traversal request returned captured local-file content")
 		return tools.Result{
 			Output:   confirm + fmt.Sprintf(" Recorded captured evidence in ledger %s. Call report_vulnerability now with severity=high, cwe_id=CWE-22, target=%s, endpoint=%s, method=GET, verification_method=data_extracted, hypothesis_id=%s, and exploitation_proof copied from the captured request/response below. Do not infer further file contents.\n\n%s", h.ID, baseURLOf(u), probeURL, h.ID, proof),
 			Metadata: map[string]any{"path_traversal_confirmed": true, "endpoint": endpoint, "hypothesis_id": h.ID, "depth": depth},

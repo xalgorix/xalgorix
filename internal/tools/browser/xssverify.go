@@ -200,6 +200,7 @@ func finalizeXSSVerdict(ctxID, rawURL, nonce, parameter string, signals []ExecSi
 			Response:   matched.Kind + " message: " + matched.Message,
 			Confidence: 0.9,
 			AgentID:    "browser",
+			Source:     "verify_xss",
 		})
 		// A fresh nonce observed executing in a real browser is deterministic
 		// exploitation proof, not merely a candidate that still needs testing.

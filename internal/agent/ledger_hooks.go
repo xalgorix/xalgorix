@@ -736,6 +736,11 @@ func hookLedgerFinishGate(state *ScanState, args map[string]string) HookResult {
 			if h.Status != scanctx.HypothesisTesting || !hypothesisBelongsToOwner(h, owner) {
 				continue
 			}
+			// An engine verifier saw this one; it keeps holding the gate until
+			// the model reports or rejects it (bounded by the rejection ceiling).
+			if h.HasEngineExploit() {
+				continue
+			}
 			l.SetStatus(h.ID, scanctx.HypothesisExhausted,
 				"auto-dispositioned: claimed but not closed across repeated finish attempts; work preserved for resume")
 		}

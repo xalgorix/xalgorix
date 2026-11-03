@@ -183,7 +183,9 @@ func (a *Agent) verifySSTITool(args map[string]string) (tools.Result, error) {
 			Response:   excerpt,
 			Confidence: 0.9,
 			AgentID:    a.ledgerOrigin(),
+			Source:     "verify_ssti",
 		})
+		a.settleVerifierHypothesis(l, h.ID, true, "")
 
 		return tools.Result{
 			Output:   confirm + fmt.Sprintf(" Recorded exploit-proven in the ledger (%s) — report it as High CWE-1336 and link the finding.\n\n%s", h.ID, proof),

@@ -250,7 +250,11 @@ func (a *Agent) analyzeAuthzMatrix(u *url.URL, method, parameter, expect string,
 				Response:   truncateForEvidence(r.resp.Body),
 				Confidence: confidence,
 				AgentID:    a.ledgerOrigin(),
+				Source:     "authz_matrix",
 			})
+			// A cross-identity response comparison needs the model to confirm
+			// the resource is meant to be restricted, so it stays testing.
+			a.settleVerifierHypothesis(l, h.ID, false, "")
 			recorded++
 		}
 	}

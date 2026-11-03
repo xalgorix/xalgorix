@@ -215,8 +215,9 @@ func (a *Agent) verifyTimingTool(args map[string]string) (tools.Result, error) {
 		Response:   proof,
 		Confidence: 0.95,
 		AgentID:    a.ledgerOrigin(),
+		Source:     "verify_timing",
 	})
-	l.SetStatus(h.ID, scanctx.HypothesisProven, "report the repeated timing differential with verification_method=time_based")
+	a.settleVerifierHypothesis(l, h.ID, true, "report the repeated timing differential with verification_method=time_based")
 
 	return tools.Result{
 		Output: confirm + fmt.Sprintf(" Recorded exploit-proven evidence in ledger %s. Call report_vulnerability now with verification_method=time_based, hypothesis_id=%s, the exact endpoint/method/class, and this exploitation_proof:\n\n%s", h.ID, h.ID, proof),

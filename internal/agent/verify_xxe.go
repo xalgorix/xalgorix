@@ -220,7 +220,9 @@ func (a *Agent) verifyXXETool(args map[string]string) (tools.Result, error) {
 		Response:   probeExcerpt,
 		Confidence: 0.95,
 		AgentID:    a.ledgerOrigin(),
+		Source:     "verify_xxe",
 	})
+	a.settleVerifierHypothesis(l, h.ID, true, "")
 
 	return tools.Result{
 		Output:   confirm + fmt.Sprintf(" Recorded exploit-proven in the ledger (%s) — report it as High CWE-611 and link the finding.\n\n%s", h.ID, proof),
@@ -685,7 +687,11 @@ func (a *Agent) blindXXEVerify(method, absURL string, headers map[string]string,
 			Response:   firstHitSummary(hits),
 			Confidence: confidence,
 			AgentID:    a.ledgerOrigin(),
+			Source:     "verify_xxe",
 		})
+		// An out-of-band callback stays testing for the model to report, as
+		// with verify_oob.
+		a.settleVerifierHypothesis(l, h.ID, false, "")
 		return &tools.Result{
 			Output:   confirm + fmt.Sprintf(" Recorded exploit-proven in the ledger (%s) — report it as High CWE-611 and link the finding.", h.ID),
 			Metadata: map[string]any{"xxe_confirmed": true, "xxe_blind": true, "endpoint": endpoint, "hypothesis_id": h.ID},

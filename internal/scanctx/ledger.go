@@ -98,6 +98,11 @@ type Evidence struct {
 	// AgentID records which agent (coordinator or a specialist delegation ID)
 	// contributed the evidence.
 	AgentID string `json:"agent_id,omitempty"`
+	// Source names the engine verifier that wrote this evidence (for example
+	// "verify_sqli"). Only engine code sets it; evidence the model records
+	// itself (add_hypothesis_evidence) never carries one, so proof gates can
+	// tell an engine confirmation from model-written text.
+	Source string `json:"source,omitempty"`
 	// Confidence is the quality of THIS observation in [0,1].
 	Confidence float64   `json:"confidence,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -828,7 +833,27 @@ func (ev *Evidence) sanitize() {
 	ev.Response = truncate(ev.Response, maxEvidenceStringLen)
 	ev.FindingID = truncate(strings.TrimSpace(ev.FindingID), maxHypothesisFieldLen)
 	ev.AgentID = truncate(strings.TrimSpace(ev.AgentID), maxHypothesisFieldLen)
+	ev.Source = truncate(strings.TrimSpace(ev.Source), maxHypothesisFieldLen)
 	ev.Confidence = clampConfidence(ev.Confidence)
+}
+
+// EngineExploit reports whether this is exploit evidence written by an engine
+// verifier (see Evidence.Source), as opposed to the model's own text.
+func (ev Evidence) EngineExploit() bool {
+	return ev.Source != "" && strings.EqualFold(ev.Kind, "exploit")
+}
+
+// HasEngineExploit reports whether an engine verifier recorded exploit
+// evidence on this hypothesis. Such a hypothesis is never auto-settled as
+// exhausted: the engine saw the vulnerability, so only the model (report or
+// reject) or a human may conclude it.
+func (h Hypothesis) HasEngineExploit() bool {
+	for _, ev := range h.Evidence {
+		if ev.EngineExploit() {
+			return true
+		}
+	}
+	return false
 }
 
 // capEvidence bounds evidence per hypothesis, evicting the oldest non-finding

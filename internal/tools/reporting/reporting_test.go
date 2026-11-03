@@ -2725,6 +2725,7 @@ func TestLedgerBrowserXSSProof(t *testing.T) {
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
 		Kind:    "exploit",
+		Source:  "verify_xss",
 		Summary: `Browser-confirmed XSS: a dialog:alert dialog carrying the nonce "XV-7a91" fired while loading http://x/search?q=<script>alert('XV-7a91')</script>.`,
 		Request: "http://x/search?q=%3Cscript%3E",
 	})
@@ -2790,6 +2791,7 @@ func TestReportVuln_BrowserLedgerProofRecoversSparseReport(t *testing.T) {
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
 		Kind:       "exploit",
+		Source:     "verify_xss",
 		Summary:    `Browser-confirmed XSS: a dom_marker execution signal carrying the nonce "7654321" was observed while loading the injected /invite/ route.`,
 		Request:    payloadURL,
 		Response:   `dom_marker message: window.__xss=7654321`,
@@ -2891,7 +2893,7 @@ func TestReportVuln_BrowserProofSurvivesDuplicateTemplateHypothesis(t *testing.T
 		Parameter: "path", Origin: "verify_xss", Confidence: 0.9, Status: scanctx.HypothesisProven,
 	})
 	sc.Ledger.AddEvidence(proved.ID, scanctx.Evidence{
-		Kind: "exploit", Summary: `Browser-confirmed XSS: a dom:marker execution signal carrying nonce "7654321" was observed.`,
+		Kind: "exploit", Source: "verify_xss", Summary: `Browser-confirmed XSS: a dom:marker execution signal carrying nonce "7654321" was observed.`,
 		Request: payloadURL, Response: "window.__xss=7654321", Confidence: 0.9,
 	})
 	duplicate := sc.Ledger.Upsert(scanctx.Hypothesis{
@@ -2961,7 +2963,7 @@ func TestLedgerPathTraversalProofRequiresMatchingRouteAndCapturedFile(t *testing
 		Endpoint: "/public/plugins/alertlist/", Target: "http://127.0.0.1:3310", Origin: "verify_path_traversal",
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
-		Kind: "exploit", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
+		Kind: "exploit", Source: "verify_path_traversal", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
 		Request:  "GET http://127.0.0.1:3310/public/plugins/alertlist/../../etc/passwd",
 		Response: "root:x:0:0:root:/root:/bin/sh\n",
 	})
@@ -3035,7 +3037,7 @@ func TestReportPathTraversalUsesMatchedDeterministicProof(t *testing.T) {
 		Endpoint: "/public/plugins/alertlist/", Target: "http://127.0.0.1:3310", Origin: "verify_path_traversal",
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
-		Kind: "exploit", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
+		Kind: "exploit", Source: "verify_path_traversal", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
 		Request:  "GET http://127.0.0.1:3310/public/plugins/alertlist/../../etc/passwd",
 		Response: "root:x:0:0:root:/root:/bin/sh\n",
 	})
@@ -3069,7 +3071,7 @@ func TestReportPathTraversalRecoversSparseDeterministicProof(t *testing.T) {
 		Endpoint: "/public/plugins/alertlist/", Target: "http://127.0.0.1:3310", Origin: "verify_path_traversal",
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
-		Kind: "exploit", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
+		Kind: "exploit", Source: "verify_path_traversal", Summary: "Path traversal/local file read CONFIRMED at /public/plugins/alertlist/",
 		Request:  "GET http://127.0.0.1:3310/public/plugins/alertlist/../../../../../../../../etc/passwd",
 		Response: "root:x:0:0:root:/root:/bin/sh\n",
 	})
@@ -3128,7 +3130,7 @@ func TestLedgerVerifierProof(t *testing.T) {
 	}
 	// A genuine verify_csrf confirmation counts (origin-based match).
 	h := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "CSRF at /x", VulnClass: "csrf", Endpoint: "/x", Origin: "verify_csrf"})
-	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{Kind: "exploit", Summary: "Cross-Site Request Forgery CONFIRMED at /x."})
+	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{Kind: "exploit", Source: "verify_csrf", Summary: "Cross-Site Request Forgery CONFIRMED at /x."})
 	if got := ledgerVerifierProof(sc.ID, "csrf"); !strings.Contains(got, "CONFIRMED") {
 		t.Fatalf("expected the verify_csrf confirmation summary, got %q", got)
 	}
@@ -3136,14 +3138,14 @@ func TestLedgerVerifierProof(t *testing.T) {
 	// verifier's Upsert merged onto) but which carries a CONFIRMED exploit
 	// evidence still counts — the confirmation lives in the evidence.
 	hm := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "SSTI at /m", VulnClass: "ssti", Endpoint: "/m", Origin: "probe_hypothesis"})
-	sc.Ledger.AddEvidence(hm.ID, scanctx.Evidence{Kind: "exploit", Summary: "Server-side template injection CONFIRMED on parameter \"q\" at /m."})
+	sc.Ledger.AddEvidence(hm.ID, scanctx.Evidence{Kind: "exploit", Source: "verify_ssti", Summary: "Server-side template injection CONFIRMED on parameter \"q\" at /m."})
 	if got := ledgerVerifierProof(sc.ID, "ssti"); !strings.Contains(got, "CONFIRMED") {
 		t.Fatalf("expected the merged-origin SSTI confirmation via evidence, got %q", got)
 	}
 	// verify_oob records blind-rce/blind-cmdi while reports use the canonical
 	// rce class. The bridge must not orphan that authoritative evidence.
 	hoob := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "OOB RCE at /run", VulnClass: "blind-rce", Endpoint: "/run", Origin: "verify_oob"})
-	sc.Ledger.AddEvidence(hoob.ID, scanctx.Evidence{Kind: "exploit", Summary: "Out-of-band blind-rce proof for token tok: DNS callback for the unique token received (1) — the target's resolver looked up your callback, proving payload execution. Execution attribution: runtime-api with an exact callback-bearing payload."})
+	sc.Ledger.AddEvidence(hoob.ID, scanctx.Evidence{Kind: "exploit", Source: "verify_oob", Summary: "Out-of-band blind-rce proof for token tok: DNS callback for the unique token received (1) — the target's resolver looked up your callback, proving payload execution. Execution attribution: runtime-api with an exact callback-bearing payload."})
 	if got := ledgerVerifierProof(sc.ID, "rce", hoob.ID, "", "/run"); !strings.Contains(got, "Execution attribution: runtime-api") {
 		t.Fatalf("expected blind-rce OAST evidence to bridge to canonical rce, got %q", got)
 	}
@@ -3154,9 +3156,9 @@ func TestLedgerVerifierProof(t *testing.T) {
 	// Timing proof is route-bound when the report supplies its verifier id and
 	// endpoint, preventing one proven RCE sink from validating another route.
 	hr1 := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "RCE at /one", VulnClass: "rce", Target: "https://example.com", Endpoint: "/one", Origin: "verify_timing"})
-	sc.Ledger.AddEvidence(hr1.ID, scanctx.Evidence{Kind: "exploit", Summary: "Blind RCE CONFIRMED at /one by repeated timing."})
+	sc.Ledger.AddEvidence(hr1.ID, scanctx.Evidence{Kind: "exploit", Source: "verify_timing", Summary: "Blind RCE CONFIRMED at /one by repeated timing."})
 	hr2 := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "RCE at /two", VulnClass: "rce", Target: "https://example.com", Endpoint: "/two", Origin: "verify_timing"})
-	sc.Ledger.AddEvidence(hr2.ID, scanctx.Evidence{Kind: "exploit", Summary: "Blind RCE CONFIRMED at /two by repeated timing."})
+	sc.Ledger.AddEvidence(hr2.ID, scanctx.Evidence{Kind: "exploit", Source: "verify_timing", Summary: "Blind RCE CONFIRMED at /two by repeated timing."})
 	if got := ledgerVerifierProof(sc.ID, "rce", hr2.ID, "https://example.com", "https://example.com/two"); !strings.Contains(got, "/two") {
 		t.Fatalf("expected route-bound timing proof for /two, got %q", got)
 	}
@@ -3167,7 +3169,7 @@ func TestLedgerVerifierProof(t *testing.T) {
 	// SAME successful response — its exploit summary says "broken access
 	// control") counts as an idor confirmation.
 	ha := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "role B can access /api/orders/1001", VulnClass: "idor", Endpoint: "/api/orders/1001", Origin: "authz_matrix"})
-	sc.Ledger.AddEvidence(ha.ID, scanctx.Evidence{Kind: "exploit", Summary: "role A → status 200, 88 bytes; role B (second account) got status 200 / 88 bytes for the same request — SAME successful response as the authorized identity — likely broken access control"})
+	sc.Ledger.AddEvidence(ha.ID, scanctx.Evidence{Kind: "exploit", Source: "authz_matrix", Summary: "role A → status 200, 88 bytes; role B (second account) got status 200 / 88 bytes for the same request — SAME successful response as the authorized identity — likely broken access control"})
 	if got := ledgerVerifierProof(sc.ID, "idor"); !strings.Contains(got, "broken access control") {
 		t.Fatalf("expected the authz_matrix broken-access confirmation, got %q", got)
 	}
@@ -3193,6 +3195,7 @@ func TestReportVuln_TimingLedgerProofMarksRCEExploitProven(t *testing.T) {
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
 		Kind:       "exploit",
+		Source:     "verify_timing",
 		Summary:    "Blind RCE CONFIRMED by a repeated server-side timing differential at /api/setup/validate: 3/3 paired probes supported the delay; median baseline 95 ms versus median probe 4102 ms (delta 4007 ms for an intended 4000 ms delay). baseline_ms=[91 95 101]; probe_ms=[4099 4102 4110]; supporting_pairs=3/3.",
 		Confidence: 0.95,
 	})
@@ -3240,7 +3243,7 @@ func TestLedgerVerifierProof_AuthzMatrixWeakSignalIgnored(t *testing.T) {
 	defer scanctx.Deactivate(sc.ID)
 
 	hw := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "role B can access /api/orders/2002", VulnClass: "idor", Endpoint: "/api/orders/2002", Origin: "authz_matrix"})
-	sc.Ledger.AddEvidence(hw.ID, scanctx.Evidence{Kind: "exploit", Summary: "role A → status 403, 0 bytes; role B got status 200 / 90 bytes for the same request — accessible (2xx) while the authorized baseline was not successful — verify"})
+	sc.Ledger.AddEvidence(hw.ID, scanctx.Evidence{Kind: "exploit", Source: "authz_matrix", Summary: "role A → status 403, 0 bytes; role B got status 200 / 90 bytes for the same request — accessible (2xx) while the authorized baseline was not successful — verify"})
 	if got := ledgerVerifierProof(sc.ID, "idor"); got != "" {
 		t.Fatalf("authz_matrix weak heuristic must NOT count as proof, got %q", got)
 	}
@@ -3270,6 +3273,7 @@ func TestReportVuln_VerifierLedgerProofMarksExploitProven(t *testing.T) {
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
 		Kind:       "exploit",
+		Source:     "verify_csrf",
 		Summary:    "Cross-Site Request Forgery CONFIRMED at /account/email: the server accepted a state-changing POST with a forged cross-site Origin and no anti-CSRF token (CWE-352).",
 		Confidence: 0.75,
 		AgentID:    "agent",
@@ -3339,6 +3343,7 @@ func TestReportVuln_AuthzMatrixIDORExploitProven(t *testing.T) {
 	})
 	sc.Ledger.AddEvidence(h.ID, scanctx.Evidence{
 		Kind:    "exploit",
+		Source:  "authz_matrix",
 		Summary: "role A → status 200, 88 bytes; role B (second account) got status 200 / 88 bytes for the same request — SAME successful response as the authorized identity — likely broken access control",
 		AgentID: "authz_matrix",
 	})
@@ -3378,5 +3383,70 @@ func TestReportVuln_AuthzMatrixIDORExploitProven(t *testing.T) {
 	}
 	if strings.Contains(res.Output, "RECORDED as UNVERIFIED") {
 		t.Fatalf("must NOT flag manual review when authz_matrix confirmed it, got: %s", res.Output)
+	}
+}
+
+// Model-written evidence is never verifier proof, whatever it says and
+// whichever hypothesis it sits on: "not confirmed" contains "confirmed", and a
+// model can add evidence to a verifier-originated hypothesis.
+func TestLedgerVerifierProofIgnoresModelWrittenEvidence(t *testing.T) {
+	sc := scanctx.New("rep-verifier-model-text", "")
+	scanctx.Activate(sc)
+	defer scanctx.Deactivate(sc.ID)
+
+	hp := sc.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Endpoint: "/a", Origin: "coordinator"})
+	sc.Ledger.AddEvidence(hp.ID, scanctx.Evidence{Kind: "exploit", Summary: "SQL injection not confirmed: no DBMS error", AgentID: "coordinator"})
+	hv := sc.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "sqli", Endpoint: "/b", Origin: "verify_sqli"})
+	sc.Ledger.AddEvidence(hv.ID, scanctx.Evidence{Kind: "exploit", Summary: "I think this is injectable", AgentID: "coordinator"})
+	if got := ledgerVerifierProof(sc.ID, "sqli"); got != "" {
+		t.Fatalf("model-written evidence was accepted as verifier proof: %q", got)
+	}
+
+	ht := sc.Ledger.Upsert(scanctx.Hypothesis{VulnClass: "lfi", Endpoint: "/files/", Target: "http://127.0.0.1:3310", Origin: "verify_path_traversal"})
+	sc.Ledger.AddEvidence(ht.ID, scanctx.Evidence{Kind: "exploit", Summary: "Path traversal/local file read CONFIRMED at /files/",
+		Request: "GET http://127.0.0.1:3310/files/../../etc/passwd", Response: "root:x:0:0:root:/root:/bin/bash"})
+	if got := findLedgerPathTraversalProof(sc.ID, "", "http://127.0.0.1:3310", "http://127.0.0.1:3310/files/../../etc/passwd"); got.Proof != "" {
+		t.Fatalf("model-written traversal text was accepted as proof: %q", got.Proof)
+	}
+
+	sc.Ledger.AddEvidence(hv.ID, scanctx.Evidence{Kind: "exploit", Source: "verify_sqli", Summary: "Error-based SQL injection CONFIRMED on parameter \"id\" at /b"})
+	if got := ledgerVerifierProof(sc.ID, "sqli"); !strings.Contains(got, "CONFIRMED") {
+		t.Fatalf("engine verifier evidence must still count, got %q", got)
+	}
+}
+
+// A model-supplied CVSS cannot lift a finding above its per-type severity cap:
+// clickjacking capped at low stays low, with a score that agrees.
+func TestReportVuln_TypeCapHoldsOverModelCVSS(t *testing.T) {
+	ctx := "type-cap-over-cvss"
+	CleanupContext(ctx)
+	defer CleanupContext(ctx)
+
+	args := map[string]string{
+		"title":               "Clickjacking on account settings page",
+		"severity":            "low",
+		"description":         "The account settings page can be framed by a third-party origin because it sends neither X-Frame-Options nor a frame-ancestors directive.",
+		"exploitation_proof":  "GET https://example.com/settings returned HTTP 200 with no X-Frame-Options header and no Content-Security-Policy frame-ancestors; an attacker page at https://evil.example loaded it in an iframe.",
+		"verification_method": "manual_verified",
+		"target":              "https://example.com",
+		"endpoint":            "https://example.com/settings",
+		"method":              "GET",
+		"cwe_id":              "CWE-1021",
+		"cvss_vector":         "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N",
+	}
+	res, err := reportVulnWithContextID(ctx, args)
+	if err != nil {
+		t.Fatalf("report error: %v", err)
+	}
+	vulns := GetVulnerabilitiesForContext(ctx)
+	if len(vulns) != 1 {
+		t.Fatalf("expected one finding, got %d: %s", len(vulns), res.Output)
+	}
+	v := vulns[0]
+	if v.Severity != "low" {
+		t.Fatalf("severity = %q, want low (the clickjacking cap); output=%s", v.Severity, res.Output)
+	}
+	if severityFromCVSS(v.CVSS) != "low" || v.CVSSVector != "" {
+		t.Fatalf("score/vector disagree with the capped severity: cvss=%.1f vector=%q", v.CVSS, v.CVSSVector)
 	}
 }
