@@ -540,7 +540,7 @@ func (a *Agent) leadVerificationWindowHolds() bool {
 	}
 	a.state.LeadWindowStartIteration = start
 	a.state.LeadWindowSince = a.state.FindingIdleSince
-	directive := fmt.Sprintf("⏳ VERIFICATION WINDOW (%d iterations): no new finding has been validated for the diminishing-returns tail, so the engine will finalize the assessment after this window. Before then, conclude each open lead you recorded: %s. For each one, either verify it and report it with report_vulnerability if the evidence meets the normal reporting standard, or reject it with update_hypothesis and a one-line reason. Do not start unrelated work.",
+	directive := fmt.Sprintf("⏳ VERIFICATION WINDOW (%d iterations): no new finding has been validated for the diminishing-returns tail, so the engine will finalize the assessment after this window. Before then, conclude each open lead: %s. For each one, either verify it and report it with report_vulnerability if the evidence meets the normal reporting standard, or reject it with update_hypothesis and a one-line reason. Do not start unrelated work.",
 		window, formatLeadList(leads, 8))
 	a.appendUserNudge(directive)
 	a.emit(Event{Type: "message", Content: directive, TotalTokens: a.syncBudgetTokens()})

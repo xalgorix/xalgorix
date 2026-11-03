@@ -266,7 +266,9 @@ func reconcileLedgerForFinish(state *ScanState) int {
 	}
 	n := 0
 	for _, h := range l.All() {
-		if h.Status == scanctx.HypothesisTesting && hypothesisBelongsToOwner(h, owner) {
+		// Work an engine verifier recorded exploit evidence on is not abandoned
+		// residual: it stays open so the report says it was not concluded.
+		if h.Status == scanctx.HypothesisTesting && hypothesisBelongsToOwner(h, owner) && !h.HasEngineExploit() {
 			if l.SetStatus(h.ID, scanctx.HypothesisExhausted, "claimed but not completed within the scan; closed as residual at principled finish") {
 				n++
 			}
@@ -315,17 +317,28 @@ func modelHypothesisCount(state *ScanState) int {
 	return n
 }
 
-// activeVerificationLeads returns the model's recent, high-confidence leads that
-// are still unresolved: model-recorded hypotheses that are queued or testing,
-// at or above leadConfidenceFloor, and updated at or after since (a zero since
-// accepts any time). Highest confidence first.
+// activeVerificationLeads returns the unresolved leads the verification window
+// waits on, highest confidence first:
+//   - the model's recent, high-confidence leads: model-recorded hypotheses that
+//     are queued or testing, at or above leadConfidenceFloor, and updated at or
+//     after since (a zero since accepts any time);
+//   - at any age, work an engine verifier recorded exploit evidence on that is
+//     still testing, or proven but not yet reported.
 func activeVerificationLeads(state *ScanState, since time.Time) []scanctx.Hypothesis {
 	l := ledgerForState(state)
 	if l == nil {
 		return nil
 	}
+	unreported := make(map[string]bool)
+	for _, id := range provenUnreportedHypothesesForOwner(l, "", state.ScanContextID) {
+		unreported[id] = true
+	}
 	var leads []scanctx.Hypothesis
 	for _, h := range l.All() {
+		if unreported[h.ID] || (h.Status == scanctx.HypothesisTesting && h.HasEngineExploit()) {
+			leads = append(leads, h)
+			continue
+		}
 		if !isModelRecordedHypothesis(h) || h.Confidence < leadConfidenceFloor {
 			continue
 		}

@@ -256,7 +256,11 @@ func (a *Agent) finalizeOOBVerdict(token, class, endpoint, parameter, role, exec
 			Response:   firstHitSummary(hits),
 			Confidence: confidence,
 			AgentID:    a.ledgerOrigin(),
+			Source:     "verify_oob",
 		})
+		// An out-of-band callback stays testing for the model to report; it is
+		// still never auto-exhausted (it carries engine exploit evidence).
+		a.settleVerifierHypothesis(l, h.ID, false, "")
 	}
 
 	return tools.Result{

@@ -189,7 +189,9 @@ func (a *Agent) verifySQLiTool(args map[string]string) (tools.Result, error) {
 		Response:   brokenExcerpt,
 		Confidence: confidence,
 		AgentID:    a.ledgerOrigin(),
+		Source:     "verify_sqli",
 	})
+	a.settleVerifierHypothesis(l, h.ID, true, "")
 
 	return tools.Result{
 		Output:   confirm + fmt.Sprintf(" Recorded exploit-proven in the ledger (%s, confidence %.2f) — report it as High CWE-89 and link the finding.\n\n%s", h.ID, confidence, proof),
