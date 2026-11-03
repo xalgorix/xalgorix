@@ -122,6 +122,22 @@ func TestBuiltin_NovitaConfiguration(t *testing.T) {
 	}
 }
 
+func TestBuiltin_RuncrateConfiguration(t *testing.T) {
+	entry, ok := LookupBuiltin("runcrate")
+	if !ok {
+		t.Fatal("Runcrate provider is missing from the built-in catalog")
+	}
+	if entry.BaseURL != "https://api.runcrate.ai/v1" {
+		t.Errorf("Runcrate BaseURL = %q, want https://api.runcrate.ai/v1", entry.BaseURL)
+	}
+	if entry.HeaderStyle != "openai" {
+		t.Errorf("Runcrate HeaderStyle = %q, want openai", entry.HeaderStyle)
+	}
+	if len(entry.AuthMethods) != 1 || entry.AuthMethods[0] != "api_key" {
+		t.Errorf("Runcrate AuthMethods = %v, want [api_key]", entry.AuthMethods)
+	}
+}
+
 func TestBuiltin_ZAIConfigurations(t *testing.T) {
 	tests := []struct {
 		id      string
