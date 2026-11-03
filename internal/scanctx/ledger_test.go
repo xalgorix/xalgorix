@@ -405,3 +405,49 @@ func filepathGlobFirst(path string) (string, error) {
 	}
 	return matches[0], nil
 }
+
+// A lead the model records itself on an engine-seeded placeholder takes the
+// placeholder over (origin, confidence, queued→testing), and only ever raises.
+func TestLedgerUpsertModelLeadAdoptsEngineSeed(t *testing.T) {
+	ls := NewLedgerStore()
+	seed := ls.Upsert(Hypothesis{VulnClass: "auth", Endpoint: "/Api/account", Origin: "auto-plan-surface", Confidence: 0.5})
+
+	got := ls.Upsert(Hypothesis{VulnClass: "auth", Endpoint: "/Api/account", Origin: "coordinator", Confidence: 0.8, Status: HypothesisTesting})
+	if got.ID != seed.ID {
+		t.Fatalf("model lead did not merge into the seed: %s vs %s", got.ID, seed.ID)
+	}
+	if got.Origin != "coordinator" || got.Confidence != 0.8 || got.Status != HypothesisTesting {
+		t.Fatalf("model lead did not take the seed over: origin=%q conf=%.2f status=%s", got.Origin, got.Confidence, got.Status)
+	}
+
+	// A later, weaker model record never lowers confidence or status.
+	got = ls.Upsert(Hypothesis{VulnClass: "auth", Endpoint: "/Api/account", Origin: "coordinator", Confidence: 0.3, Status: HypothesisQueued})
+	if got.Confidence != 0.8 || got.Status != HypothesisTesting {
+		t.Fatalf("weaker model record regressed the lead: conf=%.2f status=%s", got.Confidence, got.Status)
+	}
+
+	// An engine re-seed or a specialist record keeps the coordinator as owner.
+	ls.Upsert(Hypothesis{VulnClass: "auth", Endpoint: "/Api/account", Origin: "auto-plan-surface", Confidence: 0.95})
+	got = ls.Upsert(Hypothesis{VulnClass: "auth", Endpoint: "/Api/account", Origin: "agent_authz", Confidence: 0.5})
+	if got.Origin != "coordinator" || got.Confidence != 0.8 {
+		t.Fatalf("non-coordinator record changed the lead: origin=%q conf=%.2f", got.Origin, got.Confidence)
+	}
+
+	// A settled status is never reopened by Upsert.
+	ls.SetStatus(got.ID, HypothesisProven, "")
+	got = ls.Upsert(Hypothesis{VulnClass: "auth", Endpoint: "/Api/account", Origin: "coordinator", Confidence: 0.9, Status: HypothesisTesting})
+	if got.Status != HypothesisProven {
+		t.Fatalf("model record reopened a proven hypothesis: %s", got.Status)
+	}
+}
+
+func TestIsModelOrigin(t *testing.T) {
+	for origin, want := range map[string]bool{
+		"coordinator": true, "agent_authz": true,
+		"": false, "auto-plan": false, "auto-plan-surface": false, "auto-surface-param": false, "verify_xss": false,
+	} {
+		if got := IsModelOrigin(origin); got != want {
+			t.Errorf("IsModelOrigin(%q) = %v, want %v", origin, got, want)
+		}
+	}
+}

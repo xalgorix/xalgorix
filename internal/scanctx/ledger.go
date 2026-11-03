@@ -213,8 +213,10 @@ func (ls *LedgerStore) SetPersistPath(dir string) {
 // Dedup: if in.DedupKey is empty it is derived from (VulnClass, Endpoint,
 // Parameter, Role). Non-empty scalar fields on `in` overwrite blanks on the
 // existing record; identity fields are never blanked once set. Status and
-// Confidence are only advanced by the dedicated methods, so Upsert does not
-// silently regress a proven hypothesis back to queued.
+// Confidence are otherwise only advanced by the dedicated methods, so Upsert
+// never regresses a proven hypothesis back to queued; the one exception is a
+// model-recorded lead merging into an engine seed, which may only raise them
+// (see mergeFrom).
 func (ls *LedgerStore) Upsert(in Hypothesis) Hypothesis {
 	now := time.Now().UTC()
 	in.sanitize()
@@ -788,6 +790,30 @@ func (h *Hypothesis) mergeFrom(src Hypothesis) {
 	if h.Origin == "" && src.Origin != "" {
 		h.Origin = src.Origin
 	}
+	// A lead the model records itself can land on an engine-seeded placeholder
+	// with the same class/endpoint/parameter/role. The model's record takes the
+	// placeholder over: it adopts the model origin and the model's confidence
+	// and may advance queued → testing. It only ever raises — a settled status
+	// or a higher confidence is never regressed (dedicated methods own those).
+	if IsModelOrigin(src.Origin) {
+		if !IsModelOrigin(h.Origin) {
+			h.Origin = src.Origin
+		}
+		if src.Confidence > h.Confidence {
+			h.Confidence = src.Confidence
+		}
+		if h.Status == HypothesisQueued && src.Status == HypothesisTesting {
+			h.Status = HypothesisTesting
+		}
+	}
+}
+
+// IsModelOrigin reports whether an Origin marks a hypothesis the model recorded
+// itself (record_hypothesis from the coordinator, "coordinator", or from a
+// delegated specialist, "agent_<id>"), as opposed to engine-generated seeds,
+// verifier records or imports.
+func IsModelOrigin(origin string) bool {
+	return origin == "coordinator" || strings.HasPrefix(origin, "agent_")
 }
 
 // sanitize bounds and normalizes external hypothesis input.
