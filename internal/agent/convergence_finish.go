@@ -297,7 +297,7 @@ func untestedAtFinishCount(state *ScanState) int {
 // the hundred, so only the model's own leads may restart the idle tail or hold
 // the verification window.
 func isModelRecordedHypothesis(h scanctx.Hypothesis) bool {
-	return h.Origin == "coordinator" || strings.HasPrefix(h.Origin, "agent_")
+	return scanctx.IsModelOrigin(h.Origin)
 }
 
 // modelHypothesisCount counts the model-recorded hypotheses in the ledger.

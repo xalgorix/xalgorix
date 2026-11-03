@@ -287,6 +287,9 @@ type ScanState struct {
 	// of the leads it was opened for.
 	LeadWindowStartIteration int
 	LeadWindowSince          time.Time
+	// LeadWindowIterations counts the finalizer turns the open window has held;
+	// the window ends when it reaches the window length.
+	LeadWindowIterations int
 	// UnverifiedLeadsAtFinish lists the model's open high-confidence leads as
 	// they stood just before the principled finish settled the ledger.
 	UnverifiedLeadsAtFinish string

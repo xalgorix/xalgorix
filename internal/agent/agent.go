@@ -264,6 +264,11 @@ type Agent struct {
 	resumeFindings      []reporting.Vulnerability
 	publishedAssessment atomic.Pointer[assessmentSnapshot]
 	livenessExpired     atomic.Bool
+	// providerRetry marks that the previous iteration ended in an LLM provider
+	// retry (rate limit, overload, quota or error backoff). The model got no
+	// turn, so the next iteration must not count toward the idle limits.
+	// Touched only by the run loop goroutine.
+	providerRetry bool
 
 	// deferNoteSuppressed restores the specialist-wave defer detail latch
 	// across server restarts: a resumed run emits only compact defer notes
@@ -1871,16 +1876,25 @@ func (a *Agent) Run(targets []string, instruction string) {
 		if !a.checkpointOrStop() {
 			return
 		}
-		if a.stopForHook(a.semanticLivenessCheck()) {
-			return
-		}
-		// Plan-complete, finding-idle finalizer: end the no-new-findings tail once
-		// the whole structured plan is exhausted (coverage churn alone keeps the
-		// semantic clock above alive, which let scans run many thousands of
-		// iterations past diminishing returns). A still-productive scan is never
-		// cut — any new finding resets the counter.
-		if a.autoFinalizeIfPlanComplete() {
-			return
+		// A provider retry is not a model turn: it must not spend the
+		// stuck-loop limit, the finish tail or the verification window. Each
+		// retry path is bounded on its own (the cumulative provider wait pauses
+		// the scan; plain errors stop after 25 attempts).
+		providerRetry := a.providerRetry
+		a.providerRetry = false
+		if !providerRetry {
+			if a.stopForHook(a.semanticLivenessCheck()) {
+				return
+			}
+			// Plan-complete, finding-idle finalizer: end the no-new-findings tail
+			// once the whole structured plan is exhausted (coverage churn alone
+			// keeps the semantic clock above alive, which let scans run many
+			// thousands of iterations past diminishing returns). A
+			// still-productive scan is never cut — any new finding resets the
+			// counter.
+			if a.autoFinalizeIfPlanComplete() {
+				return
+			}
 		}
 		if guardMsg := a.maybeCompletePassiveReconGuardAtIterationStart(iter); guardMsg != "" {
 			a.msgMu.Lock()
@@ -2056,6 +2070,10 @@ func (a *Agent) Run(targets []string, instruction string) {
 				// Log strictly to backend server logs for operator visibility (silent on user frontend)
 				a.logProviderWait(err, backoff, maxWait)
 
+				// Provider waiting time is not idle assessment time.
+				a.pauseIdleClock(backoff)
+				a.providerRetry = true
+
 				// Interruptible sleep: bail out immediately if the scan is stopped or canceled by operator.
 				if a.ctx != nil {
 					select {
@@ -2094,6 +2112,8 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if backoff > 120*time.Second {
 				backoff = 120 * time.Second
 			}
+			a.pauseIdleClock(backoff)
+			a.providerRetry = true
 			if a.ctx != nil {
 				select {
 				case <-a.ctx.Done():
