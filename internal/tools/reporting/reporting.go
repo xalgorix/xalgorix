@@ -2092,6 +2092,18 @@ func reportVulnClass(title, description, cwe string) string {
 	case strings.Contains(lower, "xss") || strings.Contains(lower, "cross-site script") ||
 		strings.Contains(lower, "cross site script") || strings.Contains(c, "79"):
 		return "xss"
+	// Auth-enforcement bypass is kept distinct from idor/bola so verify_authbypass
+	// proof binds to the right class. Keyed narrowly on explicit bypass phrasing
+	// and the authentication-bypass CWEs (287 Improper Authentication, 288 Auth
+	// Bypass Using an Alternate Path, 425 Forced Browsing) so it never steals an
+	// object-level/function-level access-control (idor) finding, which keeps its
+	// CWE-639/862/863/285/284 mapping below. Checked BEFORE idor because a bypass
+	// write-up may also use the words "broken access control".
+	case strings.Contains(lower, "auth bypass") || strings.Contains(lower, "authentication bypass") ||
+		strings.Contains(lower, "authorization bypass") || strings.Contains(lower, "auth enforcement bypass") ||
+		strings.Contains(lower, "authentication enforcement bypass") || strings.Contains(lower, "forced browsing") ||
+		strings.Contains(c, "287") || strings.Contains(c, "288") || strings.Contains(c, "425"):
+		return "auth-bypass"
 	case strings.Contains(lower, "idor") || strings.Contains(lower, "insecure direct object") ||
 		strings.Contains(lower, "bola") || strings.Contains(lower, "broken object level") ||
 		strings.Contains(lower, "bfla") || strings.Contains(lower, "broken function level") ||
@@ -2255,6 +2267,9 @@ func canonicalVerifierClass(class string) string {
 		return "lfi"
 	case strings.Contains(c, "ssrf"):
 		return "ssrf"
+	case strings.Contains(c, "auth-bypass"), strings.Contains(c, "authentication-bypass"),
+		strings.Contains(c, "auth-enforcement-bypass"), strings.Contains(c, "forced-browsing"):
+		return "auth-bypass"
 	default:
 		return c
 	}

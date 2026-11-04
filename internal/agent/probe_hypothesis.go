@@ -249,7 +249,7 @@ func interpretProbe(resp *httpclient.RawResponse, authed bool) (summary string, 
 	case code == 401 || code == 403:
 		return fmt.Sprintf("Access-controlled%s: %s — endpoint exists but is protected.", authNote, resp.Status),
 			scanctx.HypothesisTesting,
-			"Endpoint exists but is access-controlled — prime target for authz_matrix (role A vs role B vs anonymous) and auth-bypass checks.",
+			"Endpoint exists but is access-controlled — prime target for authz_matrix (vary identity: role A vs role B vs anonymous) and verify_authbypass (vary the path shape unauthenticated: case fold, encoding, trailing segment — e.g. /Api vs /api).",
 			0.5
 	case code == 404 || code == 410:
 		return fmt.Sprintf("Not found: %s — route not deployed at this path on the live target.", resp.Status),

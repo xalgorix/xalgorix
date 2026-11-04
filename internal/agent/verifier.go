@@ -69,6 +69,10 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 	// missing-file control. Ordinary HTTP clients often normalize these paths
 	// before transmission, creating a false negative for real file reads.
 	a.registerVerifyPathTraversalTool(vreg)
+	// Re-run the canonical-vs-variant unauthenticated differential so the
+	// independent verifier can reproduce an enforcement bypass that identity-
+	// based re-testing would miss.
+	a.registerVerifyAuthBypassTool(vreg)
 
 	var verdict *reporting.VerificationVerdict
 	vreg.Register(&tools.Tool{

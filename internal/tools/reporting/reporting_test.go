@@ -2945,6 +2945,12 @@ func TestReportVulnClass(t *testing.T) {
 		{"IDOR on /api/orders exposes other users' data", "insecure direct object reference", "CWE-639", "idor"},
 		{"BOLA: any authenticated user reads any order", "broken object level authorization", "", "idor"},
 		{"Broken access control on /admin", "", "CWE-285", "idor"},
+		{"Authentication enforcement bypass at /Api/admin", "unauthenticated variant reaches a protected handler", "CWE-288", "auth-bypass"},
+		{"Auth bypass via case-variant path", "", "", "auth-bypass"},
+		{"Forced browsing to /admin dashboard", "", "CWE-425", "auth-bypass"},
+		// Collision guard: object/function-level access control stays idor even
+		// though its write-up may also say "broken access control".
+		{"IDOR exposes another user's order", "broken access control on /api/orders/1001", "CWE-639", "idor"},
 		{"Open redirect in next", "", "CWE-601", ""},
 		{"Missing security header", "", "", ""},
 	}
@@ -3173,6 +3179,17 @@ func TestLedgerVerifierProof(t *testing.T) {
 	sc.Ledger.AddEvidence(ha.ID, scanctx.Evidence{Kind: "exploit", Source: "authz_matrix", Summary: "role A → status 200, 88 bytes; role B (second account) got status 200 / 88 bytes for the same request — SAME successful response as the authorized identity — likely broken access control"})
 	if got := ledgerVerifierProof(sc.ID, "idor"); !strings.Contains(got, "broken access control") {
 		t.Fatalf("expected the authz_matrix broken-access confirmation, got %q", got)
+	}
+	// verify_authbypass records an engine exploit for the auth-bypass class; it
+	// must bridge to a CWE-288 report (which reportVulnClass maps to auth-bypass)
+	// and stay route-bound.
+	hab := sc.Ledger.Upsert(scanctx.Hypothesis{Title: "Auth enforcement bypass at /api/admin", VulnClass: "auth-bypass", Target: "https://example.com", Endpoint: "/api/admin", Origin: "verify_authbypass"})
+	sc.Ledger.AddEvidence(hab.ID, scanctx.Evidence{Kind: "exploit", Source: "verify_authbypass", Summary: "Authentication/authorization enforcement bypass CONFIRMED at /api/admin (CWE-288): the canonical path is denied unauthenticated, but the variant \"/Api/admin\" is served."})
+	if got := ledgerVerifierProof(sc.ID, "auth-bypass", hab.ID, "https://example.com", "/api/admin"); !strings.Contains(got, "CONFIRMED") {
+		t.Fatalf("expected the verify_authbypass confirmation, got %q", got)
+	}
+	if got := ledgerVerifierProof(sc.ID, "auth-bypass", hab.ID, "https://example.com", "/other/route"); got != "" {
+		t.Fatalf("auth-bypass proof must stay route-bound, got %q", got)
 	}
 }
 
