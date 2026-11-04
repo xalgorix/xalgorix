@@ -106,6 +106,22 @@ func TestService_RoundTripsBuiltin(t *testing.T) {
 	}
 }
 
+func TestBuiltin_CheaperInferenceConfiguration(t *testing.T) {
+	entry, ok := LookupBuiltin("cheaperinference")
+	if !ok {
+		t.Fatal("Cheaper Inference provider is missing from the built-in catalog")
+	}
+	if entry.BaseURL != "https://api.cheaperinference.com/v1" {
+		t.Errorf("Cheaper Inference BaseURL = %q, want https://api.cheaperinference.com/v1", entry.BaseURL)
+	}
+	if entry.HeaderStyle != "openai" {
+		t.Errorf("Cheaper Inference HeaderStyle = %q, want openai", entry.HeaderStyle)
+	}
+	if len(entry.AuthMethods) != 1 || entry.AuthMethods[0] != "api_key" {
+		t.Errorf("Cheaper Inference AuthMethods = %v, want [api_key]", entry.AuthMethods)
+	}
+}
+
 func TestBuiltin_NovitaConfiguration(t *testing.T) {
 	entry, ok := LookupBuiltin("novita")
 	if !ok {

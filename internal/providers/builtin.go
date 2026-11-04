@@ -81,6 +81,14 @@ var builtinList = []Entry{
 		AuthMethods: []string{"api_key"},
 	},
 	{
+		ID:          "cheaperinference",
+		DisplayName: "Cheaper Inference",
+		BaseURL:     "https://api.cheaperinference.com/v1",
+		HeaderStyle: "openai",
+		AuthMethods: []string{"api_key"},
+		Notes:       "OpenAI-compatible LLM gateway. Model IDs are bare (for example gpt-5.4-mini); choose Custom model for any ID returned by GET /v1/models.",
+	},
+	{
 		ID:          "chutes",
 		DisplayName: "Chutes",
 		BaseURL:     "",
