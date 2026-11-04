@@ -591,6 +591,16 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	a.registerVerifySSTITool(reg)
 	a.registerVerifyPathTraversalTool(reg)
 
+	// Register the deterministic authentication/authorization enforcement-bypass
+	// confirmer (verify_authbypass): the path-shape sibling of authz_matrix.
+	// Given a protected canonical route (or hypothesis), it re-requests the
+	// canonical path unauthenticated as a denied baseline, then tries equivalent
+	// path-shape variants (case fold, percent-encoding, trailing separators)
+	// unauthenticated and without normalization, confirming a bypass only on a
+	// deny→allow status flip whose served body diverges from the denied baseline.
+	// Agent-bound: needs the scope config, the scan target, and the ledger.
+	a.registerVerifyAuthBypassTool(reg)
+
 	// Register the deterministic XML External Entity confirmer (verify_xxe): the
 	// XXE sibling of verify_sqli/verify_ssti. Given a seeded hypothesis or a url,
 	// it sends a randomized benign baseline, a nonexistent-file control, and
