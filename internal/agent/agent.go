@@ -591,6 +591,15 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 	a.registerVerifySSTITool(reg)
 	a.registerVerifyPathTraversalTool(reg)
 
+	// Register the JSON body-contract discovery probe (probe_body_contract):
+	// arjun and the surface machinery only see query/form parameters, so a JSON
+	// API that answers with its own validation error is a dead end. The probe
+	// mutates body fields (remove/add/retype) and diffs the app's status and
+	// error signatures to classify required/recognized/rejected fields, so the
+	// agent can build a valid body and inject into the real parameters.
+	// Agent-bound: needs the scope config, the scan target, and the ledger.
+	a.registerProbeBodyContractTool(reg)
+
 	// Register the deterministic authentication/authorization enforcement-bypass
 	// confirmer (verify_authbypass): the path-shape sibling of authz_matrix.
 	// Given a protected canonical route (or hypothesis), it re-requests the
