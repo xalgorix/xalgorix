@@ -282,25 +282,44 @@ func isKnownProvider(candidate string) bool {
 	return false
 }
 
+// routingProvider splits the configured model into the provider used for
+// endpoint routing and the model ID sent upstream. A leading "<provider>/"
+// that names a known provider selects that provider and is removed from the
+// model; otherwise the explicit XALGORIX_LLM_PROVIDER applies.
+//
+// An explicit Custom Provider is the exception. Its endpoint is supplied by
+// the operator and speaks the chat-completions protocol, so a gateway model
+// ID such as "vendor/model" names a model on that endpoint and is sent
+// verbatim; treating "vendor" as the provider would re-route the request to
+// the vendor's own protocol and strip the ID the gateway expects. Only a
+// redundant "custom/" prefix is removed, matching a saved Custom Provider
+// profile.
+func routingProvider(model, explicitProvider string) (provider, apiModel string) {
+	explicit := strings.ToLower(strings.TrimSpace(explicitProvider))
+	if explicit == "custom" {
+		return explicit, modelForProvider(model, explicit)
+	}
+	if idx := strings.Index(model, "/"); idx >= 0 {
+		candidate := strings.ToLower(model[:idx])
+		if isKnownProvider(candidate) {
+			return candidate, model[idx+1:]
+		}
+	}
+	return explicit, model
+}
+
 // NewClient creates a new LLM client. Optional opts (such as
 // WithResolver) tune the client for catalog-aware resolution; the
 // no-option form preserves the existing legacy resolveEndpoint
 // behavior so existing callers compile unchanged.
 func NewClient(cfg *config.Config, opts ...Option) *Client {
 	apiModel := ""
+	explicitProvider := ""
 	if cfg != nil {
 		apiModel = cfg.ResolveModel()
+		explicitProvider = cfg.LLMProvider
 	}
-	provider := ""
-	if idx := strings.Index(apiModel, "/"); idx >= 0 {
-		candidate := strings.ToLower(apiModel[:idx])
-		if isKnownProvider(candidate) {
-			provider = candidate
-		}
-	}
-	if provider == "" && cfg != nil && strings.TrimSpace(cfg.LLMProvider) != "" {
-		provider = strings.ToLower(strings.TrimSpace(cfg.LLMProvider))
-	}
+	provider, _ := routingProvider(apiModel, explicitProvider)
 	// Bound each outbound request. The 10-minute default suits hosted API
 	// backends; a local runtime (llama.cpp on CPU) can legitimately need far
 	// longer to prefill a large prompt, so allow overriding it via
@@ -836,29 +855,20 @@ func applyAuthHeaders(req *http.Request, ep Endpoint) {
 // reuse it (Requirement 2.3 — preserved endpoint shape).
 func (c *Client) resolveEndpoint() (string, string) {
 	apiBase := ""
+	explicitProvider := ""
 	if c.cfg != nil {
 		apiBase = c.cfg.APIBase
+		explicitProvider = c.cfg.LLMProvider
 	}
-	model := c.apiModel
 
 	// Extract provider prefix if present and recognized as a known provider
 	// (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6").
 	// Models with org-scoped names (e.g. "zai-org/GLM-5.3", "meta-llama/Llama-3.1-70B-Instruct")
-	// retain the full model identifier when the prefix is not a known provider.
-	provider := ""
-	if idx := strings.Index(model, "/"); idx >= 0 {
-		candidate := strings.ToLower(model[:idx])
-		if isKnownProvider(candidate) {
-			provider = candidate
-			model = model[idx+1:]
-		}
-	}
+	// retain the full model identifier when the prefix is not a known provider,
+	// and an explicit Custom Provider keeps every model ID verbatim.
+	provider, model := routingProvider(c.apiModel, explicitProvider)
 	if provider == "" {
-		if c.cfg != nil && strings.TrimSpace(c.cfg.LLMProvider) != "" {
-			provider = strings.ToLower(strings.TrimSpace(c.cfg.LLMProvider))
-		} else if c.provider != "" {
-			provider = c.provider
-		}
+		provider = c.provider
 	}
 
 	providerBases := legacyProviderBases
