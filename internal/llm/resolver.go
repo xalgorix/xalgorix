@@ -268,7 +268,7 @@ func (c *compositeResolver) Resolve(ctx context.Context) (Endpoint, error) {
 // an operator-supplied XALGORIX_API_BASE, so the key is never sent to a
 // guessed host.
 func explicitLegacyProvider(cfg *config.Config) bool {
-	if strings.TrimSpace(cfg.LLMProvider) == "" {
+	if strings.TrimSpace(cfg.LLMProvider) == "" || strings.TrimSpace(cfg.LLM) == "" {
 		return false
 	}
 	if strings.TrimSpace(cfg.APIBase) != "" {

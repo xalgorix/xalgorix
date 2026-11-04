@@ -157,6 +157,20 @@ func TestCustomProvider_ExplicitProviderWithoutPrefixUnchanged(t *testing.T) {
 			wantStyle: "openai",
 		},
 		{
+			name:      "custom on the vendor's regional host",
+			cfg:       config.Config{LLMProvider: "custom", LLM: "moonshot/kimi-k2", APIBase: "https://api.moonshot.ai/v1", APIKey: "k"},
+			wantURL:   "https://api.moonshot.ai/v1/chat/completions",
+			wantModel: "kimi-k2",
+			wantStyle: "openai",
+		},
+		{
+			name:      "custom on a local runtime's default port",
+			cfg:       config.Config{LLMProvider: "custom", LLM: "ollama/llama3", APIBase: "http://127.0.0.1:11434/v1", APIKey: "k"},
+			wantURL:   "http://127.0.0.1:11434/v1/chat/completions",
+			wantModel: "llama3",
+			wantStyle: "openai",
+		},
+		{
 			name:      "custom on a messages-protocol base",
 			cfg:       config.Config{LLMProvider: "custom", LLM: "anthropic/claude-sonnet-4.5", APIBase: "https://api.anthropic.com", APIKey: "k"},
 			wantURL:   "https://api.anthropic.com/v1/messages",
@@ -258,6 +272,7 @@ func TestResolver_ExplicitProviderWithBareModel(t *testing.T) {
 		cfg  config.Config
 	}{
 		{name: "missing key", cfg: config.Config{LLMProvider: "openai", LLM: "gpt-5.6"}},
+		{name: "missing model", cfg: config.Config{LLMProvider: "custom", APIBase: "https://llm.example/v1", APIKey: "k"}},
 		{name: "custom without base", cfg: config.Config{LLMProvider: "custom", LLM: "my-model", APIKey: "k"}},
 		{name: "catalog-only provider without base", cfg: config.Config{LLMProvider: "openrouter", LLM: "my-model", APIKey: "k"}},
 		// The prefix, not the explicit provider, picks the route here, and

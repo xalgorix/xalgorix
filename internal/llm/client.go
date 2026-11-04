@@ -315,8 +315,10 @@ func routingProvider(model, explicitProvider, apiBase string) (provider, apiMode
 
 // baseServesProvider reports whether apiBase is the provider's own API
 // rather than a gateway in front of it: the messages or generateContent
-// base-URL shapes the request builder already switches protocol on, or the
-// host of the provider's default base URL.
+// base-URL shapes the request builder already switches protocol on, the
+// site of the provider's default base URL (any subdomain or regional TLD),
+// or, for a local runtime whose default is localhost, its default port on
+// any host.
 func baseServesProvider(apiBase, provider string) bool {
 	switch provider {
 	case "anthropic":
@@ -337,7 +339,23 @@ func baseServesProvider(apiBase, provider string) bool {
 		return false
 	}
 	def, err := url.Parse(defaultBase)
-	return err == nil && strings.EqualFold(base.Hostname(), def.Hostname())
+	if err != nil || def.Hostname() == "" {
+		return false
+	}
+	if strings.EqualFold(def.Hostname(), "localhost") {
+		return def.Port() != "" && base.Port() == def.Port()
+	}
+	return strings.EqualFold(siteLabel(base.Hostname()), siteLabel(def.Hostname()))
+}
+
+// siteLabel returns the label just left of the TLD ("deepseek" for
+// "api.deepseek.com"), so regional variants of a vendor's API host match.
+func siteLabel(host string) string {
+	labels := strings.Split(strings.ToLower(host), ".")
+	if len(labels) < 2 {
+		return strings.ToLower(host)
+	}
+	return labels[len(labels)-2]
 }
 
 // NewClient creates a new LLM client. Optional opts (such as
