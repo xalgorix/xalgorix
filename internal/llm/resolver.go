@@ -13,10 +13,12 @@
 //     AND that entry's Provider matches a Builtin() catalog id →
 //     dispatch through catalogResolver.
 //
-//  2. Else cfg.LLM matches Legacy_Provider_Shape AND cfg.APIKey is
+//  2. Else cfg.LLM matches Legacy_Provider_Shape (or
+//     cfg.LLMProvider names a routable provider) AND cfg.APIKey is
 //     set → dispatch through legacyResolver. This preserves the
 //     v4.4.21 path for operators upgrading without re-saving
-//     credentials through the new UI.
+//     credentials through the new UI, and covers the provider +
+//     bare model shape written by `xalgorix --setup`.
 //
 //  3. Otherwise → return *ConfigError "no provider configured".
 //
@@ -248,7 +250,7 @@ func (c *compositeResolver) Resolve(ctx context.Context) (Endpoint, error) {
 	// Branch 2 — legacy fallback. cfg.APIKey must also be set per
 	// the new precedence rules so a stale cfg.LLM without
 	// credentials does not produce a broken outbound request.
-	if c.cfg != nil && LegacyProviderShape(c.cfg.LLM) && strings.TrimSpace(c.cfg.APIKey) != "" {
+	if c.cfg != nil && (LegacyProviderShape(c.cfg.LLM) || explicitLegacyProvider(c.cfg)) && strings.TrimSpace(c.cfg.APIKey) != "" {
 		lr := &legacyResolver{cfg: c.cfg}
 		return lr.Resolve(ctx)
 	}
@@ -257,6 +259,24 @@ func (c *compositeResolver) Resolve(ctx context.Context) (Endpoint, error) {
 	return Endpoint{}, &ConfigError{
 		Msg: "no provider configured: set XALGORIX_LLM_PROFILE to a saved credential or set XALGORIX_LLM + XALGORIX_API_KEY",
 	}
+}
+
+// explicitLegacyProvider reports whether XALGORIX_LLM_PROVIDER alone lets
+// the legacy resolver route a request without a saved profile — the
+// provider + bare model ID shape that `xalgorix --setup` writes. The provider
+// the request will actually use needs either a built-in default base URL or
+// an operator-supplied XALGORIX_API_BASE, so the key is never sent to a
+// guessed host.
+func explicitLegacyProvider(cfg *config.Config) bool {
+	if strings.TrimSpace(cfg.LLMProvider) == "" || strings.TrimSpace(cfg.LLM) == "" {
+		return false
+	}
+	if strings.TrimSpace(cfg.APIBase) != "" {
+		return true
+	}
+	provider, _ := routingProvider(cfg.LLM, cfg.LLMProvider, cfg.APIBase)
+	_, ok := legacyProviderBases[provider]
+	return ok
 }
 
 func providerAllowsNoAuth(entry providers.Entry) bool {
@@ -288,19 +308,7 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 	}
 
 	apiBase := l.cfg.APIBase
-	model := l.cfg.LLM
-
-	provider := ""
-	if idx := strings.Index(model, "/"); idx >= 0 {
-		candidate := strings.ToLower(model[:idx])
-		if isKnownProvider(candidate) {
-			provider = candidate
-			model = model[idx+1:]
-		}
-	}
-	if provider == "" && l.cfg != nil && strings.TrimSpace(l.cfg.LLMProvider) != "" {
-		provider = strings.ToLower(strings.TrimSpace(l.cfg.LLMProvider))
-	}
+	provider, model := routingProvider(l.cfg.LLM, l.cfg.LLMProvider, apiBase)
 	if apiBase == "" {
 		if knownBase, ok := legacyProviderBases[provider]; ok {
 			apiBase = knownBase

@@ -282,25 +282,96 @@ func isKnownProvider(candidate string) bool {
 	return false
 }
 
+// routingProvider splits the configured model into the provider used for
+// endpoint routing and the model ID sent upstream. A leading "<provider>/"
+// that names a known provider selects that provider and is removed from the
+// model; otherwise the explicit XALGORIX_LLM_PROVIDER applies.
+//
+// An explicit Custom Provider pointed at a gateway is the exception: a
+// gateway model ID such as "vendor/model" names a model on that endpoint and
+// is sent verbatim, because treating "vendor" as the provider would re-route
+// the request to the vendor's own protocol and strip the ID the gateway
+// expects. Only a redundant "custom/" prefix is removed, matching a saved
+// Custom Provider profile. When the custom base URL is that vendor's own API,
+// or no base URL is set, the prefix still selects the provider as before.
+func routingProvider(model, explicitProvider, apiBase string) (provider, apiModel string) {
+	explicit := strings.ToLower(strings.TrimSpace(explicitProvider))
+	prefixProvider, bareModel := "", model
+	if idx := strings.Index(model, "/"); idx >= 0 {
+		candidate := strings.ToLower(model[:idx])
+		if isKnownProvider(candidate) {
+			prefixProvider, bareModel = candidate, model[idx+1:]
+		}
+	}
+	if explicit == "custom" && (prefixProvider == "" || prefixProvider == "custom" ||
+		(strings.TrimSpace(apiBase) != "" && !baseServesProvider(apiBase, prefixProvider))) {
+		return explicit, modelForProvider(model, explicit)
+	}
+	if prefixProvider != "" {
+		return prefixProvider, bareModel
+	}
+	return explicit, model
+}
+
+// baseServesProvider reports whether apiBase is the provider's own API
+// rather than a gateway in front of it: the messages or generateContent
+// base-URL shapes the request builder already switches protocol on, the
+// site of the provider's default base URL (any subdomain or regional TLD),
+// or, for a local runtime whose default is localhost, its default port on
+// any host.
+func baseServesProvider(apiBase, provider string) bool {
+	switch provider {
+	case "anthropic":
+		return isAnthropicAPIBase(apiBase)
+	case "google", "gemini":
+		return isGeminiAPIBase(apiBase)
+	}
+	defaultBase, ok := legacyProviderBases[provider]
+	if !ok {
+		entry, found := providers.LookupBuiltin(provider)
+		if !found {
+			return false
+		}
+		defaultBase = entry.BaseURL
+	}
+	base, err := url.Parse(strings.TrimSpace(apiBase))
+	if err != nil || base.Hostname() == "" {
+		return false
+	}
+	def, err := url.Parse(defaultBase)
+	if err != nil || def.Hostname() == "" {
+		return false
+	}
+	if strings.EqualFold(def.Hostname(), "localhost") {
+		return def.Port() != "" && base.Port() == def.Port()
+	}
+	return strings.EqualFold(siteLabel(base.Hostname()), siteLabel(def.Hostname()))
+}
+
+// siteLabel returns the label just left of the TLD ("deepseek" for
+// "api.deepseek.com"), so regional variants of a vendor's API host match.
+func siteLabel(host string) string {
+	labels := strings.Split(strings.ToLower(host), ".")
+	if len(labels) < 2 {
+		return strings.ToLower(host)
+	}
+	return labels[len(labels)-2]
+}
+
 // NewClient creates a new LLM client. Optional opts (such as
 // WithResolver) tune the client for catalog-aware resolution; the
 // no-option form preserves the existing legacy resolveEndpoint
 // behavior so existing callers compile unchanged.
 func NewClient(cfg *config.Config, opts ...Option) *Client {
 	apiModel := ""
+	explicitProvider := ""
+	apiBase := ""
 	if cfg != nil {
 		apiModel = cfg.ResolveModel()
+		explicitProvider = cfg.LLMProvider
+		apiBase = cfg.APIBase
 	}
-	provider := ""
-	if idx := strings.Index(apiModel, "/"); idx >= 0 {
-		candidate := strings.ToLower(apiModel[:idx])
-		if isKnownProvider(candidate) {
-			provider = candidate
-		}
-	}
-	if provider == "" && cfg != nil && strings.TrimSpace(cfg.LLMProvider) != "" {
-		provider = strings.ToLower(strings.TrimSpace(cfg.LLMProvider))
-	}
+	provider, _ := routingProvider(apiModel, explicitProvider, apiBase)
 	// Bound each outbound request. The 10-minute default suits hosted API
 	// backends; a local runtime (llama.cpp on CPU) can legitimately need far
 	// longer to prefill a large prompt, so allow overriding it via
@@ -836,29 +907,20 @@ func applyAuthHeaders(req *http.Request, ep Endpoint) {
 // reuse it (Requirement 2.3 — preserved endpoint shape).
 func (c *Client) resolveEndpoint() (string, string) {
 	apiBase := ""
+	explicitProvider := ""
 	if c.cfg != nil {
 		apiBase = c.cfg.APIBase
+		explicitProvider = c.cfg.LLMProvider
 	}
-	model := c.apiModel
 
 	// Extract provider prefix if present and recognized as a known provider
 	// (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6").
 	// Models with org-scoped names (e.g. "zai-org/GLM-5.3", "meta-llama/Llama-3.1-70B-Instruct")
-	// retain the full model identifier when the prefix is not a known provider.
-	provider := ""
-	if idx := strings.Index(model, "/"); idx >= 0 {
-		candidate := strings.ToLower(model[:idx])
-		if isKnownProvider(candidate) {
-			provider = candidate
-			model = model[idx+1:]
-		}
-	}
+	// retain the full model identifier when the prefix is not a known provider,
+	// and an explicit Custom Provider in front of a gateway keeps the ID verbatim.
+	provider, model := routingProvider(c.apiModel, explicitProvider, apiBase)
 	if provider == "" {
-		if c.cfg != nil && strings.TrimSpace(c.cfg.LLMProvider) != "" {
-			provider = strings.ToLower(strings.TrimSpace(c.cfg.LLMProvider))
-		} else if c.provider != "" {
-			provider = c.provider
-		}
+		provider = c.provider
 	}
 
 	providerBases := legacyProviderBases
