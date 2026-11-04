@@ -287,25 +287,57 @@ func isKnownProvider(candidate string) bool {
 // that names a known provider selects that provider and is removed from the
 // model; otherwise the explicit XALGORIX_LLM_PROVIDER applies.
 //
-// An explicit Custom Provider is the exception. Its endpoint is supplied by
-// the operator and speaks the chat-completions protocol, so a gateway model
-// ID such as "vendor/model" names a model on that endpoint and is sent
-// verbatim; treating "vendor" as the provider would re-route the request to
-// the vendor's own protocol and strip the ID the gateway expects. Only a
-// redundant "custom/" prefix is removed, matching a saved Custom Provider
-// profile.
-func routingProvider(model, explicitProvider string) (provider, apiModel string) {
+// An explicit Custom Provider pointed at a gateway is the exception: a
+// gateway model ID such as "vendor/model" names a model on that endpoint and
+// is sent verbatim, because treating "vendor" as the provider would re-route
+// the request to the vendor's own protocol and strip the ID the gateway
+// expects. Only a redundant "custom/" prefix is removed, matching a saved
+// Custom Provider profile. When the custom base URL is that vendor's own API,
+// or no base URL is set, the prefix still selects the provider as before.
+func routingProvider(model, explicitProvider, apiBase string) (provider, apiModel string) {
 	explicit := strings.ToLower(strings.TrimSpace(explicitProvider))
-	if explicit == "custom" {
-		return explicit, modelForProvider(model, explicit)
-	}
+	prefixProvider, bareModel := "", model
 	if idx := strings.Index(model, "/"); idx >= 0 {
 		candidate := strings.ToLower(model[:idx])
 		if isKnownProvider(candidate) {
-			return candidate, model[idx+1:]
+			prefixProvider, bareModel = candidate, model[idx+1:]
 		}
 	}
+	if explicit == "custom" && (prefixProvider == "" || prefixProvider == "custom" ||
+		(strings.TrimSpace(apiBase) != "" && !baseServesProvider(apiBase, prefixProvider))) {
+		return explicit, modelForProvider(model, explicit)
+	}
+	if prefixProvider != "" {
+		return prefixProvider, bareModel
+	}
 	return explicit, model
+}
+
+// baseServesProvider reports whether apiBase is the provider's own API
+// rather than a gateway in front of it: the messages or generateContent
+// base-URL shapes the request builder already switches protocol on, or the
+// host of the provider's default base URL.
+func baseServesProvider(apiBase, provider string) bool {
+	switch provider {
+	case "anthropic":
+		return isAnthropicAPIBase(apiBase)
+	case "google", "gemini":
+		return isGeminiAPIBase(apiBase)
+	}
+	defaultBase, ok := legacyProviderBases[provider]
+	if !ok {
+		entry, found := providers.LookupBuiltin(provider)
+		if !found {
+			return false
+		}
+		defaultBase = entry.BaseURL
+	}
+	base, err := url.Parse(strings.TrimSpace(apiBase))
+	if err != nil || base.Hostname() == "" {
+		return false
+	}
+	def, err := url.Parse(defaultBase)
+	return err == nil && strings.EqualFold(base.Hostname(), def.Hostname())
 }
 
 // NewClient creates a new LLM client. Optional opts (such as
@@ -315,11 +347,13 @@ func routingProvider(model, explicitProvider string) (provider, apiModel string)
 func NewClient(cfg *config.Config, opts ...Option) *Client {
 	apiModel := ""
 	explicitProvider := ""
+	apiBase := ""
 	if cfg != nil {
 		apiModel = cfg.ResolveModel()
 		explicitProvider = cfg.LLMProvider
+		apiBase = cfg.APIBase
 	}
-	provider, _ := routingProvider(apiModel, explicitProvider)
+	provider, _ := routingProvider(apiModel, explicitProvider, apiBase)
 	// Bound each outbound request. The 10-minute default suits hosted API
 	// backends; a local runtime (llama.cpp on CPU) can legitimately need far
 	// longer to prefill a large prompt, so allow overriding it via
@@ -865,8 +899,8 @@ func (c *Client) resolveEndpoint() (string, string) {
 	// (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6").
 	// Models with org-scoped names (e.g. "zai-org/GLM-5.3", "meta-llama/Llama-3.1-70B-Instruct")
 	// retain the full model identifier when the prefix is not a known provider,
-	// and an explicit Custom Provider keeps every model ID verbatim.
-	provider, model := routingProvider(c.apiModel, explicitProvider)
+	// and an explicit Custom Provider in front of a gateway keeps the ID verbatim.
+	provider, model := routingProvider(c.apiModel, explicitProvider, apiBase)
 	if provider == "" {
 		provider = c.provider
 	}

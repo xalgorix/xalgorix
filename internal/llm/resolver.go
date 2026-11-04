@@ -264,17 +264,19 @@ func (c *compositeResolver) Resolve(ctx context.Context) (Endpoint, error) {
 // explicitLegacyProvider reports whether XALGORIX_LLM_PROVIDER alone lets
 // the legacy resolver route a request without a saved profile — the
 // provider + bare model ID shape that `xalgorix --setup` writes. The provider
-// needs either a built-in default base URL or an operator-supplied
-// XALGORIX_API_BASE, so the key is never sent to a guessed host.
+// the request will actually use needs either a built-in default base URL or
+// an operator-supplied XALGORIX_API_BASE, so the key is never sent to a
+// guessed host.
 func explicitLegacyProvider(cfg *config.Config) bool {
-	provider := strings.ToLower(strings.TrimSpace(cfg.LLMProvider))
-	if provider == "" {
+	if strings.TrimSpace(cfg.LLMProvider) == "" {
 		return false
 	}
-	if _, ok := legacyProviderBases[provider]; ok {
+	if strings.TrimSpace(cfg.APIBase) != "" {
 		return true
 	}
-	return strings.TrimSpace(cfg.APIBase) != ""
+	provider, _ := routingProvider(cfg.LLM, cfg.LLMProvider, cfg.APIBase)
+	_, ok := legacyProviderBases[provider]
+	return ok
 }
 
 func providerAllowsNoAuth(entry providers.Entry) bool {
@@ -306,7 +308,7 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 	}
 
 	apiBase := l.cfg.APIBase
-	provider, model := routingProvider(l.cfg.LLM, l.cfg.LLMProvider)
+	provider, model := routingProvider(l.cfg.LLM, l.cfg.LLMProvider, apiBase)
 	if apiBase == "" {
 		if knownBase, ok := legacyProviderBases[provider]; ok {
 			apiBase = knownBase

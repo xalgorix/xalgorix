@@ -65,7 +65,8 @@ func TestCustomProvider_KeepsGatewayModelIDs(t *testing.T) {
 			for path, resolve := range endpointResolvers(t, cfg) {
 				ep, err := resolve()
 				if err != nil {
-					t.Fatalf("%s: Resolve: %v", path, err)
+					t.Errorf("%s: Resolve: %v", path, err)
+					continue
 				}
 				if ep.URL != wantURL {
 					t.Errorf("%s: URL = %q, want %q", path, ep.URL, wantURL)
@@ -129,8 +130,10 @@ func TestCustomProvider_RequestReachesConfiguredEndpoint(t *testing.T) {
 }
 
 // TestCustomProvider_ExplicitProviderWithoutPrefixUnchanged pins the paths
-// this change must not move: no explicit provider keeps prefix routing, and
-// an explicit provider that matches the prefix still strips it.
+// this change must not move: no explicit provider keeps prefix routing, an
+// explicit provider that matches the prefix still strips it, and a custom
+// provider whose base URL is the prefixed vendor's own API (or that has no
+// base URL at all) still routes by the prefix.
 func TestCustomProvider_ExplicitProviderWithoutPrefixUnchanged(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -139,6 +142,41 @@ func TestCustomProvider_ExplicitProviderWithoutPrefixUnchanged(t *testing.T) {
 		wantModel string
 		wantStyle string
 	}{
+		{
+			name:      "custom on the vendor's own chat-completions API",
+			cfg:       config.Config{LLMProvider: "custom", LLM: "deepseek/deepseek-v4", APIBase: "https://api.deepseek.com/v1", APIKey: "k"},
+			wantURL:   "https://api.deepseek.com/v1/chat/completions",
+			wantModel: "deepseek-v4",
+			wantStyle: "openai",
+		},
+		{
+			name:      "custom on the vendor's own versioned API",
+			cfg:       config.Config{LLMProvider: "custom", LLM: "zai/GLM-5.3", APIBase: "https://api.z.ai/api/paas/v4", APIKey: "k"},
+			wantURL:   "https://api.z.ai/api/paas/v4/chat/completions",
+			wantModel: "glm-5.3",
+			wantStyle: "openai",
+		},
+		{
+			name:      "custom on a messages-protocol base",
+			cfg:       config.Config{LLMProvider: "custom", LLM: "anthropic/claude-sonnet-4.5", APIBase: "https://api.anthropic.com", APIKey: "k"},
+			wantURL:   "https://api.anthropic.com/v1/messages",
+			wantModel: "claude-sonnet-4.5",
+			wantStyle: "anthropic",
+		},
+		{
+			name:      "custom on a generateContent base",
+			cfg:       config.Config{LLMProvider: "custom", LLM: "google/gemini-3-pro", APIBase: "https://generativelanguage.googleapis.com", APIKey: "k"},
+			wantURL:   "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:generateContent",
+			wantModel: "gemini-3-pro",
+			wantStyle: "gemini",
+		},
+		{
+			name:      "custom without a base URL",
+			cfg:       config.Config{LLMProvider: "custom", LLM: "anthropic/claude-sonnet-4.5", APIKey: "k"},
+			wantURL:   "https://api.anthropic.com/v1/messages",
+			wantModel: "claude-sonnet-4.5",
+			wantStyle: "anthropic",
+		},
 		{
 			name:      "prefix routing without explicit provider",
 			cfg:       config.Config{LLM: "anthropic/claude-sonnet-4.5", APIKey: "k"},
@@ -160,7 +198,8 @@ func TestCustomProvider_ExplicitProviderWithoutPrefixUnchanged(t *testing.T) {
 			for path, resolve := range endpointResolvers(t, &cfg) {
 				ep, err := resolve()
 				if err != nil {
-					t.Fatalf("%s: Resolve: %v", path, err)
+					t.Errorf("%s: Resolve: %v", path, err)
+					continue
 				}
 				if ep.URL != tc.wantURL || ep.Model != tc.wantModel || ep.HeaderStyle != tc.wantStyle {
 					t.Errorf("%s: got (%q, %q, %q), want (%q, %q, %q)", path,
@@ -202,7 +241,8 @@ func TestResolver_ExplicitProviderWithBareModel(t *testing.T) {
 			for path, resolve := range endpointResolvers(t, &cfg) {
 				ep, err := resolve()
 				if err != nil {
-					t.Fatalf("%s: Resolve: %v", path, err)
+					t.Errorf("%s: Resolve: %v", path, err)
+					continue
 				}
 				if ep.URL != tc.wantURL || ep.Model != tc.wantModel {
 					t.Errorf("%s: got (%q, %q), want (%q, %q)", path, ep.URL, ep.Model, tc.wantURL, tc.wantModel)
@@ -220,6 +260,9 @@ func TestResolver_ExplicitProviderWithBareModel(t *testing.T) {
 		{name: "missing key", cfg: config.Config{LLMProvider: "openai", LLM: "gpt-5.6"}},
 		{name: "custom without base", cfg: config.Config{LLMProvider: "custom", LLM: "my-model", APIKey: "k"}},
 		{name: "catalog-only provider without base", cfg: config.Config{LLMProvider: "openrouter", LLM: "my-model", APIKey: "k"}},
+		// The prefix, not the explicit provider, picks the route here, and
+		// that provider has no default base URL.
+		{name: "catalog-only prefix without base", cfg: config.Config{LLMProvider: "groq", LLM: "qwen/qwen3-32b", APIKey: "k"}},
 	}
 	for _, tc := range unroutable {
 		t.Run(tc.name, func(t *testing.T) {
