@@ -23,7 +23,8 @@
 // machine/listener), uses the scan's session auth, does not follow redirects,
 // honors the request-rate policy and cancellation, and is disabled in passive
 // mode. It reuses the shared injection-probe helpers (resolveInjectionURL,
-// sendInjectionProbe, injectionRateGate, withQueryParam).
+// sendInjectionRequest, injectionRateGate, and the injectionPoint builder, so it
+// can inject into a query parameter or a JSON/form body field).
 package agent
 
 import (
@@ -44,11 +45,14 @@ func (a *Agent) registerVerifySSTITool(reg *tools.Registry) {
 		Name:        "verify_ssti",
 		Description: "Deterministically CONFIRM server-side template injection on a live parameter (the SSTI sibling of verify_sqli). Give it a ledger hypothesis_id (a source-route/authenticated-endpoint hypothesis) OR a url, plus the parameter to test. It issues a benign baseline plus template payloads with RANDOMIZED operands — {{a*b}} (Jinja2/Twig/Nunjucks) and ${a*b} (Freemarker/JSP-EL/Velocity) — and confirms injection when the computed product appears in the probe response but NOT the baseline (a reflected-but-not-evaluated app echoes the literal {{a*b}}, never its product). On success it records exploit-proven evidence in the ledger; report it as High CWE-1336 SSTI (paste the evaluated arithmetic) and pivot toward RCE via the engine's gadget. Uses the scan session auth, does not follow redirects, disabled in passive mode. Reach for it the moment you hit a parameter that a template sink flows into or that reflects into rendered markup.",
 		Parameters: []tools.Parameter{
-			{Name: "parameter", Description: "The query parameter to inject the template expression into (e.g. name, tpl, q). Required.", Required: true},
+			{Name: "parameter", Description: "The parameter to inject the template expression into (e.g. name, tpl, q). For inject_in=body this is the JSON/form field name. Required.", Required: true},
 			{Name: "hypothesis_id", Description: "Optional ledger hypothesis id carrying an HTTP path (e.g. H-7). Its endpoint is used as the URL when 'url' is not given.", Required: false},
 			{Name: "url", Description: "Optional absolute URL (scheme://host/path) or path to test. Overrides the hypothesis endpoint. One of url or hypothesis_id is required.", Required: false},
-			{Name: "method", Description: "HTTP method (default GET). The payload is placed in the query string.", Required: false},
+			{Name: "method", Description: "HTTP method. Default GET for inject_in=query, POST for inject_in=body.", Required: false},
 			{Name: "base_value", Description: "Benign base value for the baseline request (default 'xalg'). The template payloads are independent of it.", Required: false},
+			{Name: "inject_in", Description: "Where to place the payload: 'query' (default) or 'body'. Use 'body' for POST/PUT/PATCH JSON or form parameters (e.g. fields discovered by probe_body_contract).", Required: false},
+			{Name: "body_type", Description: "For inject_in=body: 'json' (default) or 'form'. Sets the Content-Type and how the parameter is encoded.", Required: false},
+			{Name: "base_body", Description: "For inject_in=body: an optional JSON object (or form-encoded string) of sibling fields to send alongside the injected parameter, e.g. the REQUIRED fields from probe_body_contract so the request validates.", Required: false},
 		},
 		Execute: a.verifySSTITool,
 	})
@@ -99,10 +103,11 @@ func (a *Agent) verifySSTITool(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: fmt.Sprintf("verify_ssti refused: %q resolves to the operator's own machine or local network, not the engagement target.", u.Host)}, nil
 	}
 
-	method := strings.ToUpper(strings.TrimSpace(args["method"]))
-	if method == "" {
-		method = "GET"
+	ip, ipErr := resolveInjectionPoint(args)
+	if ipErr != nil {
+		return tools.Result{Error: "verify_ssti: " + ipErr.Error()}, nil
 	}
+	method := ip.defaultMethod(args["method"])
 	baseVal := strings.TrimSpace(args["base_value"])
 	if baseVal == "" {
 		baseVal = "xalg"
@@ -118,14 +123,14 @@ func (a *Agent) verifySSTITool(args map[string]string) (tools.Result, error) {
 	opB := randRange(211, 989)
 	product := strconv.Itoa(opA * opB)
 
-	baselineURL, e0 := withQueryParam(u, parameter, baseVal)
+	baselineURL, baselineReqBody, contentType, e0 := ip.buildRequest(u, parameter, baseVal)
 	if e0 != nil {
-		return tools.Result{Error: "verify_ssti: could not build the baseline URL for parameter " + parameter}, nil
+		return tools.Result{Error: "verify_ssti: could not build the baseline request for parameter " + parameter + ": " + e0.Error()}, nil
 	}
 	if stop := a.injectionRateGate(); stop != "" {
 		return tools.Result{Error: stop}, nil
 	}
-	baselineBody, _, bErr := a.sendInjectionProbe(method, baselineURL, headers)
+	baselineBody, _, bErr := a.sendInjectionRequest(method, baselineURL, baselineReqBody, contentType, headers)
 	if bErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_ssti: baseline request failed: %v", bErr)}, nil
 	}
@@ -140,11 +145,11 @@ func (a *Agent) verifySSTITool(args map[string]string) (tools.Result, error) {
 		if stop := a.injectionRateGate(); stop != "" {
 			return tools.Result{Error: stop}, nil
 		}
-		probeURL, e := withQueryParam(u, parameter, p.payload)
+		probeURL, probeReqBody, probeCT, e := ip.buildRequest(u, parameter, p.payload)
 		if e != nil {
 			continue
 		}
-		probeBody, probeReqLine, pErr := a.sendInjectionProbe(method, probeURL, headers)
+		probeBody, probeReqLine, pErr := a.sendInjectionRequest(method, probeURL, probeReqBody, probeCT, headers)
 		if pErr != nil {
 			return tools.Result{Error: fmt.Sprintf("verify_ssti: %s probe request failed: %v", p.family, pErr)}, nil
 		}

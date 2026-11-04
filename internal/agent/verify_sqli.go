@@ -41,7 +41,6 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
-	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
 	"github.com/xalgord/xalgorix/v4/internal/tools/reporting"
 )
 
@@ -50,11 +49,14 @@ func (a *Agent) registerVerifySQLiTool(reg *tools.Registry) {
 		Name:        "verify_sqli",
 		Description: "Deterministically CONFIRM error-based SQL injection on a live parameter (the SQLi counterpart of verify_xss). Give it a ledger hypothesis_id (a source-route/authenticated-endpoint hypothesis) OR a url, plus the parameter to test. It issues three scope-gated requests — a benign baseline, a single-quote payload that breaks SQL syntax, and a doubled-quote payload that re-balances it — and confirms injection when a DBMS error (You have an error in your SQL syntax, ORA-#####, SQLSTATE, PG/psql, SQLite, unclosed quotation mark) appears on the broken request but NOT on the benign baseline. On success it records exploit-proven evidence in the ledger; report it as High CWE-89 error-based SQLi (paste the DBMS error). Uses the scan session auth, does not follow redirects, disabled in passive mode. Reach for it the moment you hit a parameter that reflects a SQL error or that a source sink flows into.",
 		Parameters: []tools.Parameter{
-			{Name: "parameter", Description: "The query parameter to inject the quote into (e.g. uid, id, q). Required.", Required: true},
+			{Name: "parameter", Description: "The parameter to inject the quote into (e.g. uid, id, q). For inject_in=body this is the JSON/form field name. Required.", Required: true},
 			{Name: "hypothesis_id", Description: "Optional ledger hypothesis id carrying an HTTP path (e.g. H-7). Its endpoint is used as the URL when 'url' is not given.", Required: false},
 			{Name: "url", Description: "Optional absolute URL (scheme://host/path) or path to test. Overrides the hypothesis endpoint. One of url or hypothesis_id is required.", Required: false},
-			{Name: "method", Description: "HTTP method (default GET). The injected parameter is placed in the query string.", Required: false},
+			{Name: "method", Description: "HTTP method. Default GET for inject_in=query, POST for inject_in=body.", Required: false},
 			{Name: "base_value", Description: "Benign base value the parameter normally takes (default '1'). Payloads are base_value+\"'\" (broken) and base_value+\"''\" (balanced).", Required: false},
+			{Name: "inject_in", Description: "Where to place the payload: 'query' (default) or 'body'. Use 'body' for POST/PUT/PATCH JSON or form parameters (e.g. fields discovered by probe_body_contract).", Required: false},
+			{Name: "body_type", Description: "For inject_in=body: 'json' (default) or 'form'. Sets the Content-Type and how the parameter is encoded.", Required: false},
+			{Name: "base_body", Description: "For inject_in=body: an optional JSON object (or form-encoded string) of sibling fields to send alongside the injected parameter, e.g. the REQUIRED fields from probe_body_contract so the request validates.", Required: false},
 		},
 		Execute: a.verifySQLiTool,
 	})
@@ -105,10 +107,11 @@ func (a *Agent) verifySQLiTool(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli refused: %q resolves to the operator's own machine or local network, not the engagement target.", u.Host)}, nil
 	}
 
-	method := strings.ToUpper(strings.TrimSpace(args["method"]))
-	if method == "" {
-		method = "GET"
+	ip, ipErr := resolveInjectionPoint(args)
+	if ipErr != nil {
+		return tools.Result{Error: "verify_sqli: " + ipErr.Error()}, nil
 	}
+	method := ip.defaultMethod(args["method"])
 	baseVal := strings.TrimSpace(args["base_value"])
 	if baseVal == "" {
 		baseVal = "1"
@@ -119,32 +122,33 @@ func (a *Agent) verifySQLiTool(args map[string]string) (tools.Result, error) {
 
 	// Three payloads: benign baseline, single-quote (breaks syntax), doubled-quote
 	// (re-balances it). A real error-based injection errors on the broken one and
-	// stays clean on the baseline.
-	baselineURL, e1 := withQueryParam(u, parameter, baseVal)
-	brokenURL, e2 := withQueryParam(u, parameter, baseVal+"'")
-	balancedURL, e3 := withQueryParam(u, parameter, baseVal+"''")
+	// stays clean on the baseline. Each is placed at the chosen injection point
+	// (query parameter, or a JSON/form body field).
+	baselineReqURL, baselineReqBody, contentType, e1 := ip.buildRequest(u, parameter, baseVal)
+	brokenReqURL, brokenReqBody, _, e2 := ip.buildRequest(u, parameter, baseVal+"'")
+	balancedReqURL, balancedReqBody, _, e3 := ip.buildRequest(u, parameter, baseVal+"''")
 	if e1 != nil || e2 != nil || e3 != nil {
-		return tools.Result{Error: "verify_sqli: could not build injection URLs for parameter " + parameter}, nil
+		return tools.Result{Error: fmt.Sprintf("verify_sqli: could not build injection requests for parameter %s: %v", parameter, firstErr(e1, e2, e3))}, nil
 	}
 
 	if stop := a.injectionRateGate(); stop != "" {
 		return tools.Result{Error: stop}, nil
 	}
-	baselineBody, _, bErr := a.sendInjectionProbe(method, baselineURL, headers)
+	baselineBody, _, bErr := a.sendInjectionRequest(method, baselineReqURL, baselineReqBody, contentType, headers)
 	if bErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli: baseline request failed: %v", bErr)}, nil
 	}
 	if stop := a.injectionRateGate(); stop != "" {
 		return tools.Result{Error: stop}, nil
 	}
-	brokenBody, brokenReqLine, kErr := a.sendInjectionProbe(method, brokenURL, headers)
+	brokenBody, brokenReqLine, kErr := a.sendInjectionRequest(method, brokenReqURL, brokenReqBody, contentType, headers)
 	if kErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli: single-quote request failed: %v", kErr)}, nil
 	}
 	if stop := a.injectionRateGate(); stop != "" {
 		return tools.Result{Error: stop}, nil
 	}
-	balancedBody, _, lErr := a.sendInjectionProbe(method, balancedURL, headers)
+	balancedBody, _, lErr := a.sendInjectionRequest(method, balancedReqURL, balancedReqBody, contentType, headers)
 	if lErr != nil {
 		return tools.Result{Error: fmt.Sprintf("verify_sqli: doubled-quote request failed: %v", lErr)}, nil
 	}
@@ -279,23 +283,6 @@ func (a *Agent) injectionRateGate() string {
 		}
 	}
 	return ""
-}
-
-// sendInjectionProbe issues one scope-agnostic request (the host was scope-checked by
-// the caller) and returns the response body as a string plus the request line.
-func (a *Agent) sendInjectionProbe(method, rawURL string, headers map[string]string) (body, reqLine string, err error) {
-	reqLine = method + " " + rawURL
-	resp, e := httpclient.SendRaw(httpclient.RawRequest{
-		Method:          method,
-		URL:             rawURL,
-		Headers:         headers,
-		FollowRedirects: false,
-		TimeoutSec:      30,
-	})
-	if e != nil {
-		return "", reqLine, e
-	}
-	return string(resp.Body), reqLine, nil
 }
 
 // withQueryParam returns rawURL with the query parameter set to value.

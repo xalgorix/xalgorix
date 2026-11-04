@@ -3217,13 +3217,19 @@ func checkFalsePositive(title, description, severity, proof string) string {
 //	MySQL             → "you have an error in your sql", "sql syntax", "warning: mysql"
 //	generic JDBC/ODBC → "sqlstate"
 //	Oracle            → "ora-0"
-//	Postgres          → "psqlexception", "quoted string not properly terminated"
+//	Postgres          → "psqlexception", "quoted string not properly terminated",
+//	                    "syntax error at or near", "unterminated quoted string",
+//	                    "invalid input syntax for"
 //	SQLite            → "sqlite3::"
-//	MSSQL             → "unclosed quotation mark after the character string"
+//	MSSQL             → "unclosed quotation mark after the character string",
+//	                    "incorrect syntax near", "conversion failed when converting",
+//	                    "microsoft ole db provider for sql server",
+//	                    "odbc sql server driver", "system.data.sqlclient.sqlexception"
 //
 // A benign web response does not emit these by accident, so a response that
 // contains one after a quote injection proves the input reaches a SQL query
-// unsanitized. Defined once here as the single source of truth: the concrete-
+// unsanitized. Each string is engine-specific enough that a normal page does not
+// carry it. Defined once here as the single source of truth: the concrete-
 // impact indicators below embed it, and the agent's verify_sqli tool matches on
 // it via LooksLikeSQLError so the detector and the reporting gate never drift.
 var dbmsErrorSignatures = []string{
@@ -3231,6 +3237,12 @@ var dbmsErrorSignatures = []string{
 	"psqlexception", "sqlite3::", "unclosed quotation mark after the character string",
 	"sqlite3.operationalerror:", "sqlite3.programmingerror:", "sqlite_error:",
 	"quoted string not properly terminated", "warning: mysql",
+	// PostgreSQL
+	"syntax error at or near", "unterminated quoted string", "invalid input syntax for",
+	// MSSQL / SQL Server
+	"incorrect syntax near", "conversion failed when converting",
+	"microsoft ole db provider for sql server", "odbc sql server driver",
+	"system.data.sqlclient.sqlexception",
 }
 
 // LooksLikeSQLError reports whether text contains a DBMS error signature (see
