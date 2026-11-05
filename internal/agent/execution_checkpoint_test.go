@@ -201,3 +201,25 @@ func TestPassiveReconGuardSurvivesCheckpoint(t *testing.T) {
 		t.Fatal("restart restarted completed passive reconnaissance")
 	}
 }
+
+func TestResumeStartsWithAFreshProviderWaitBudget(t *testing.T) {
+	dir := t.TempDir()
+	sctx := scanctx.New("provider-wait-resume", dir)
+	t.Cleanup(sctx.Close)
+	state := NewScanState()
+	// The run paused because it exhausted its provider-wait budget.
+	state.CumulativeRateLimitWait = 31 * time.Minute
+	state.ConsecutiveRateLimits = 9
+	a := &Agent{scanCtx: sctx, state: state, scanBudget: newScanBudget()}
+	if err := a.saveExecutionCheckpoint(); err != nil {
+		t.Fatal(err)
+	}
+	b := &Agent{scanCtx: sctx, scanBudget: newScanBudget(), cfg: &config.Config{MaxRateLimitWaitSec: 30 * 60}}
+	if restored, err := b.RestoreExecutionCheckpoint(); err != nil || !restored {
+		t.Fatalf("restore: %t %v", restored, err)
+	}
+	if b.state.CumulativeRateLimitWait != 0 || b.state.ConsecutiveRateLimits != 0 {
+		t.Fatalf("resume inherited the spent provider-wait budget: wait=%s attempts=%d",
+			b.state.CumulativeRateLimitWait, b.state.ConsecutiveRateLimits)
+	}
+}

@@ -215,6 +215,12 @@ func (a *Agent) RestoreExecutionCheckpoint() (bool, error) {
 	}
 	state.TargetUnresponsiveSince = time.Time{}
 	state.ConsecutiveTargetErrors = 0
+	// The provider-wait budget measures one continuous outage within a run.
+	// A scan that paused because it ran out of that budget saves it spent;
+	// restoring it would pause the resumed run on its very first rate-limited
+	// request, before backing off or failing over to another pooled key.
+	state.CumulativeRateLimitWait = 0
+	state.ConsecutiveRateLimits = 0
 	state.BrowserAuthContext = false
 	state.ReconCoverage.Attempted = make(map[string]bool)
 	state.ReconCoverage.ContentDiscoveryAttempts = make(map[string]bool)
