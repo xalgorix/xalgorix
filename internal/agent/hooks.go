@@ -143,6 +143,7 @@ type ScanState struct {
 	ReportRetryLimitReached      bool
 	DiscoveryMode                bool
 	ReconOnlyMode                bool
+	SingleHostScope              bool // single-target scan: subdomains are neither enumerated nor owed coverage (target_scope.go)
 	DelegatedAgent               bool
 	DelegatedAgentID             string
 	LaneScoped                   bool

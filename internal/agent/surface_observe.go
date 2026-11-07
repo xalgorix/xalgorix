@@ -154,6 +154,11 @@ func promoteDiscoveredEndpoint(state *ScanState, endpoint string) {
 	if state.EndpointHygiene && !isValidTargetEndpoint(endpoint) {
 		return
 	}
+	// Other ports of a port-pinned target and subdomains of a single-host
+	// scan are outside the operator's boundaries: never surface to cover.
+	if !endpointInTargetBoundary(state, endpoint) {
+		return
+	}
 	isTemplate := routeTemplateCovers(endpoint, endpoint)
 	if len(state.DiscoveredEndpoints) >= maxPromotedEndpoints && !isTemplate {
 		return

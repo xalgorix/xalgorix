@@ -636,6 +636,9 @@ func classAppliesToEndpoint(state *ScanState, endpoint, class string) bool {
 	if host := hostOfEndpoint(endpoint); host != "" && !hostOwesContentDiscovery(state, host) {
 		return false
 	}
+	if !endpointInTargetBoundary(state, endpoint) {
+		return false
+	}
 	classID := CanonicalVulnClassID(class)
 	if classID == "" {
 		return true // unknown class: never silently drop obligations

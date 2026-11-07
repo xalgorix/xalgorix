@@ -282,6 +282,9 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	if sess.discoveryMode || isReconReportOnlyPhaseSelection(sess.phases) {
 		agnt.SetDiscoveryMode(true)
 	}
+	// A single-target scan is that host only; wildcard scans discover and
+	// cover subdomains themselves.
+	agnt.SetSingleHostScope(sess.scanMode == "single")
 	// Per-scan authenticated scanning and whitebox source. Empty values are
 	// no-ops; non-empty values override the agent's cfg-derived defaults so
 	// each scan can carry its own credentials/source without leaking across
