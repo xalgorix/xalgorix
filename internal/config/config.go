@@ -122,7 +122,7 @@ type Config struct {
 	// (taskCoverageComplete) can never close them — left open they hold a scan in
 	// an unbounded churn at 100% systematic coverage. No measured coverage is
 	// dropped: the full matrix is already satisfied before anything closes.
-	// XALGORIX_CONVERGE_RECONCILE, default false (off).
+	// XALGORIX_CONVERGE_RECONCILE, default true (on).
 	ConvergeReconcile bool
 
 	// EndpointHygiene keeps the endpoint accounting (DiscoveredEndpoints,
@@ -528,7 +528,7 @@ func load() *Config {
 		MaxStuckAdvances:         envOrInt("XALGORIX_MAX_STUCK_ADVANCES", 3),
 		BoundedContext:           envOrBool("XALGORIX_BOUNDED_CONTEXT", true),
 		EpochCoverage:            envOrBool("XALGORIX_EPOCH_COVERAGE", true),
-		ConvergeReconcile:        envOrBool("XALGORIX_CONVERGE_RECONCILE", false),
+		ConvergeReconcile:        envOrBool("XALGORIX_CONVERGE_RECONCILE", true),
 		EndpointHygiene:          envOrBool("XALGORIX_ENDPOINT_HYGIENE", false),
 		ConvergeFinish:           envOrBool("XALGORIX_CONVERGE_FINISH", true),
 		ConvergeFinishIdle:       envOrInt("XALGORIX_CONVERGE_FINISH_IDLE", 500),
