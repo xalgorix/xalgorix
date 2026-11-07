@@ -287,13 +287,13 @@ func isKnownProvider(candidate string) bool {
 // that names a known provider selects that provider and is removed from the
 // model; otherwise the explicit XALGORIX_LLM_PROVIDER applies.
 //
-// An explicit Custom Provider pointed at a gateway is the exception: a
-// gateway model ID such as "vendor/model" names a model on that endpoint and
-// is sent verbatim, because treating "vendor" as the provider would re-route
-// the request to the vendor's own protocol and strip the ID the gateway
-// expects. Only a redundant "custom/" prefix is removed, matching a saved
-// Custom Provider profile. When the custom base URL is that vendor's own API,
-// or no base URL is set, the prefix still selects the provider as before.
+// An explicit provider that hosts other vendors' models is the exception:
+// gateways, inference hosts, local runtimes and a Custom Provider in front of
+// one name models "vendor/model", so the ID is sent verbatim to the explicit
+// provider. Treating "vendor" as the provider would send the request, and the
+// operator's key, to that vendor's own API with the ID stripped. Only a
+// redundant "<explicit>/" prefix is removed, matching a saved profile.
+// explicitOverridesPrefix lists the cases where the prefix still routes.
 func routingProvider(model, explicitProvider, apiBase string) (provider, apiModel string) {
 	explicit := strings.ToLower(strings.TrimSpace(explicitProvider))
 	prefixProvider, bareModel := "", model
@@ -303,14 +303,96 @@ func routingProvider(model, explicitProvider, apiBase string) (provider, apiMode
 			prefixProvider, bareModel = candidate, model[idx+1:]
 		}
 	}
-	if explicit == "custom" && (prefixProvider == "" || prefixProvider == "custom" ||
-		(strings.TrimSpace(apiBase) != "" && !baseServesProvider(apiBase, prefixProvider))) {
+	if explicit == "custom" && (prefixProvider == "" || prefixProvider == "custom") {
+		return explicit, modelForProvider(model, explicit)
+	}
+	if prefixProvider != "" && prefixProvider != explicit && explicitOverridesPrefix(explicit, prefixProvider, apiBase) {
+		logPrefixKept(explicit, prefixProvider, model)
 		return explicit, modelForProvider(model, explicit)
 	}
 	if prefixProvider != "" {
 		return prefixProvider, bareModel
 	}
 	return explicit, model
+}
+
+// loggedPrefixKept holds the provider/model pairs logPrefixKept has already
+// reported; routingProvider runs on every request.
+var loggedPrefixKept sync.Map
+
+// logPrefixKept reports once per configuration that the explicit provider
+// routes a model whose prefix names another provider, so a stale
+// XALGORIX_LLM_PROVIDER left over from an earlier setup shows in the log.
+func logPrefixKept(explicit, prefixProvider, model string) {
+	if _, seen := loggedPrefixKept.LoadOrStore(explicit+"\x00"+model, struct{}{}); seen {
+		return
+	}
+	log.Printf("[llm] Routing model %q to XALGORIX_LLM_PROVIDER=%s with the ID unchanged; set XALGORIX_LLM_PROVIDER=%s to route by its prefix instead", model, explicit, prefixProvider)
+}
+
+// singleVendorProviders are chat-completions providers whose own API serves
+// only that vendor's models. With one of them selected and no base URL set, a
+// legacy provider's "<vendor>/" prefix can only mean the operator switched
+// vendors through the legacy "<vendor>/model" shape.
+var singleVendorProviders = map[string]bool{
+	"deepseek":        true,
+	"minimax":         true,
+	"mistral":         true,
+	"moonshot":        true,
+	"openai":          true,
+	"qwen":            true,
+	"xai":             true,
+	"zai":             true,
+	"zai-coding-plan": true,
+}
+
+// explicitOverridesPrefix reports whether the explicit provider, rather than
+// the different provider named by the model's prefix, routes the request.
+// Only a known chat-completions provider overrides. The prefix keeps routing
+// when the base URL is the prefixed vendor's own API, when no base URL is set
+// and a single-vendor provider meets a legacy provider's prefix, or when the
+// explicit provider has no base URL to send the request to.
+func explicitOverridesPrefix(explicit, prefixProvider, apiBase string) bool {
+	if !speaksChatCompletions(explicit) {
+		return false
+	}
+	if strings.TrimSpace(apiBase) != "" {
+		return !baseServesProvider(apiBase, prefixProvider)
+	}
+	if _, legacy := legacyProviderBases[prefixProvider]; legacy && singleVendorProviders[explicit] {
+		return false
+	}
+	return providerDefaultBase(explicit, explicit) != ""
+}
+
+// speaksChatCompletions reports whether provider is a known provider that
+// uses the chat-completions protocol.
+func speaksChatCompletions(provider string) bool {
+	if _, ok := legacyProviderBases[provider]; ok {
+		return legacyHeaderStyle(provider, "") == "openai"
+	}
+	entry, ok := providers.LookupBuiltin(provider)
+	return ok && entry.HeaderStyle == "openai"
+}
+
+// providerDefaultBase returns the base URL provider's requests use when
+// XALGORIX_API_BASE is unset: the legacy default, else the built-in catalog
+// base of a chat-completions provider the operator selected, either as
+// XALGORIX_LLM_PROVIDER or as the model's prefix with no provider set. A
+// prefix that outranked a different explicit provider gets no catalog
+// default, so the key never reaches a catalog host the operator did not
+// select. "" means no default, which the composite resolver refuses.
+func providerDefaultBase(provider, explicitProvider string) string {
+	if base, ok := legacyProviderBases[provider]; ok {
+		return base
+	}
+	if explicit := strings.ToLower(strings.TrimSpace(explicitProvider)); explicit != "" && explicit != provider {
+		return ""
+	}
+	if entry, ok := providers.LookupBuiltin(provider); ok && entry.HeaderStyle == "openai" {
+		return strings.TrimSpace(entry.BaseURL)
+	}
+	return ""
 }
 
 // baseServesProvider reports whether apiBase is the provider's own API
@@ -917,19 +999,16 @@ func (c *Client) resolveEndpoint() (string, string) {
 	// (e.g., "openai/gpt-5.6" -> provider="openai", model="gpt-5.6").
 	// Models with org-scoped names (e.g. "zai-org/GLM-5.3", "meta-llama/Llama-3.1-70B-Instruct")
 	// retain the full model identifier when the prefix is not a known provider,
-	// and an explicit Custom Provider in front of a gateway keeps the ID verbatim.
+	// and an explicit gateway provider keeps the ID verbatim.
 	provider, model := routingProvider(c.apiModel, explicitProvider, apiBase)
 	if provider == "" {
 		provider = c.provider
 	}
 
-	providerBases := legacyProviderBases
-
 	if apiBase == "" {
 		// No explicit API base set — use provider default
-		if knownBase, ok := providerBases[provider]; ok {
-			apiBase = knownBase
-		} else {
+		apiBase = providerDefaultBase(provider, explicitProvider)
+		if apiBase == "" {
 			// Unknown/no provider — default to OpenAI
 			apiBase = "https://api.openai.com/v1"
 		}
