@@ -35,7 +35,7 @@ func TestTokenSaverEnvSettingsExposed(t *testing.T) {
 func TestTokenSaverSettingsHotApply(t *testing.T) {
 	s := newTestServer(t, nil)
 	if s.cfg.BoundedContext || s.cfg.RoleScopedTools {
-		t.Fatalf("flags must default off, got bounded=%v scoped=%v", s.cfg.BoundedContext, s.cfg.RoleScopedTools)
+		t.Fatalf("a zero config must start with the flags off, got bounded=%v scoped=%v", s.cfg.BoundedContext, s.cfg.RoleScopedTools)
 	}
 
 	restart, err := s.applyEnvironmentUpdates(map[string]string{
