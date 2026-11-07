@@ -4,6 +4,7 @@ import "testing"
 
 // Epoch-based coverage convergence is on unless explicitly disabled.
 func TestEpochCoverageDefaultsOn(t *testing.T) {
+	isolateEnvFiles(t)
 	t.Setenv("XALGORIX_EPOCH_COVERAGE", "")
 	if !load().EpochCoverage {
 		t.Fatal("EpochCoverage default = false, want true")

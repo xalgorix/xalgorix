@@ -537,7 +537,7 @@ func (a *Agent) hasActiveContent(snippet string) bool {
 //
 // The recent window stays verbatim, the archive is byte-identical, and the
 // existing compaction digest keeps working unchanged. Gated by
-// XALGORIX_BOUNDED_CONTEXT (default off).
+// XALGORIX_BOUNDED_CONTEXT (default on).
 
 const (
 	// archiveMarkerPrefix marks a tool-result message whose full raw output

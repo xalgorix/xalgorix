@@ -103,7 +103,7 @@ type Config struct {
 	// retrieves the byte-identical original). The recent window stays
 	// verbatim, so every byte the model could previously see remains
 	// reachable — it is fetched on demand instead of being resent on every
-	// iteration. XALGORIX_BOUNDED_CONTEXT, default false (off).
+	// iteration. XALGORIX_BOUNDED_CONTEXT, default true (on).
 	BoundedContext bool
 
 	// EpochCoverage enables epoch-based coverage convergence: per-endpoint
@@ -526,7 +526,7 @@ func load() *Config {
 		LeanToolSchema:           envOrBool("XALGORIX_LEAN_TOOL_SCHEMA", false),
 		AdvancePastStuckTasks:    envOrBool("XALGORIX_ADVANCE_PAST_STUCK", false),
 		MaxStuckAdvances:         envOrInt("XALGORIX_MAX_STUCK_ADVANCES", 3),
-		BoundedContext:           envOrBool("XALGORIX_BOUNDED_CONTEXT", false),
+		BoundedContext:           envOrBool("XALGORIX_BOUNDED_CONTEXT", true),
 		EpochCoverage:            envOrBool("XALGORIX_EPOCH_COVERAGE", true),
 		ConvergeReconcile:        envOrBool("XALGORIX_CONVERGE_RECONCILE", false),
 		EndpointHygiene:          envOrBool("XALGORIX_ENDPOINT_HYGIENE", false),
