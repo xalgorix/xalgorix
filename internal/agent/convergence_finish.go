@@ -1,7 +1,7 @@
 package agent
 
 // convergence_finish.go implements the OPTIONAL principled finish
-// (XALGORIX_CONVERGE_FINISH, default off). It is inert unless the flag is on.
+// (XALGORIX_CONVERGE_FINISH, default on). It is inert when the flag is off.
 //
 // Problem it solves
 // -----------------

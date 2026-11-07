@@ -144,7 +144,7 @@ type Config struct {
 	// structured methodology is done, per-route coverage clears a threshold, and
 	// no new finding appears for a sustained tail, the remaining per-endpoint
 	// class tasks close as coverage-sufficient with the residual (route,class)
-	// pairs recorded in the report. XALGORIX_CONVERGE_FINISH, default false (off).
+	// pairs recorded in the report. XALGORIX_CONVERGE_FINISH, default true (on).
 	ConvergeFinish bool
 
 	// ConvergeFinishIdle is the no-new-finding tail (iterations) for the
@@ -530,7 +530,7 @@ func load() *Config {
 		EpochCoverage:            envOrBool("XALGORIX_EPOCH_COVERAGE", true),
 		ConvergeReconcile:        envOrBool("XALGORIX_CONVERGE_RECONCILE", false),
 		EndpointHygiene:          envOrBool("XALGORIX_ENDPOINT_HYGIENE", false),
-		ConvergeFinish:           envOrBool("XALGORIX_CONVERGE_FINISH", false),
+		ConvergeFinish:           envOrBool("XALGORIX_CONVERGE_FINISH", true),
 		ConvergeFinishIdle:       envOrInt("XALGORIX_CONVERGE_FINISH_IDLE", 500),
 		ConvergeFinishLeadWindow: envOrInt("XALGORIX_CONVERGE_FINISH_LEAD_WINDOW", 100),
 		ToolArchiveMinBytes:      envOrInt("XALGORIX_TOOL_ARCHIVE_MIN_BYTES", 1500),
