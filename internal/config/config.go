@@ -112,7 +112,7 @@ type Config struct {
 	// set, so class tasks can actually close and the scan reaches a clean
 	// terminal state instead of chasing a receding bar forever. No coverage is
 	// dropped — every discovered endpoint is folded into a later epoch and
-	// tested before finish. XALGORIX_EPOCH_COVERAGE, default false (off).
+	// tested before finish. XALGORIX_EPOCH_COVERAGE, default true (on).
 	EpochCoverage bool
 
 	// ConvergeReconcile closes out class-less exploratory plan tasks once every
@@ -527,7 +527,7 @@ func load() *Config {
 		AdvancePastStuckTasks:    envOrBool("XALGORIX_ADVANCE_PAST_STUCK", false),
 		MaxStuckAdvances:         envOrInt("XALGORIX_MAX_STUCK_ADVANCES", 3),
 		BoundedContext:           envOrBool("XALGORIX_BOUNDED_CONTEXT", false),
-		EpochCoverage:            envOrBool("XALGORIX_EPOCH_COVERAGE", false),
+		EpochCoverage:            envOrBool("XALGORIX_EPOCH_COVERAGE", true),
 		ConvergeReconcile:        envOrBool("XALGORIX_CONVERGE_RECONCILE", false),
 		EndpointHygiene:          envOrBool("XALGORIX_ENDPOINT_HYGIENE", false),
 		ConvergeFinish:           envOrBool("XALGORIX_CONVERGE_FINISH", false),
