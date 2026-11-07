@@ -106,6 +106,22 @@ func TestService_RoundTripsBuiltin(t *testing.T) {
 	}
 }
 
+func TestBuiltin_CloudGPUConfiguration(t *testing.T) {
+	entry, ok := LookupBuiltin("cloudgpu")
+	if !ok {
+		t.Fatal("CloudGPU provider is missing from the built-in catalog")
+	}
+	if entry.BaseURL != "https://cloudgpu.app/v1" {
+		t.Errorf("CloudGPU BaseURL = %q, want https://cloudgpu.app/v1", entry.BaseURL)
+	}
+	if entry.HeaderStyle != "openai" {
+		t.Errorf("CloudGPU HeaderStyle = %q, want openai", entry.HeaderStyle)
+	}
+	if len(entry.AuthMethods) != 1 || entry.AuthMethods[0] != "api_key" {
+		t.Errorf("CloudGPU AuthMethods = %v, want [api_key]", entry.AuthMethods)
+	}
+}
+
 func TestBuiltin_NovitaConfiguration(t *testing.T) {
 	entry, ok := LookupBuiltin("novita")
 	if !ok {

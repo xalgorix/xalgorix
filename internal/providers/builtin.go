@@ -97,6 +97,14 @@ var builtinList = []Entry{
 		Notes:       "Configure your account-specific gateway URL via Custom Provider (https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai).",
 	},
 	{
+		ID:          "cloudgpu",
+		DisplayName: "CloudGPU",
+		BaseURL:     "https://cloudgpu.app/v1",
+		HeaderStyle: "openai",
+		AuthMethods: []string{"api_key"},
+		Notes:       "OpenAI-compatible API for DeepSeek, Kimi, GLM, MiniMax, Qwen and more (for example deepseek-v4-flash); choose Custom model for any ID returned by GET /v1/models.",
+	},
+	{
 		ID:          "codex",
 		DisplayName: "Codex (ChatGPT Subscription)",
 		BaseURL:     "https://chatgpt.com/backend-api/codex",
