@@ -274,10 +274,8 @@ func TestResolver_ExplicitProviderWithBareModel(t *testing.T) {
 		{name: "missing key", cfg: config.Config{LLMProvider: "openai", LLM: "gpt-5.6"}},
 		{name: "missing model", cfg: config.Config{LLMProvider: "custom", APIBase: "https://llm.example/v1", APIKey: "k"}},
 		{name: "custom without base", cfg: config.Config{LLMProvider: "custom", LLM: "my-model", APIKey: "k"}},
-		{name: "catalog-only provider without base", cfg: config.Config{LLMProvider: "openrouter", LLM: "my-model", APIKey: "k"}},
-		// The prefix, not the explicit provider, picks the route here, and
-		// that provider has no default base URL.
-		{name: "catalog-only prefix without base", cfg: config.Config{LLMProvider: "groq", LLM: "qwen/qwen3-32b", APIKey: "k"}},
+		{name: "catalog provider without any base", cfg: config.Config{LLMProvider: "kilo", LLM: "my-model", APIKey: "k"}},
+		{name: "catalog provider of another protocol without base", cfg: config.Config{LLMProvider: "googlevertex", LLM: "my-model", APIKey: "k"}},
 	}
 	for _, tc := range unroutable {
 		t.Run(tc.name, func(t *testing.T) {

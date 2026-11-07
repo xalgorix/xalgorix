@@ -275,8 +275,7 @@ func explicitLegacyProvider(cfg *config.Config) bool {
 		return true
 	}
 	provider, _ := routingProvider(cfg.LLM, cfg.LLMProvider, cfg.APIBase)
-	_, ok := legacyProviderBases[provider]
-	return ok
+	return providerDefaultBase(provider, cfg.LLMProvider) != ""
 }
 
 func providerAllowsNoAuth(entry providers.Entry) bool {
@@ -310,9 +309,8 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 	apiBase := l.cfg.APIBase
 	provider, model := routingProvider(l.cfg.LLM, l.cfg.LLMProvider, apiBase)
 	if apiBase == "" {
-		if knownBase, ok := legacyProviderBases[provider]; ok {
-			apiBase = knownBase
-		} else {
+		apiBase = providerDefaultBase(provider, l.cfg.LLMProvider)
+		if apiBase == "" {
 			apiBase = "https://api.openai.com/v1"
 		}
 	}
