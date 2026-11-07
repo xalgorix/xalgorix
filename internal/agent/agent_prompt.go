@@ -488,6 +488,14 @@ This target is a reproducible local fixture, but treat it exactly like a remote 
 		prompt = directive + "\n\n" + prompt
 	}
 
+	if boundary := a.targetBoundaryPromptSection(targets); boundary != "" {
+		if marker := "## YOUR HACKER MINDSET"; strings.Contains(prompt, marker) {
+			prompt = strings.Replace(prompt, marker, boundary+"\n\n"+marker, 1)
+		} else {
+			prompt = boundary + "\n\n" + prompt
+		}
+	}
+
 	// Single-agent mode: the system prompt must not instruct the root to
 	// spawn a wave that the configuration disabled. The root owns the full
 	// methodology; every coverage gate applies unchanged.

@@ -211,7 +211,7 @@ func jsAssetPath(path string) bool {
 // DNS + enumeration + live-host probing. Targets are not invented: when the
 // scope is unknown (no ScanTargets recorded), no obligation is demanded.
 func subdomainScopeApplicable(state *ScanState) bool {
-	if state == nil {
+	if state == nil || state.SingleHostScope {
 		return false
 	}
 	for _, t := range state.ScanTargets {

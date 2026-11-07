@@ -158,7 +158,8 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 			// applies, so the verifier cannot probe out-of-scope/local hosts and
 			// a hung re-test cannot outlive the report_vulnerability call.
 			res := a.execVerifierToolGuarded(vreg, tc.Name, tc.Args, deadline)
-			if res.Error == "" && res.Output != "" && !strings.Contains(res.Output, "OUT-OF-SCOPE TARGET BLOCKED") {
+			if res.Error == "" && res.Output != "" && !strings.Contains(res.Output, "OUT-OF-SCOPE TARGET BLOCKED") &&
+				!strings.Contains(res.Output, "OUTSIDE SCAN BOUNDARY") {
 				switch tc.Name {
 				case "http_request", "terminal_execute", "browser_action", "verify_path_traversal", "oob_poll":
 					hasRetest = true
@@ -236,6 +237,10 @@ func (a *Agent) execVerifierToolGuarded(vreg *tools.Registry, name string, args 
 	if blocked, reason := a.shouldBlockForOutOfScope(name, args); blocked {
 		return tools.Result{Output: "⛔ OUT-OF-SCOPE TARGET BLOCKED — " + reason +
 			"\nYou cannot probe this host during verification. If the finding depends on reaching it, it is not independently verifiable here — submit an 'inconclusive' verdict."}
+	}
+	if blocked, reason := a.shouldBlockForTargetScope(name, args); blocked {
+		return tools.Result{Output: "⛔ OUTSIDE SCAN BOUNDARY — " + reason +
+			"\nIf the finding depends on it, it is outside this scan — submit an 'inconclusive' verdict."}
 	}
 
 	remaining := time.Until(deadline)

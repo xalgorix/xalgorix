@@ -239,7 +239,7 @@ func scopeRelatedHost(state *ScanState, host string) bool {
 // only in-scope-family hosts do — external references and probe artifacts
 // never become wordlist obligations.
 func hostOwesContentDiscovery(state *ScanState, host string) bool {
-	if host == "" || isScanArtifactHost(host) {
+	if host == "" || isScanArtifactHost(host) || !hostInTargetBoundary(state, host) {
 		return false
 	}
 	if state == nil || len(scopeDomainSuffixes(state)) == 0 {
