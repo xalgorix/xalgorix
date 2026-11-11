@@ -62,7 +62,7 @@ Xalgorix is supported by proxy-infrastructure partners — handy for checking ho
 <table>
   <tr>
     <td align="center" valign="middle" width="50%">
-      <a href="mailto:hello@xalgorix.com?subject=README%20sponsorship"><img src="assets/sponsor_placeholder.svg" alt="Your logo here: this sponsor spot is open" height="132" /></a>
+      <a href="mailto:partners@xalgorix.com?subject=README%20sponsorship"><img src="assets/sponsor_placeholder.svg" alt="Your logo here: this sponsor spot is open" height="132" /></a>
     </td>
     <td align="center" valign="middle" width="50%">
       <a href="https://proxy-seller.com/?partner=11571212D46044C9"><img src="assets/proxyseller_xalgorix.jpg" alt="Proxy-Seller" height="132" /></a>
@@ -70,8 +70,8 @@ Xalgorix is supported by proxy-infrastructure partners — handy for checking ho
   </tr>
   <tr>
     <td align="center" valign="top">
-      <b><a href="mailto:hello@xalgorix.com?subject=README%20sponsorship">Your brand here</a></b><br/>
-      <sub>This sponsor spot is open<br/>Email <a href="mailto:hello@xalgorix.com?subject=README%20sponsorship">hello@xalgorix.com</a> to claim it</sub>
+      <b><a href="mailto:partners@xalgorix.com?subject=README%20sponsorship">Your brand here</a></b><br/>
+      <sub>This sponsor spot is open<br/>Email <a href="mailto:partners@xalgorix.com?subject=README%20sponsorship">partners@xalgorix.com</a> to claim it</sub>
     </td>
     <td align="center" valign="top">
       <b><a href="https://proxy-seller.com/?partner=11571212D46044C9">Proxy-Seller</a></b><br/>
