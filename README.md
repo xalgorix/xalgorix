@@ -57,12 +57,12 @@
 
 ## 🤝 Sponsors
 
-Xalgorix is supported by these proxy-infrastructure partners — handy for checking how your own apps behave across regions. Both speak **HTTP(S) and SOCKS5**, the protocols Xalgorix uses.
+Xalgorix is supported by proxy-infrastructure partners — handy for checking how your own apps behave across regions. Proxy-Seller speaks **HTTP(S) and SOCKS5**, the protocols Xalgorix uses.
 
 <table>
   <tr>
     <td align="center" valign="middle" width="50%">
-      <a href="https://www.swiftproxy.net/?ref=xalgorix"><img src="assets/swiftproxy_xalgorix.webp" alt="Swiftproxy" height="132" /></a>
+      <a href="mailto:hello@xalgorix.com?subject=README%20sponsorship"><img src="assets/sponsor_placeholder.svg" alt="Your logo here: this sponsor spot is open" height="132" /></a>
     </td>
     <td align="center" valign="middle" width="50%">
       <a href="https://proxy-seller.com/?partner=11571212D46044C9"><img src="assets/proxyseller_xalgorix.jpg" alt="Proxy-Seller" height="132" /></a>
@@ -70,8 +70,8 @@ Xalgorix is supported by these proxy-infrastructure partners — handy for check
   </tr>
   <tr>
     <td align="center" valign="top">
-      <b><a href="https://www.swiftproxy.net/?ref=xalgorix">Swiftproxy</a></b><br/>
-      <sub>Residential proxies from $0.70/GB · location targeting · sticky sessions<br/>Xalgorix users get <b>10% off</b> with <code>PROXY90</code></sub>
+      <b><a href="mailto:hello@xalgorix.com?subject=README%20sponsorship">Your brand here</a></b><br/>
+      <sub>This sponsor spot is open<br/>Email <a href="mailto:hello@xalgorix.com?subject=README%20sponsorship">hello@xalgorix.com</a> to claim it</sub>
     </td>
     <td align="center" valign="top">
       <b><a href="https://proxy-seller.com/?partner=11571212D46044C9">Proxy-Seller</a></b><br/>
