@@ -281,22 +281,24 @@ func TestParseBytes_UnknownReturnsNil(t *testing.T) {
 
 func TestParseBytes_EndpointList(t *testing.T) {
 	data := []byte("# target routes\nGET /openapi/check?id=1&expand=true\nPOST https://example.com/api/users\nhttps://example.com/health\nGET /users/{id}\n")
-	res := ParseBytes(data, "endpoints.txt")
-	if res == nil {
+	// Deref-bearing assertions live inside the non-nil branch so the nil
+	// check is structurally visible to the analyzer (staticcheck SA5011).
+	if res := ParseBytes(data, "endpoints.txt"); res != nil {
+		res.finalize()
+		if len(res.Endpoints) != 4 || !contains(res.Formats, "endpoint-list") {
+			t.Fatalf("unexpected endpoint list result: %+v", res)
+		}
+		if e := findEndpoint(res, "GET", "/openapi/check"); e == nil ||
+			e.Path != "/openapi/check" || !contains(e.Params, "id") || !contains(e.Params, "expand") {
+			t.Fatalf("missing route or query parameters: %+v", res.Endpoints)
+		}
+		if findEndpoint(res, "POST", "https://example.com/api/users") == nil ||
+			findEndpoint(res, "", "https://example.com/health") == nil ||
+			findEndpoint(res, "GET", "/users/{id}") == nil {
+			t.Fatalf("missing absolute URL endpoints: %+v", res.Endpoints)
+		}
+	} else {
 		t.Fatal("expected endpoint list to parse")
-	}
-	res.finalize()
-	if len(res.Endpoints) != 4 || !contains(res.Formats, "endpoint-list") {
-		t.Fatalf("unexpected endpoint list result: %+v", res)
-	}
-	if e := findEndpoint(res, "GET", "/openapi/check"); e == nil ||
-		e.Path != "/openapi/check" || !contains(e.Params, "id") || !contains(e.Params, "expand") {
-		t.Fatalf("missing route or query parameters: %+v", res.Endpoints)
-	}
-	if findEndpoint(res, "POST", "https://example.com/api/users") == nil ||
-		findEndpoint(res, "", "https://example.com/health") == nil ||
-		findEndpoint(res, "GET", "/users/{id}") == nil {
-		t.Fatalf("missing absolute URL endpoints: %+v", res.Endpoints)
 	}
 }
 
