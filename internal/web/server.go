@@ -1787,7 +1787,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// id never produces a "started" instance the operator then has
 	// to clean up.
 	if _, err := s.resolveScanCredentials(r.Context(), req, s.cfg); err != nil {
-		if errors.Is(err, errUnknownProviderProfile) {
+		if errors.Is(err, errUnknownProviderProfile) || errors.Is(err, errAPIBaseNeedsKey) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -1803,17 +1803,18 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		// canonical R11.6 sentinel.
 	}
 
+	// The webhook and api_base are outbound destinations chosen by the
+	// caller: refuse this machine/link-local webhooks (same self-scan
+	// protection targets get) and api_base overrides that would carry the
+	// stored provider credentials somewhere else.
+	if err := s.checkScanRequestDestinations(r.Context(), req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Apply LLM provider settings from web UI securely using a copy
 	scanCfg := *s.cfg // shallow copy
-	if req.Model != "" {
-		scanCfg.LLM = req.Model
-	}
-	if req.APIKey != "" {
-		scanCfg.APIKey = req.APIKey
-	}
-	if req.APIBase != "" {
-		scanCfg.APIBase = req.APIBase
-	}
+	applyScanLLMOverrides(&scanCfg, req)
 
 	// Save-only mode: create a persistent scan config without starting execution
 	if req.SaveOnly {

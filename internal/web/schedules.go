@@ -40,6 +40,10 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "targets are required", http.StatusBadRequest)
 			return
 		}
+		if err := s.validateScanWebhook(req.DiscordWebhook); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if req.Name == "" {
 			req.Name = "Scheduled Scan " + strings.Join(req.Targets, ", ")
 		}
@@ -151,6 +155,10 @@ func (s *Server) handleScheduleDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(req.Targets) == 0 {
 			http.Error(w, "targets are required", http.StatusBadRequest)
+			return
+		}
+		if err := s.validateScanWebhook(req.DiscordWebhook); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		normalizeScheduleActivity(&req)

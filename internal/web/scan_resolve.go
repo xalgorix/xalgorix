@@ -36,12 +36,189 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
+	"net/url"
+	"path"
 	"strings"
 
 	"github.com/xalgord/xalgorix/v4/internal/auth"
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 )
+
+// errAPIBaseNeedsKey is returned when a scan request moves LLM traffic to a
+// host the operator did not configure without supplying its own api_key.
+var errAPIBaseNeedsKey = errors.New("api_base points to a different host than the configured LLM endpoint; include api_key in the same request (stored provider credentials are never sent to a request-supplied host)")
+
+// checkScanRequestDestinations validates the outbound destinations a scan
+// request chooses — the notification webhook and the LLM api_base — before
+// any scan state exists. Every wire entry point that starts a scan (POST
+// /api/scan and the WebSocket scan message) must call it.
+func (s *Server) checkScanRequestDestinations(ctx context.Context, req ScanRequest) error {
+	if err := s.validateScanWebhook(req.DiscordWebhook); err != nil {
+		return err
+	}
+	return s.checkScanAPIBaseOverride(ctx, req)
+}
+
+// applyScanLLMOverrides copies a request's ad-hoc LLM overrides into the
+// per-scan config copy. A caller-supplied api_key replaces the stored
+// credential set for this scan, including the rotation pool: otherwise the
+// key rotator would swap the operator's pooled keys in on later requests to
+// whatever api_base the caller chose.
+func applyScanLLMOverrides(cfg *config.Config, req ScanRequest) {
+	if req.Model != "" {
+		cfg.LLM = req.Model
+	}
+	if req.APIKey != "" {
+		cfg.APIKey = req.APIKey
+		cfg.APIKeys = nil
+	}
+	if req.APIBase != "" {
+		cfg.APIBase = req.APIBase
+	}
+}
+
+// checkScanAPIBaseOverride guards the ad-hoc api_base override (R11.4) when a
+// scan request arrives, so the caller gets a 400 instead of a scan that fails
+// later. It runs the same rule resolveScanCredentials enforces when the scan
+// builds its LLM client (apiBaseOverrideError), against the per-scan config
+// the request would produce.
+//
+// The lookups run on a context that ignores cancellation: a client that
+// disconnects mid-request must not turn a failed store lookup into "no stored
+// credential". The use-time check in resolveScanCredentials is what actually
+// keeps credentials on their endpoint; this is the early, friendlier error.
+func (s *Server) checkScanAPIBaseOverride(ctx context.Context, req ScanRequest) error {
+	if strings.TrimSpace(req.APIBase) == "" || strings.TrimSpace(req.APIKey) != "" || s.cfg == nil {
+		return nil
+	}
+	scanCfg := *s.cfg
+	applyScanLLMOverrides(&scanCfg, req)
+	if _, err := s.resolveScanCredentials(context.WithoutCancel(ctx), req, &scanCfg); errors.Is(err, errAPIBaseNeedsKey) {
+		return err
+	}
+	return nil
+}
+
+// apiBaseOverrideError enforces the api_base rule on the endpoint a scan is
+// about to use. Stored credentials (the configured key or key pool, an auth
+// profile's key or OAuth token) belong to the endpoint they resolve to.
+// Machine API tokens are deliberately kept away from provider credentials (see
+// machineTokenRouteDenylist), so a scan request may only point LLM traffic
+// outside that endpoint when it brings its own api_key.
+//
+// ep is the endpoint after the override merge and cfg is the per-scan config:
+// the LLM client can attach cfg's key and rotate its key pool in on top of
+// ep's own credential, so all of them count. An override is "the same
+// endpoint" when it has the stored endpoint's origin and one path is a segment
+// prefix of the other, so a path-scoped gateway tenant cannot be swapped for
+// another. An endpoint that carries no stored credential is unaffected.
+func (s *Server) apiBaseOverrideError(ctx context.Context, req ScanRequest, cfg *config.Config, ep llm.Endpoint) error {
+	override := strings.TrimSpace(req.APIBase)
+	if override == "" || strings.TrimSpace(req.APIKey) != "" {
+		return nil
+	}
+	carries := ep.APIKey != "" || ep.AccessToken != ""
+	if cfg != nil && (strings.TrimSpace(cfg.APIKey) != "" || len(cfg.APIKeys) > 0) {
+		carries = true
+	}
+	if !carries || sameEndpointScope(override, s.storedEndpointURL(ctx, req, cfg)) {
+		return nil
+	}
+	return errAPIBaseNeedsKey
+}
+
+// storedEndpointURL is where the stored credential is meant to go: the same
+// resolution without the request's api_base or model, run against the
+// operator's own base URL and model. The per-scan config already carries the
+// overrides, so the operator's values are read from the server config; a
+// model override must not redefine which host the stored credential belongs
+// to.
+func (s *Server) storedEndpointURL(ctx context.Context, req ScanRequest, cfg *config.Config) string {
+	var opCfg config.Config
+	if cfg != nil {
+		opCfg = *cfg
+	}
+	operatorBase := ""
+	if s.cfg != nil {
+		operatorBase = s.cfg.APIBase
+		opCfg.LLM = s.cfg.LLM
+	}
+	opCfg.APIBase = operatorBase
+	stored := req
+	stored.APIBase = ""
+	stored.Model = ""
+	if ep, err := s.resolveScanCredentials(ctx, stored, &opCfg); err == nil && ep.URL != "" {
+		return ep.URL
+	}
+	return operatorBase
+}
+
+// endpointOrigin returns the lower-cased scheme://host:port of an http(s) URL,
+// or "" when raw is not an absolute http(s) URL.
+func endpointOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	switch scheme {
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+	case "https":
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return ""
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+}
+
+// sameEndpointScope reports whether override stays on the stored endpoint:
+// same origin, the same query when the override sets one, and one cleaned
+// path a segment prefix of the other. Paths are compared decoded and with dot
+// segments resolved, so "/v1/../other" counts as "/other".
+func sameEndpointScope(override, stored string) bool {
+	origin := endpointOrigin(override)
+	if origin == "" || origin != endpointOrigin(stored) {
+		return false
+	}
+	o, err := url.Parse(strings.TrimSpace(override))
+	if err != nil {
+		return false
+	}
+	st, err := url.Parse(strings.TrimSpace(stored))
+	if err != nil {
+		return false
+	}
+	if o.RawQuery != "" && o.RawQuery != st.RawQuery {
+		return false
+	}
+	// Some servers treat ";" path parameters (e.g. "..;") as dot segments, or
+	// "\" as a path separator, and a "%" left after decoding means the path
+	// was encoded twice. path.Clean resolves none of these the way such a
+	// server would, so never count such an override as in scope.
+	if strings.ContainsAny(o.Path, `;\%`) {
+		return false
+	}
+	op, sp := cleanURLPath(o.Path), cleanURLPath(st.Path)
+	return pathSegmentPrefix(op, sp) || pathSegmentPrefix(sp, op)
+}
+
+func cleanURLPath(p string) string {
+	return strings.TrimRight(path.Clean("/"+p), "/")
+}
+
+// pathSegmentPrefix reports whether prefix is p or an ancestor of p on a
+// segment boundary ("" is the root and prefixes everything).
+func pathSegmentPrefix(prefix, p string) bool {
+	return prefix == "" || p == prefix || strings.HasPrefix(p, prefix+"/")
+}
 
 // errUnknownProviderProfile is returned by resolveScanCredentials
 // whenever the supplied ProviderProfile cannot be mapped to a live
@@ -141,6 +318,13 @@ func (s *Server) resolveScanCredentials(ctx context.Context, req ScanRequest, cf
 		// preserves the existing override semantics.
 		ep.URL = strings.TrimRight(req.APIBase, "/")
 	}
+	// Enforced here, where the endpoint the scan will use is built, and not
+	// only when the request arrived: the stores can change between the two
+	// (a profile saved while the scan waited in the queue, or a lookup that
+	// failed then and succeeds now).
+	if err := s.apiBaseOverrideError(ctx, req, cfg, ep); err != nil {
+		return llm.Endpoint{}, err
+	}
 	return ep, nil
 }
 
@@ -157,10 +341,26 @@ func (s *Server) resolveScanCredentials(ctx context.Context, req ScanRequest, cf
 func (s *Server) scanLLMClientForRequest(req ScanRequest, scanCfg *config.Config) *llm.Client {
 	client, err := s.buildScanLLMClient(context.Background(), req, scanCfg)
 	if err != nil {
+		if strings.TrimSpace(req.APIBase) != "" && strings.TrimSpace(req.APIKey) == "" {
+			// The default client would send scanCfg's stored key (or a pooled
+			// one) to the request's api_base. Fail the scan's LLM calls with a
+			// non-retryable error instead.
+			log.Printf("[scan] refusing LLM endpoint for instance=%q profile=%q: %v", req.InstanceID, req.ProviderProfile, err)
+			return llm.NewClient(scanCfg, llm.WithResolver(refusedEndpointResolver{msg: errAPIBaseNeedsKey.Error()}))
+		}
 		log.Printf("[scan] resolver wiring failed for instance=%q profile=%q: %v (falling back to default client)", req.InstanceID, req.ProviderProfile, err)
 		return nil
 	}
 	return client
+}
+
+// refusedEndpointResolver fails every LLM request of a scan whose endpoint was
+// refused. It returns *llm.ConfigError so the client gives up at once instead
+// of retrying, and it never yields an endpoint, so no credential is sent.
+type refusedEndpointResolver struct{ msg string }
+
+func (r refusedEndpointResolver) Resolve(context.Context) (llm.Endpoint, error) {
+	return llm.Endpoint{}, &llm.ConfigError{Msg: r.msg}
 }
 
 // buildScanLLMClient returns a *llm.Client primed with a fixed

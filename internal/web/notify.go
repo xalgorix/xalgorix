@@ -3,20 +3,182 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/safe"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 )
+
+// notifyHTTPTimeout bounds every outbound notification request so a slow or
+// unresponsive endpoint never pins a goroutine.
+const notifyHTTPTimeout = 30 * time.Second
+
+var (
+	errWebhookURL = errors.New("discord_webhook must be an absolute http(s) URL")
+	// errWebhookDestination is returned for a per-scan webhook that points at
+	// this machine, the dashboard listener, or a link-local / cloud-metadata
+	// address. Scan targets get the same self-scan protection (scopeguard);
+	// notifications must not become a way around it.
+	errWebhookDestination = errors.New("discord_webhook must not point at this machine, the dashboard listener, or a link-local/metadata address")
+
+	// cloudMetadataIPs are instance-metadata / host-agent addresses that sit
+	// outside the link-local range, so the range checks below miss them.
+	cloudMetadataIPs = []net.IP{
+		net.ParseIP("fd00:ec2::254"),
+		net.ParseIP("fd20:ce::254"),
+		net.ParseIP("100.100.100.200"),
+		net.ParseIP("168.63.129.16"),
+	}
+
+	// numericHostRe matches host names made only of decimal or 0x-hex
+	// numbers ("2130706433", "0x7f.1", "127.1", "0"). net.ParseIP rejects
+	// them, but some resolvers and proxies read them as IPv4 addresses.
+	numericHostRe = regexp.MustCompile(`(?i)^(0x[0-9a-f]*|[0-9]+)(\.(0x[0-9a-f]*|[0-9]+)){0,3}$`)
+)
+
+// webhookIPBlocked reports address classes no notification webhook has a
+// legitimate reason to reach, independent of the scope-guard configuration:
+// unspecified, link-local (which includes the 169.254.169.254 metadata
+// service), multicast, IPv4-compatible IPv6 (::a.b.c.d, which some stacks
+// route to the embedded IPv4 address), and the known metadata addresses
+// outside link-local.
+func webhookIPBlocked(ip net.IP) bool {
+	if ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	if ip.To4() == nil && len(ip) == net.IPv6len && !ip.IsLoopback() && bytes.Equal(ip[:12], make([]byte, 12)) {
+		return true
+	}
+	for _, m := range cloudMetadataIPs {
+		if ip.Equal(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOperatorWebhook reports whether webhook is the operator-configured global
+// endpoint (XALGORIX_DISCORD_WEBHOOK / settings). Only the operator can set
+// that value, so it is trusted as-is; every other webhook arrives with a scan
+// or schedule request and is guarded.
+func (s *Server) isOperatorWebhook(webhook string) bool {
+	global := strings.TrimSpace(s.discordWebhook)
+	return global != "" && strings.TrimSpace(webhook) == global
+}
+
+// validateScanWebhook checks a per-scan or per-schedule webhook URL supplied
+// by an API caller before it is stored. Empty means "use the global default".
+// RFC1918 hosts stay allowed (a LAN relay is legitimate and scan targets may
+// be private too); this machine's own addresses follow the same
+// AllowLocalTargets opt-in as scan targets, and the dashboard listener is
+// never reachable. The dial-time guard in notificationClient enforces the same
+// rules against the address actually connected to, which covers DNS answers
+// that change after this check.
+func (s *Server) validateScanWebhook(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || s.isOperatorWebhook(raw) {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return errWebhookURL
+	}
+	// A trailing dot ("169.254.169.254.") still names the same host, and a
+	// zone ("fe80::1%eth0") or a non-canonical numeric form can reach a
+	// blocked address without parsing as an IP here. When an egress proxy
+	// applies, this check is the only one, so refuse those forms outright.
+	host := strings.TrimSuffix(u.Hostname(), ".")
+	if strings.Contains(host, "%") || (net.ParseIP(host) == nil && numericHostRe.MatchString(host)) {
+		return errWebhookDestination
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if webhookIPBlocked(ip) {
+			return errWebhookDestination
+		}
+	} else if addrs, err := scopeguard.LookupHost(host); err == nil {
+		// A name that resolves to a link-local/metadata address is refused
+		// up front too: when an egress proxy applies, the dial guard below
+		// never sees the destination address.
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && webhookIPBlocked(ip) {
+				return errWebhookDestination
+			}
+		}
+	}
+	if s.isBlockedTarget(raw) {
+		return errWebhookDestination
+	}
+	return nil
+}
+
+// webhookDialGuard is a net.Dialer Control hook: it runs after DNS resolution,
+// against the exact IP being connected to, so a hostname that re-resolves to
+// a blocked address between validation and delivery is still refused.
+func (s *Server) webhookDialGuard(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return errWebhookDestination
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || webhookIPBlocked(ip) || s.isBlockedTarget(address) {
+		return errWebhookDestination
+	}
+	return nil
+}
+
+// notificationClient returns the HTTP client used to deliver a Discord
+// notification to webhook. The operator's global webhook keeps a plain client.
+// Any other (caller-supplied) webhook gets a client that checks every
+// connection with webhookDialGuard and does not follow redirects, so neither
+// a redirect nor a re-resolving hostname can steer the POST somewhere the
+// request-time validation would have refused. When an egress proxy from the
+// environment applies, the proxy resolves and connects to the destination, so
+// only the request-time validation applies (no dial-time re-check).
+//
+// Whether a webhook is the operator's is decided at send time: if the global
+// webhook changes mid-scan, a scan still holding the old value is treated as
+// caller-supplied from then on.
+func (s *Server) notificationClient(webhook string) *http.Client {
+	if s.isOperatorWebhook(webhook) {
+		return &http.Client{Timeout: notifyHTTPTimeout}
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	tr := base.Clone()
+	tr.DisableKeepAlives = true
+	proxied := false
+	if u, err := url.Parse(webhook); err == nil && tr.Proxy != nil {
+		if p, perr := tr.Proxy(&http.Request{URL: u}); perr == nil && p != nil {
+			proxied = true
+		}
+	}
+	if !proxied {
+		d := &net.Dialer{Timeout: notifyHTTPTimeout, KeepAlive: 30 * time.Second, Control: s.webhookDialGuard}
+		tr.DialContext = d.DialContext
+	}
+	return &http.Client{
+		Timeout:   notifyHTTPTimeout,
+		Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 // The finding notification body is authored once in Discord Markdown
 // (**bold**, `code`, ```fenced```) and reused for Telegram. Telegram's HTML
@@ -116,10 +278,10 @@ func (s *Server) sendDiscordWithFileTo(webhook string, color int, title, descrip
 
 	// Capture content type before goroutine to avoid fragile writer capture
 	contentType := writer.FormDataContentType()
+	client := s.notificationClient(webhook)
 
 	// Send request
 	go func() {
-		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Post(webhook, contentType, &b)
 		if err != nil {
 			log.Printf("Discord webhook file upload error: %v", err)
@@ -161,10 +323,12 @@ func (s *Server) sendSimpleEmbedTo(webhook string, color int, title, description
 		return
 	}
 
+	client := s.notificationClient(webhook)
 	go func() {
-		// #nosec G107 -- webhook is an operator/customer-configured outbound
-		// notification endpoint; the call is intentionally made to that URL.
-		resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
+		// The destination is the configured notification endpoint; for a
+		// caller-supplied webhook, notificationClient refuses this machine,
+		// the dashboard listener, link-local/metadata addresses and redirects.
+		resp, err := client.Post(webhook, "application/json", bytes.NewReader(body))
 		if err != nil {
 			log.Printf("Discord webhook error: %v", err)
 			return
