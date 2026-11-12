@@ -41,38 +41,52 @@ func TestRebuiltPausedInstanceCanResumeFromScanDir(t *testing.T) {
 	}
 }
 
-// TestClaimInstanceEntryAllowsOneResume verifies that only one of several
-// resume requests holding the same paused instance can claim it, and that an
-// entry since replaced under the same ID (the first request's live
-// replacement) is never removed by a stale request.
-func TestClaimInstanceEntryAllowsOneResume(t *testing.T) {
+// TestClaimPausedInstanceAllowsOneResume verifies that only one of several
+// resume requests holding the same paused instance can claim it, that an entry
+// since replaced under the same ID (the first request's live replacement) is
+// never removed by a stale request, and that an instance stopped after the
+// handler's paused check cannot be claimed.
+func TestClaimPausedInstanceAllowsOneResume(t *testing.T) {
 	s := newTestServer(t, nil)
-	paused := &ScanInstance{ID: "573708e2", Status: "paused"}
-	s.instancesMu.Lock()
-	s.instances[paused.ID] = paused
-	s.instancesMu.Unlock()
+	register := func(inst *ScanInstance) {
+		s.instancesMu.Lock()
+		s.instances[inst.ID] = inst
+		s.instancesMu.Unlock()
+	}
+	registered := func(inst *ScanInstance) bool {
+		s.instancesMu.RLock()
+		defer s.instancesMu.RUnlock()
+		return s.instances[inst.ID] == inst
+	}
 
-	if !s.claimInstanceEntry(paused) {
+	paused := &ScanInstance{ID: "573708e2", Status: "paused"}
+	register(paused)
+	if !s.claimPausedInstance(paused) {
 		t.Fatal("first claim failed")
 	}
-	if s.claimInstanceEntry(paused) {
+	if s.claimPausedInstance(paused) {
 		t.Fatal("a second claim of the same paused instance succeeded")
 	}
 
 	replacement := &ScanInstance{ID: paused.ID, Status: "running"}
-	s.instancesMu.Lock()
-	s.instances[paused.ID] = replacement
-	s.instancesMu.Unlock()
-	if s.claimInstanceEntry(paused) {
+	register(replacement)
+	if s.claimPausedInstance(paused) {
 		t.Fatal("a stale claim removed the live replacement")
 	}
-	s.instancesMu.RLock()
-	kept := s.instances[paused.ID] == replacement
-	s.instancesMu.RUnlock()
-	if !kept {
+	if !registered(replacement) {
 		t.Fatal("the live replacement is no longer registered")
 	}
-	if s.claimInstanceEntry(nil) {
+
+	stopped := &ScanInstance{ID: "c0ef7e73", Status: "stopped"}
+	register(stopped)
+	if s.claimPausedInstance(stopped) {
+		t.Fatal("claimed an instance that was stopped after the paused check")
+	}
+	if !registered(stopped) {
+		t.Fatal("a refused claim removed the stopped instance")
+	}
+
+	if s.claimPausedInstance(nil) {
 		t.Fatal("claimed a nil instance")
 	}
 }

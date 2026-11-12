@@ -274,17 +274,15 @@ func validDispatchID(id string) bool {
 	return true
 }
 
-// reserveDispatchID serializes duplicate HTTP submissions before runMultiScan
-// registers the instance. Existing/reserved IDs are idempotent acknowledgments,
-// never permission to overwrite another live run.
-// claimInstanceEntry removes inst from s.instances if it is still the entry
-// registered under its ID, and reports whether this caller removed it. Two
-// overlapping resume requests can both find an instance paused; only the one
-// that claims it may start the replacement. Without the claim the second
-// request removed the first one's live replacement from the map (leaving a
-// running scan nobody could stop) or, with new_id, ran a second session on the
-// same scan dir.
-func (s *Server) claimInstanceEntry(inst *ScanInstance) bool {
+// claimPausedInstance removes inst from s.instances if it is still the entry
+// registered under its ID and still paused, and reports whether this caller
+// removed it. Two overlapping resume requests can both find an instance
+// paused; only the one that claims it may start the replacement. Without the
+// claim the second request removed the first one's live replacement from the
+// map (leaving a running scan nobody could stop) or, with new_id, ran a second
+// session on the same scan dir. Re-checking the status here also keeps a stop
+// that landed after the handler's paused check from being undone.
+func (s *Server) claimPausedInstance(inst *ScanInstance) bool {
 	if inst == nil {
 		return false
 	}
@@ -293,10 +291,19 @@ func (s *Server) claimInstanceEntry(inst *ScanInstance) bool {
 	if s.instances[inst.ID] != inst {
 		return false
 	}
+	inst.mu.RLock()
+	paused := inst.Status == "paused"
+	inst.mu.RUnlock()
+	if !paused {
+		return false
+	}
 	delete(s.instances, inst.ID)
 	return true
 }
 
+// reserveDispatchID serializes duplicate HTTP submissions before runMultiScan
+// registers the instance. Existing/reserved IDs are idempotent acknowledgments,
+// never permission to overwrite another live run.
 func (s *Server) reserveDispatchID(id string) (string, bool) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
@@ -2972,10 +2979,10 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 
 		// Remove the paused instance; runMultiScan registers its replacement.
 		// Only the request that removes this exact entry may start one.
-		if !s.claimInstanceEntry(inst) {
+		if !s.claimPausedInstance(inst) {
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "cannot resume: another resume of this instance is already in progress",
+				"error": "cannot resume: the instance is no longer paused, or another resume claimed it",
 			})
 			return
 		}
@@ -2987,8 +2994,8 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		}
 		go s.runMultiScan(req, &scanCfg, targetID)
 
-		s.broadcastToInstance(instanceID, WSEvent{Type: "resumed", Content: "Scan resumed"})
-		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
+		s.broadcastToInstance(inst.ID, WSEvent{Type: "resumed", Content: "Scan resumed"})
+		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: inst.ID})
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "resumed", "instance_id": targetID})
 		return
 	}
