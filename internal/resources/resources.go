@@ -526,22 +526,38 @@ func autoScanMemoryBudgetMB(totalMB int64, cores int) int64 {
 	return budget
 }
 
+const (
+	// goMemLimitFloorMB is the smallest automatic Go memory limit.
+	goMemLimitFloorMB = 512
+	// goMemLimitSmallHostMB caps the 45%-of-RAM rule that sizes the limit on
+	// small hosts. Larger hosts use a third of RAM instead.
+	goMemLimitSmallHostMB = 4096
+	// goMemLimitCeilingMB is the largest automatic Go memory limit.
+	goMemLimitCeilingMB = 32768
+)
+
+// autoGoMemoryLimitMB returns the automatic soft memory limit for the Go
+// runtime, in MB. As the heap nears the limit the GC runs more often, and once
+// the live heap passes it the GC runs nearly all the time. So the limit must
+// sit well above the parent process's working set, which grows with the number
+// of concurrent scans and so with host RAM. It must also leave most of the RAM
+// to the tool processes those scans start.
+//
+// Small hosts get 45% of RAM, up to 4 GB. Larger hosts get a third of RAM,
+// which leaves two thirds for tool processes and the OS. (A fixed 4 GB cap on
+// every host had the GC using about 81% of 10 cores on a 48 GB host whose
+// long wildcard scans held a 6.4 GB heap.) The result is at least 512 MB, at
+// most total RAM minus the host reserve, and at most 32 GB.
 func autoGoMemoryLimitMB(totalMB int64) int64 {
 	if totalMB <= 0 {
 		return 0
 	}
-	limit := totalMB * 45 / 100
-	if limit < 512 {
-		limit = 512
-	}
-	maxLimit := totalMB - hostReserveMB(totalMB)
-	if maxLimit > 0 && limit > maxLimit {
+	limit := max(min(totalMB*45/100, goMemLimitSmallHostMB), totalMB/3)
+	limit = max(limit, goMemLimitFloorMB)
+	if maxLimit := totalMB - hostReserveMB(totalMB); maxLimit > 0 && limit > maxLimit {
 		limit = maxLimit
 	}
-	if limit > 4096 {
-		limit = 4096
-	}
-	return limit
+	return min(limit, goMemLimitCeilingMB)
 }
 
 func hostReserveMB(totalMB int64) int64 {
@@ -555,10 +571,15 @@ func hostReserveMB(totalMB int64) int64 {
 	return reserve
 }
 
+// configureGoRuntimeLimits sets the Go runtime's soft memory limit and GC
+// percentage. XALGORIX_GO_MEM_LIMIT_MB takes precedence (0 leaves the runtime
+// limit unchanged). Otherwise a GOMEMLIMIT the runtime already applied is left
+// alone. Otherwise the limit scales with host RAM (autoGoMemoryLimitMB).
 func configureGoRuntimeLimits(totalMB int64) {
 	override, hasOverride := envOptionalInt64("XALGORIX_GO_MEM_LIMIT_MB")
 	if !hasOverride {
-		if _, hasGoMemLimit := os.LookupEnv("GOMEMLIMIT"); hasGoMemLimit {
+		// The runtime ignores an empty GOMEMLIMIT, so treat it as unset.
+		if os.Getenv("GOMEMLIMIT") != "" {
 			log.Printf("[RESOURCES] GOMEMLIMIT is already set; leaving Go runtime memory limit unchanged")
 			return
 		}
