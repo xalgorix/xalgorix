@@ -317,12 +317,13 @@ type scanSummaryWalk struct {
 // whose clients had long gone. So walks are shared. At most one runs at a time,
 // and every caller that arrives while it runs waits for the single walk queued
 // behind it. That walk starts only after the caller arrived, so the results
-// are as fresh as an unshared walk's: a scan.json written before the call is
-// always seen.
+// are as fresh as an unshared walk's: a scan.json created before the call is
+// always seen. (A rewrite of an existing scan.json is subject to the
+// (modtime, size) memo, as it always was.)
 //
-// Each caller receives its own copy of the slice. The records inside it are
-// shallow copies of cached values, so callers must not mutate their nested
-// slices or maps in place.
+// Each caller receives its own slice. The records inside it are shallow copies
+// of cached values, so callers must not mutate their nested slices or maps in
+// place.
 func (s *Server) findAllScanSummaries() []scanEntry {
 	s.scanSummaryWalkMu.Lock()
 	w := s.scanSummaryWalkRunning
@@ -331,31 +332,43 @@ func (s *Server) findAllScanSummaries() []scanEntry {
 		s.scanSummaryWalkRunning = w
 		s.scanSummaryWalkMu.Unlock()
 		s.runScanSummaryWalk(w)
-	} else {
-		// The running walk may have listed directories before this call, so
-		// its results can be stale. Join the walk queued behind it.
-		if s.scanSummaryWalkNext == nil {
-			s.scanSummaryWalkNext = &scanSummaryWalk{done: make(chan struct{})}
+		if w.panicValue != nil {
+			panic(w.panicValue)
 		}
-		w = s.scanSummaryWalkNext
-		w.joiners++
-		s.scanSummaryWalkMu.Unlock()
-		<-w.done
+		// Nobody joins a running walk, so these results are this caller's.
+		return w.results
 	}
+	// The running walk may have listed directories before this call, so its
+	// results can be stale. Join the walk queued behind it.
+	if s.scanSummaryWalkNext == nil {
+		s.scanSummaryWalkNext = &scanSummaryWalk{done: make(chan struct{})}
+	}
+	w = s.scanSummaryWalkNext
+	w.joiners++
+	s.scanSummaryWalkMu.Unlock()
+	<-w.done
 	if w.panicValue != nil {
 		panic(w.panicValue)
 	}
 	return append([]scanEntry(nil), w.results...)
 }
 
+// errScanSummaryWalkAborted is what waiters receive when a walk ends without
+// returning or panicking (runtime.Goexit). Handing them empty results instead
+// would read as "no scans exist".
+var errScanSummaryWalkAborted = errors.New("scan summary walk exited without completing")
+
 // runScanSummaryWalk performs walk w, publishes its results, and starts the
-// walk queued behind it, if any callers joined one. A panicking walk still
-// releases its waiters, which re-panic in their own goroutines.
+// walk queued behind it, if any callers joined one. A walk that panics or
+// aborts still releases its waiters, which then panic in their own goroutines.
 func (s *Server) runScanSummaryWalk(w *scanSummaryWalk) {
+	completed := false
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[scan] scan summary walk panicked: %v\n%s", r, debug.Stack())
 			w.panicValue = r
+		} else if !completed {
+			w.panicValue = errScanSummaryWalkAborted
 		}
 		s.scanSummaryWalkMu.Lock()
 		next := s.scanSummaryWalkNext
@@ -368,6 +381,7 @@ func (s *Server) runScanSummaryWalk(w *scanSummaryWalk) {
 		}
 	}()
 	w.results = s.walkScanSummaries()
+	completed = true
 }
 
 // walkScanSummaries walks the data dir (pruning artifact subtrees via
@@ -983,6 +997,24 @@ func (s *Server) attachWildcardSubScans(rec *ScanRecord) {
 	// full findAllScans() here (per parent, on every GET) was a primary
 	// driver of the JSON-decode CPU and multi-GB transient allocations.
 	s.attachWildcardSubScansFrom(rec, s.findAllScanSummaries())
+}
+
+// attachWildcardSubScansForDetail attaches sub-scans for a scan-detail
+// response, reusing the request's summaries when that is safe. Those summaries
+// were walked before rec was loaded, so they can predate it. For an unfinished
+// parent that only delays child progress by one walk. A finished parent needs
+// children at least as new as itself: a child that finished just before the
+// parent would otherwise still look unfinished and mark the parent stopped.
+// So a finished parent walks again, after it was loaded.
+func (s *Server) attachWildcardSubScansForDetail(rec *ScanRecord, summaries func() []scanEntry) {
+	if rec == nil || rec.ParentTarget != "" {
+		return
+	}
+	if isTerminalScanStatus(rec.Status) {
+		s.attachWildcardSubScans(rec)
+		return
+	}
+	s.attachWildcardSubScansFrom(rec, summaries())
 }
 
 // attachWildcardSubScansFrom is the same as attachWildcardSubScans but reuses

@@ -3578,7 +3578,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.applyInstanceSnapshot(rec, true)
-		s.attachWildcardSubScansFrom(rec, all)
+		s.attachWildcardSubScansForDetail(rec, func() []scanEntry { return all })
 		finalizeScanRecordForResponse(rec)
 		finalizeEventsMeta(rec)
 		s.markDiscordWebhookConfigured(rec)
@@ -3655,7 +3655,8 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolving the scan dir and attaching wildcard sub-scans read the same
-	// summaries, so walk the data dir at most once per request.
+	// summaries, so walk the data dir once per request. A finished record
+	// walks once more (see attachWildcardSubScansForDetail).
 	var summaryEntries []scanEntry
 	summariesLoaded := false
 	summaries := func() []scanEntry {
@@ -3674,7 +3675,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 			if dir, ok := s.resolveScanDirByIDFrom(scanID, summaries); ok {
 				if persisted, ok2 := s.loadScanRecordForDetail(dir, detailEventTail); ok2 && persisted != nil {
 					s.applyInstanceSnapshot(persisted, true)
-					s.attachWildcardSubScansFrom(persisted, summaries())
+					s.attachWildcardSubScansForDetail(persisted, summaries)
 					finalizeScanRecordForResponse(persisted)
 					finalizeEventsMeta(persisted)
 					s.markDiscordWebhookConfigured(persisted)
@@ -3685,7 +3686,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			s.attachWildcardSubScansFrom(rec, summaries())
+			s.attachWildcardSubScansForDetail(rec, summaries)
 			finalizeScanRecordForResponse(rec)
 			finalizeEventsMeta(rec)
 			s.markDiscordWebhookConfigured(rec)
@@ -3709,7 +3710,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.applyInstanceSnapshot(rec, true)
-	s.attachWildcardSubScansFrom(rec, summaries())
+	s.attachWildcardSubScansForDetail(rec, summaries)
 	finalizeScanRecordForResponse(rec)
 	finalizeEventsMeta(rec)
 	s.markDiscordWebhookConfigured(rec)

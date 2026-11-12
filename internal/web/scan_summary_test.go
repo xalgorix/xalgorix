@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -123,14 +124,18 @@ func TestFindAllScanSummariesCachesByModtime(t *testing.T) {
 	}
 }
 
-// writeSummaryScan writes a minimal finished scan.json for id.
-func writeSummaryScan(t *testing.T, s *Server, id string) {
+// writeSummaryScan writes a minimal scan.json for id with the given status.
+func writeSummaryScan(t *testing.T, s *Server, id string, status ...string) {
 	t.Helper()
+	st := "finished"
+	if len(status) > 0 {
+		st = status[0]
+	}
 	dir := filepath.Join(s.dataDir, "example.com", "2026-06-01", id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"id":"` + id + `","target":"example.com","status":"finished","vulns":[]}`
+	body := `{"id":"` + id + `","target":"example.com","status":"` + st + `","vulns":[]}`
 	if err := os.WriteFile(filepath.Join(dir, "scan.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -242,66 +247,117 @@ func TestFindAllScanSummariesJoinersSeeFreshResults(t *testing.T) {
 	}
 }
 
-// TestFindAllScanSummariesWalkPanicReleasesCallers verifies that a panicking
-// walk panics in every caller waiting on it, rather than hanging them or
-// handing them empty results, and leaves later walks working.
-func TestFindAllScanSummariesWalkPanicReleasesCallers(t *testing.T) {
+// TestFindAllScanSummariesSharedWalkFailureReleasesCallers verifies that a
+// shared walk that panics or aborts panics in every caller waiting on it,
+// rather than hanging them or handing them empty results, and leaves later
+// walks working.
+func TestFindAllScanSummariesSharedWalkFailureReleasesCallers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func()
+		want any
+	}{
+		{"panic", func() { panic("walk failed") }, "walk failed"},
+		{"goexit", runtime.Goexit, errScanSummaryWalkAborted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, nil)
+			writeSummaryScan(t, s, "scan-a")
+			var walks atomic.Int32
+			entered, release := make(chan struct{}), make(chan struct{})
+			s.scanSummaryWalkHook = func() {
+				switch walks.Add(1) {
+				case 1:
+					close(entered)
+					<-release
+				case 2:
+					tc.fail()
+				}
+			}
+
+			firstDone := make(chan any)
+			go func() { firstDone <- recoverSummaryCall(s) }()
+			<-entered
+			joinerDone := make(chan any)
+			go func() { joinerDone <- recoverSummaryCall(s) }()
+			waitForSummaryJoiners(t, s, 1)
+			close(release)
+
+			if r := <-firstDone; r != nil {
+				t.Fatalf("first caller panicked with %v; its walk succeeded", r)
+			}
+			if r := <-joinerDone; r != tc.want {
+				t.Fatalf("joiner recovered %v, want %v", r, tc.want)
+			}
+			if got := s.findAllScanSummaries(); len(got) != 1 {
+				t.Fatalf("walk after the failure got %d entries, want 1", len(got))
+			}
+		})
+	}
+}
+
+// TestFindAllScanSummariesInlineWalkPanic verifies that a caller whose own
+// walk panics gets the panic and that the next call walks normally.
+func TestFindAllScanSummariesInlineWalkPanic(t *testing.T) {
 	s := newTestServer(t, nil)
 	writeSummaryScan(t, s, "scan-a")
 	var walks atomic.Int32
-	entered, release := make(chan struct{}), make(chan struct{})
 	s.scanSummaryWalkHook = func() {
-		switch walks.Add(1) {
-		case 1:
-			close(entered)
-			<-release
-		case 2:
+		if walks.Add(1) == 1 {
 			panic("walk failed")
 		}
 	}
-	recovered := func(call func()) (r any) {
-		defer func() { r = recover() }()
-		call()
-		return nil
+	if r := recoverSummaryCall(s); r != "walk failed" {
+		t.Fatalf("recovered %v, want the walk's panic", r)
 	}
-
-	firstDone := make(chan any)
-	go func() { firstDone <- recovered(func() { s.findAllScanSummaries() }) }()
-	<-entered
-	joinerDone := make(chan any)
-	go func() { joinerDone <- recovered(func() { s.findAllScanSummaries() }) }()
-	waitForSummaryJoiners(t, s, 1)
-	close(release)
-
-	if r := <-firstDone; r != nil {
-		t.Fatalf("first caller panicked with %v; its walk succeeded", r)
-	}
-	if r := <-joinerDone; r != "walk failed" {
-		t.Fatalf("joiner recovered %v, want the shared walk's panic", r)
+	s.scanSummaryWalkMu.Lock()
+	stuck := s.scanSummaryWalkRunning != nil
+	s.scanSummaryWalkMu.Unlock()
+	if stuck {
+		t.Fatal("a walk is still marked running after the panic")
 	}
 	if got := s.findAllScanSummaries(); len(got) != 1 {
 		t.Fatalf("walk after the panic got %d entries, want 1", len(got))
 	}
 }
 
-// TestHandleGetScanWalksDataDirOnce verifies that one scan-detail request
-// walks the data dir once, although it both resolves the scan dir and
-// attaches wildcard sub-scans.
-func TestHandleGetScanWalksDataDirOnce(t *testing.T) {
-	s := newTestServer(t, nil)
-	writeSummaryScan(t, s, "scan-a")
-	var walks atomic.Int32
-	s.scanSummaryWalkHook = func() { walks.Add(1) }
+// recoverSummaryCall calls findAllScanSummaries and returns what it panicked
+// with, or nil.
+func recoverSummaryCall(s *Server) (r any) {
+	defer func() { r = recover() }()
+	s.findAllScanSummaries()
+	return nil
+}
 
-	for _, path := range []string{"/api/scans/scan-a", "/api/scans/latest"} {
-		walks.Store(0)
-		w := httptest.NewRecorder()
-		s.handleGetScan(w, httptest.NewRequest(http.MethodGet, path, nil))
-		if w.Code != http.StatusOK {
-			t.Fatalf("GET %s = %d: %s", path, w.Code, w.Body.String())
-		}
-		if n := walks.Load(); n != 1 {
-			t.Fatalf("GET %s walked the data dir %d times, want 1", path, n)
-		}
+// TestHandleGetScanWalksDataDirOnce verifies that a scan-detail request for
+// an unfinished scan walks the data dir once, although it both resolves the
+// scan dir and attaches wildcard sub-scans. A finished scan walks once more,
+// after it was loaded, so its children are never older than itself.
+func TestHandleGetScanWalksDataDirOnce(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		walks  int32
+	}{
+		{"running", 1},
+		{"finished", 2},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			s := newTestServer(t, nil)
+			writeSummaryScan(t, s, "scan-a", tc.status)
+			var walks atomic.Int32
+			s.scanSummaryWalkHook = func() { walks.Add(1) }
+
+			for _, path := range []string{"/api/scans/scan-a", "/api/scans/latest"} {
+				walks.Store(0)
+				w := httptest.NewRecorder()
+				s.handleGetScan(w, httptest.NewRequest(http.MethodGet, path, nil))
+				if w.Code != http.StatusOK {
+					t.Fatalf("GET %s = %d: %s", path, w.Code, w.Body.String())
+				}
+				if n := walks.Load(); n != tc.walks {
+					t.Fatalf("GET %s walked the data dir %d times, want %d", path, n, tc.walks)
+				}
+			}
+		})
 	}
 }
