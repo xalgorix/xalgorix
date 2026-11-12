@@ -498,6 +498,9 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		scanContext:  cfg.ScanContext,
 		children:     make(map[*Agent]struct{}),
 	}
+	// Redirect hops get the same local-machine and port-pin checks as the
+	// URL a tool is called with.
+	reg.SetRequestGuard(a.checkHTTPHop)
 	if cfg.IterationDelaySec > 0 {
 		a.iterationDelayMs.Store(int64(cfg.IterationDelaySec * 1000))
 	}

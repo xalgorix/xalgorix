@@ -125,6 +125,9 @@ type Registry struct {
 	// tool/parameter descriptions in SchemaXML to shrink the per-call prompt.
 	// Every tool, parameter, and core (non-example) description is preserved.
 	leanSchema bool
+	// requestGuard is consulted by the HTTP tools for every redirect hop
+	// (see request_guard.go).
+	requestGuard RequestGuard
 }
 
 // NewRegistry creates a new tool registry.

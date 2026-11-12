@@ -40,13 +40,13 @@ func Register(r *tools.Registry) {
 			{Name: "max_bytes", Description: "Max response body bytes to return (default 51200, max 524288). Raise it to read large client-side JS bundles when hunting hidden API endpoints, routes, and secrets on SPAs.", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
-			return executeWithContext(r.GetScanContextID(), args)
+			return executeWithContext(r.GetScanContextID(), r.RequestGuard(), args)
 		},
 	})
 }
 
 func execute(args map[string]string) (tools.Result, error) {
-	return executeWithContext("", args)
+	return executeWithContext("", nil, args)
 }
 
 // ProbeTarget makes a bounded, read-only availability request using the same
@@ -79,7 +79,9 @@ func ProbeTarget(ctx context.Context, contextID, targetURL string) (int, error) 
 	return resp.StatusCode, nil
 }
 
-func executeWithContext(contextID string, args map[string]string) (tools.Result, error) {
+// executeWithContext runs one http_request call. guard, when non-nil, is
+// applied to every redirect hop before it is followed.
+func executeWithContext(contextID string, guard tools.RequestGuard, args map[string]string) (tools.Result, error) {
 	targetURL := strings.TrimSpace(args["url"])
 	if targetURL == "" {
 		return tools.Result{}, fmt.Errorf("url is required")
@@ -196,6 +198,10 @@ func executeWithContext(contextID string, args map[string]string) (tools.Result,
 	if err != nil {
 		return tools.Result{}, err
 	}
+	refusedHop := func() string { return "" }
+	if followRedirects {
+		refusedHop = tools.GuardRedirects(client, guard)
+	}
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -207,6 +213,9 @@ func executeWithContext(contextID string, args map[string]string) (tools.Result,
 	elapsed := time.Since(start)
 
 	var out strings.Builder
+	if note := refusedHop(); note != "" {
+		out.WriteString(note + "\n\n")
+	}
 	out.WriteString(fmt.Sprintf("%s %s\n", resp.Proto, resp.Status))
 	out.WriteString(fmt.Sprintf("Request-Time: %.0fms\n\n", float64(elapsed.Microseconds())/1000))
 

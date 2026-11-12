@@ -200,6 +200,7 @@ func IsLocalOrListener(cfg Config, target string) bool {
 			hostPort = p
 		}
 	}
+	host = stripIPv6Zone(host)
 
 	// Self-listener textual fast-path. Block if the target's port
 	// matches our own listening port AND the host textually matches
@@ -253,12 +254,14 @@ func IsLocalOrListener(cfg Config, target string) bool {
 			return false // can't resolve — let it through, will fail naturally
 		}
 		for _, a := range addrs {
-			if parsed := net.ParseIP(a); parsed != nil {
+			if parsed := net.ParseIP(stripIPv6Zone(a)); parsed != nil {
 				resolvedIPs = append(resolvedIPs, parsed)
 			}
 		}
 		if len(resolvedIPs) == 0 {
-			return false
+			// The resolver answered, but with nothing we can classify:
+			// refuse rather than guess.
+			return true
 		}
 	}
 
@@ -299,6 +302,21 @@ func IsLocalOrListener(cfg Config, target string) bool {
 	}
 
 	return false
+}
+
+// stripIPv6Zone returns an IPv6 literal without brackets or its zone
+// ("[::1%eth0]" → "::1"). net/http dials the address and the zone only picks
+// an interface, but net.ParseIP rejects zoned literals, which would otherwise
+// send "::1%x" to DNS and classify it as unresolvable (allowed). Other hosts
+// are returned unchanged.
+func stripIPv6Zone(host string) string {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if i := strings.IndexByte(host, '%'); i >= 0 && strings.Contains(host[:i], ":") {
+		host = host[:i]
+	}
+	return host
 }
 
 // ipsMatchLocalInterface returns true if any IP in the supplied

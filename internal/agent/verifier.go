@@ -26,7 +26,6 @@ import (
 
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
-	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 	"github.com/xalgord/xalgorix/v4/internal/tools/browser"
 	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
@@ -59,6 +58,7 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 	// Restricted, read-only tool registry — no reporting, no agent spawning.
 	vreg := tools.NewRegistry()
 	vreg.SetScanContextID(a.scanCtx.ID)
+	vreg.SetRequestGuard(a.checkHTTPHop)
 	terminal.Register(vreg)
 	httpclient.Register(vreg)
 	browser.Register(vreg)
@@ -231,9 +231,7 @@ func (a *Agent) execVerifierToolGuarded(vreg *tools.Registry, name string, args 
 	if a.ctx != nil && a.ctx.Err() != nil {
 		return tools.Result{Error: "agent stopped during verification"}
 	}
-	if name == "http_request" && scopeguard.IsLocalOrListener(a.localGuard, args["url"]) {
-		return tools.Result{Output: "⛔ OUT-OF-SCOPE TARGET BLOCKED — the HTTP request points at the operator's machine or listener. Submit an inconclusive verdict if it cannot be independently verified."}
-	}
+	// shouldBlockForOutOfScope covers http_request's destination too.
 	if blocked, reason := a.shouldBlockForOutOfScope(name, args); blocked {
 		return tools.Result{Output: "⛔ OUT-OF-SCOPE TARGET BLOCKED — " + reason +
 			"\nYou cannot probe this host during verification. If the finding depends on reaching it, it is not independently verifiable here — submit an 'inconclusive' verdict."}

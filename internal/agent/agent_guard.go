@@ -397,6 +397,12 @@ func (a *Agent) shouldBlockForActivityPolicy(toolName string, toolArgs map[strin
 //     pageagent — anything that can hit a network target.
 //   - report_vulnerability — files findings; the explicit
 //     target/endpoint arguments are checked too.
+//   - http_request, send_request — only the request's destination (the
+//     url argument) is checked, not hosts named in its query, headers or
+//     body: those are payloads aimed at the target (an SSRF probe such as
+//     ?url=http://127.0.0.1/ is the target's business, not ours). Redirect
+//     hops are checked by checkHTTPHop, which the tools call before
+//     following each one.
 //
 // All other tools (notes, finish, web_search, agentmail, list_skills,
 // read_skill, etc.) bypass this gate entirely — they are exempt
@@ -417,6 +423,21 @@ func (a *Agent) shouldBlockForActivityPolicy(toolName string, toolArgs map[strin
 func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]string) (bool, string) {
 	lowerTool := strings.ToLower(toolName)
 	switch lowerTool {
+	case "http_request", "send_request":
+		// A call without parameter tags arrives as _raw, which the registry
+		// copies into url before running the tool: check both.
+		for _, raw := range []string{toolArgs["url"], toolArgs["_raw"]} {
+			for _, dest := range httpToolDestinations(raw) {
+				if scopeguard.IsLocalOrListener(a.localGuard, dest) {
+					return true, fmt.Sprintf(
+						"%q points at the operator's machine or local network. "+
+							"Refusing to send an HTTP request to localhost / this machine / "+
+							"the dashboard's listener.", dest,
+					)
+				}
+			}
+		}
+		return false, ""
 	case "terminal_execute", "python_action", "browser_action", "page_agent", "pageagent",
 		"report_vulnerability", "authz_matrix", "probe_hypothesis":
 		// gated
@@ -463,6 +484,41 @@ func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]st
 	}
 
 	return false, ""
+}
+
+// httpToolDestinations returns the forms of an http_request / send_request
+// url argument to classify: the value as given and, when it has no http(s)://
+// prefix, the https:// form http_request actually sends ("localhost/x" is a
+// path to url.Parse but a request to localhost once prefixed).
+func httpToolDestinations(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	out := []string{raw}
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		out = append(out, "https://"+raw)
+	}
+	return out
+}
+
+// checkHTTPHop is the request guard the agent installs on its tool
+// registries (tools.Registry.SetRequestGuard). http_request and send_request
+// call it for every redirect hop before following it, so a redirect cannot
+// reach what a direct request is refused: the operator's machine or listener
+// (shouldBlockForOutOfScope) or another port of a port-pinned target
+// (shouldBlockForTargetScope).
+func (a *Agent) checkHTTPHop(rawURL string) error {
+	if scopeguard.IsLocalOrListener(a.localGuard, rawURL) {
+		return fmt.Errorf("it points at the operator's machine or the dashboard's listener")
+	}
+	if pins := pinnedTargetPorts(a.targets); len(pins) > 0 {
+		if host, port := referenceHostPort(rawURL); outsidePinnedPort(pins, host, port) {
+			return fmt.Errorf("%s is in scope only on port %s, the port the scan target names",
+				host, pinnedPortList(pins[host]))
+		}
+	}
+	return nil
 }
 
 // extractHostsFromArgs scans every value in toolArgs for URL/host
