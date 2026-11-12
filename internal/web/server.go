@@ -277,6 +277,26 @@ func validDispatchID(id string) bool {
 // reserveDispatchID serializes duplicate HTTP submissions before runMultiScan
 // registers the instance. Existing/reserved IDs are idempotent acknowledgments,
 // never permission to overwrite another live run.
+// claimInstanceEntry removes inst from s.instances if it is still the entry
+// registered under its ID, and reports whether this caller removed it. Two
+// overlapping resume requests can both find an instance paused; only the one
+// that claims it may start the replacement. Without the claim the second
+// request removed the first one's live replacement from the map (leaving a
+// running scan nobody could stop) or, with new_id, ran a second session on the
+// same scan dir.
+func (s *Server) claimInstanceEntry(inst *ScanInstance) bool {
+	if inst == nil {
+		return false
+	}
+	s.instancesMu.Lock()
+	defer s.instancesMu.Unlock()
+	if s.instances[inst.ID] != inst {
+		return false
+	}
+	delete(s.instances, inst.ID)
+	return true
+}
+
 func (s *Server) reserveDispatchID(id string) (string, bool) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
@@ -2939,7 +2959,9 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		req, ok, reason := s.scanRequestForPausedInstance(instanceID, inst)
+		// Key everything on the resolved instance, not the URL id, which may
+		// be a record id that resolveInstanceForAction mapped to it.
+		req, ok, reason := s.scanRequestForPausedInstance(inst.ID, inst)
 		if !ok {
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -2948,13 +2970,18 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Remove the paused instance — a new one will be created by runMultiScan
-		s.instancesMu.Lock()
-		delete(s.instances, instanceID)
-		s.instancesMu.Unlock()
+		// Remove the paused instance; runMultiScan registers its replacement.
+		// Only the request that removes this exact entry may start one.
+		if !s.claimInstanceEntry(inst) {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "cannot resume: another resume of this instance is already in progress",
+			})
+			return
+		}
 
 		scanCfg := *s.cfg
-		targetID := instanceID
+		targetID := inst.ID
 		if r.URL.Query().Get("new_id") == "true" {
 			targetID = randomSlug()
 		}

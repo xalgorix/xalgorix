@@ -462,7 +462,8 @@ func (s *Server) scanRequestForPausedInstance(instanceID string, inst *ScanInsta
 
 	defaultReq.ResumeScanDir = scanDir
 	defaultReq.ResumeScanID = filepath.Base(scanDir)
-	if rec, ok := loadScanRecordFromDir(scanDir); ok && rec.Target != "" {
+	// The summary is enough for the target and skips parsing the event log.
+	if rec, ok := readScanSummary(filepath.Join(scanDir, "scan.json")); ok && rec.Target != "" {
 		defaultReq.ResumeActiveTarget = rec.Target
 	} else if len(defaultReq.Targets) > 0 {
 		defaultReq.ResumeActiveTarget = defaultReq.Targets[0]
