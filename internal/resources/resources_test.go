@@ -3,6 +3,8 @@ package resources
 import (
 	"context"
 	"errors"
+	"os"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +124,108 @@ func TestAutoHeavyToolLimitFitsInsideScanBudget(t *testing.T) {
 
 	if got := autoHeavyToolMemLimitMB(4096); got != 1024 {
 		t.Fatalf("autoHeavyToolMemLimitMB(4GB) = %d, want 1024", got)
+	}
+}
+
+func TestAutoGoMemoryLimitScalesWithHostRAM(t *testing.T) {
+	for _, tc := range []struct {
+		totalMB, want int64
+	}{
+		{0, 0},
+		{512, 512},       // floor
+		{1024, 512},      // floor, within the host reserve
+		{2048, 921},      // 45% of RAM
+		{4096, 1843},     // 45% of RAM
+		{8192, 3686},     // 45% of RAM
+		{12288, 4096},    // 45% of RAM, capped at 4 GB
+		{16384, 5461},    // a third of RAM
+		{32768, 10922},   // a third of RAM
+		{49152, 16384},   // a third of RAM: the 48 GB production host
+		{98304, 32768},   // ceiling
+		{1 << 20, 32768}, // ceiling
+	} {
+		if got := autoGoMemoryLimitMB(tc.totalMB); got != tc.want {
+			t.Errorf("autoGoMemoryLimitMB(%d) = %d, want %d", tc.totalMB, got, tc.want)
+		}
+	}
+}
+
+func TestAutoGoMemoryLimitLeavesRoomForTools(t *testing.T) {
+	prev := int64(0)
+	for totalMB := int64(1024); totalMB <= 512*1024; totalMB += 256 {
+		got := autoGoMemoryLimitMB(totalMB)
+		if got < prev {
+			t.Fatalf("autoGoMemoryLimitMB(%d) = %d, below %d for less RAM", totalMB, got, prev)
+		}
+		prev = got
+		if got < goMemLimitFloorMB || got > goMemLimitCeilingMB {
+			t.Fatalf("autoGoMemoryLimitMB(%d) = %d, outside [%d, %d]", totalMB, got, goMemLimitFloorMB, goMemLimitCeilingMB)
+		}
+		if got > totalMB/2 {
+			t.Fatalf("autoGoMemoryLimitMB(%d) = %d, leaves less than half of RAM for tools", totalMB, got)
+		}
+		if reserve := hostReserveMB(totalMB); got > totalMB-reserve {
+			t.Fatalf("autoGoMemoryLimitMB(%d) = %d, eats into the %d MB host reserve", totalMB, got, reserve)
+		}
+	}
+}
+
+// setOrUnsetEnv sets key to value, or unsets it when unset is true, and
+// restores it when the test ends.
+func setOrUnsetEnv(t *testing.T, key, value string, unset bool) {
+	t.Helper()
+	t.Setenv(key, value)
+	if unset {
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestConfigureGoRuntimeLimitsHonorsOverrides(t *testing.T) {
+	const totalMB, autoMB, presetMB = 49152, 16384, 7777
+	oldLimit := debug.SetMemoryLimit(-1)
+	oldMB := goMemoryLimitMB
+	t.Cleanup(func() {
+		debug.SetMemoryLimit(oldLimit)
+		goMemoryLimitMB = oldMB
+	})
+	// With GOGC set, configureGoRuntimeLimits leaves the GC percentage alone.
+	t.Setenv("GOGC", "100")
+
+	const unset = "<unset>"
+	for _, tc := range []struct {
+		name, xalgorix, gomemlimit string
+		wantMB                     int64 // 0: the runtime limit is left unchanged
+	}{
+		{"auto", unset, unset, autoMB},
+		{"empty GOMEMLIMIT", unset, "", autoMB},
+		{"GOMEMLIMIT", unset, "2GiB", 0},
+		{"XALGORIX_GO_MEM_LIMIT_MB", "8192", unset, 8192},
+		{"XALGORIX_GO_MEM_LIMIT_MB over GOMEMLIMIT", "8192", "2GiB", 8192},
+		{"XALGORIX_GO_MEM_LIMIT_MB=0", "0", unset, 0},
+		{"invalid XALGORIX_GO_MEM_LIMIT_MB", "lots", unset, autoMB},
+		{"invalid XALGORIX_GO_MEM_LIMIT_MB with GOMEMLIMIT", "lots", "2GiB", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setOrUnsetEnv(t, "XALGORIX_GO_MEM_LIMIT_MB", tc.xalgorix, tc.xalgorix == unset)
+			setOrUnsetEnv(t, "GOMEMLIMIT", tc.gomemlimit, tc.gomemlimit == unset)
+			debug.SetMemoryLimit(presetMB << 20)
+			goMemoryLimitMB = 0
+
+			configureGoRuntimeLimits(totalMB)
+
+			wantLimit := int64(presetMB << 20)
+			if tc.wantMB > 0 {
+				wantLimit = tc.wantMB << 20
+			}
+			if got := debug.SetMemoryLimit(-1); got != wantLimit {
+				t.Errorf("runtime memory limit = %d MB, want %d MB", got>>20, wantLimit>>20)
+			}
+			if goMemoryLimitMB != tc.wantMB {
+				t.Errorf("goMemoryLimitMB = %d, want %d", goMemoryLimitMB, tc.wantMB)
+			}
+		})
 	}
 }
 
