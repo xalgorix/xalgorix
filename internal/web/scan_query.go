@@ -1438,6 +1438,10 @@ func (s *Server) rebuildInstancesFromDisk() {
 			SubScanSkipped:     entry.rec.SubScanSkipped,
 			WorkStarted:        entry.rec.WorkStarted,
 			events:             append([]WSEvent(nil), entry.rec.Events...),
+			// Keep the scan dir so a paused scan without saved queue state
+			// can still resume from it after a restart, and so its folder
+			// counts as in use while it is paused.
+			scanDir: entry.dir,
 		}
 		applyRecordIntegrityLocked(inst, &entry.rec)
 		inst.wildcardAssessmentReady = entry.rec.ScanMode == "wildcard"
