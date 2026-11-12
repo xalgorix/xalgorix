@@ -8,9 +8,66 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"testing"
 )
 
 var envFileKeyPattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+// accountEnvFiles are, in a test binary, the env files of the account running
+// it. They are resolved when the package loads, before a test can point HOME
+// at a temp dir, so UpdateEnvFile can refuse them.
+var accountEnvFiles = func() []string {
+	if !testing.Testing() {
+		return nil
+	}
+	paths := []string{"/etc/xalgorix.env", "/root/.xalgorix.env"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, ".xalgorix.env"))
+	}
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		paths = append(paths, filepath.Join("/home", sudoUser, ".xalgorix.env"))
+	}
+	return paths
+}()
+
+// refuseAccountEnvFile stops a test binary from writing the env file of the
+// account running it. On 2026-11-12 the test suite ran as root on a production
+// scanner, replaced /root/.xalgorix.env's API keys with test keys, and every
+// LLM call failed after the next restart.
+func refuseAccountEnvFile(path string, protected []string) error {
+	target := resolveEnvFilePath(path)
+	targetInfo, targetErr := os.Stat(path)
+	for _, p := range protected {
+		same := resolveEnvFilePath(p) == target
+		if !same && targetErr == nil {
+			if info, err := os.Stat(p); err == nil {
+				same = os.SameFile(info, targetInfo)
+			}
+		}
+		if same {
+			return fmt.Errorf("refusing to write %s from a test binary: it is the env file of the account running the tests (point HOME at a temp dir)", path)
+		}
+	}
+	return nil
+}
+
+// resolveEnvFilePath resolves symlinks in the path's directory and makes it
+// absolute, so a relative path or one through a symlinked dir still matches.
+// Symlinks are resolved before ".." is applied, as the kernel does. The file
+// itself may not exist yet.
+func resolveEnvFilePath(path string) string {
+	dir, file := filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return filepath.Join(dir, file)
+}
 
 // EnvFilePath returns the per-user configuration file used by both the CLI
 // setup wizard and the dashboard settings page.
@@ -50,8 +107,14 @@ func ReadEnvFile(path string) (map[string]string, error) {
 
 // UpdateEnvFile preserves unrelated settings and comments while applying the
 // supplied values. An empty value removes that key. The replacement is atomic
-// and the resulting file is always private to the current user.
+// and the resulting file is always private to the current user. In a test
+// binary it refuses the env files of the account running the tests.
 func UpdateEnvFile(path string, updates map[string]string) error {
+	if testing.Testing() {
+		if err := refuseAccountEnvFile(path, accountEnvFiles); err != nil {
+			return err
+		}
+	}
 	for key, value := range updates {
 		if !envFileKeyPattern.MatchString(key) {
 			return fmt.Errorf("invalid environment variable name %q", key)
