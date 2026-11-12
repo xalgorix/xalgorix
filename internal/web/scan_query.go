@@ -1349,6 +1349,19 @@ func (s *Server) rebuildInstancesFromDisk() {
 		return entry.rec.ID, false
 	}
 
+	// An exact stop is recorded in the durable dispatch snapshot, not in
+	// scan.json, and the snapshot tombstones the instance ID: runMultiScan
+	// refuses any further run under it. Give records the tombstone's stop
+	// before anything reads their status, so a stopped scan is not rebuilt as
+	// paused (resumable, but refused on resume) or as an interrupted run.
+	tombstones := make(map[string]*ScanRecord)
+	for i := range entries {
+		entry := &entries[i]
+		if s.applyDispatchTombstone(&entry.rec, tombstones) {
+			s.persistStopToScanDir(entry.dir, entry.rec.Status, entry.rec.StopReason, entry.rec.FinishedAt)
+		}
+	}
+
 	// First normalize every interrupted record so wildcard parent aggregation
 	// below observes the recovered child statuses rather than stale running
 	// values captured before the restart.

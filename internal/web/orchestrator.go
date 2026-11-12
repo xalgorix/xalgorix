@@ -41,9 +41,50 @@ func isReplaceableResumePlaceholder(inst *ScanInstance) bool {
 	return inst.Status == "pending" && inst.agent == nil && inst.cancel == nil && inst.StopReason == "server_restart_resuming"
 }
 
+// multiScanRun is a scan queue whose instance registerMultiScan installed in
+// s.instances. It holds the queue ownership lock until runRegisteredMultiScan
+// returns.
+type multiScanRun struct {
+	req        ScanRequest
+	instanceID string
+	instance   *ScanInstance
+	ownership  *queueOwnership
+}
+
+var (
+	errQueueOwnedElsewhere = errors.New("the scan queue is still owned by another run")
+	errPausedInstanceGone  = errors.New("the instance is no longer paused, or another resume claimed it")
+	errInstanceIDInUse     = errors.New("the instance id is already in use")
+)
+
+// tombstonedDispatchError means the durable exact snapshot for the instance ID
+// is terminal or stopping, so no new run may start under that ID.
+type tombstonedDispatchError struct {
+	snapshot *ScanRecord
+}
+
+func (e *tombstonedDispatchError) Error() string {
+	return fmt.Sprintf("the instance was already %s", e.snapshot.Status)
+}
+
 // runMultiScan processes targets sequentially, one at a time.
 // Each target is scanned in a fully isolated scanSession.
 func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceIDs ...string) {
+	run, err := s.registerMultiScan(req, instanceIDs...)
+	if err != nil {
+		// registerMultiScan has logged why it refused.
+		return
+	}
+	s.runRegisteredMultiScan(run, scanCfg)
+}
+
+// registerMultiScan takes the queue ownership lock for the instance ID, checks
+// the durable exact snapshot, and installs the pending instance, all before
+// any scan work starts. On refusal it releases the lock and leaves
+// s.instances unchanged, so a caller can report the refusal instead of losing
+// the instance it meant to replace. req.resumeReplaces names a paused instance
+// that the new run replaces in the same step that installs it.
+func (s *Server) registerMultiScan(req ScanRequest, instanceIDs ...string) (*multiScanRun, error) {
 	normalizeScanRequestActivity(&req)
 
 	// Defensively flatten req.Targets in case the frontend or API sent them as a comma-separated mega string
@@ -97,14 +138,21 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		ownership, owned, err = s.acquireQueueOwnership(instanceID)
 		if err != nil {
 			log.Printf("[queue] refusing instance %s: could not acquire ownership: %v", instanceID, err)
-			return
+			return nil, fmt.Errorf("could not acquire queue ownership: %w", err)
 		}
 		if !owned {
 			log.Printf("[queue] refusing instance %s: queue is owned by another process", instanceID)
-			return
+			return nil, errQueueOwnedElsewhere
 		}
 	}
-	defer ownership.release()
+	registered := false
+	defer func() {
+		if !registered {
+			ownership.release()
+		}
+	}()
+	resumeReplaces := req.resumeReplaces
+	req.resumeReplaces = nil
 
 	// Register instance as pending initially
 	instance := &ScanInstance{
@@ -167,13 +215,13 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 			delete(s.dispatchReservations, instanceID)
 			s.dispatchMu.Unlock()
 			log.Printf("[scan] refusing dispatch %q after durable exact stop/status %q", instanceID, durable.Status)
-			return
+			return nil, &tombstonedDispatchError{snapshot: durable}
 		}
 	} else if durErr != nil && !errors.Is(durErr, errDispatchSnapshotNotFound) {
 		delete(s.dispatchReservations, instanceID)
 		s.dispatchMu.Unlock()
 		log.Printf("[scan] refusing dispatch %q with unreadable durable state: %v", instanceID, durErr)
-		return
+		return nil, fmt.Errorf("unreadable durable dispatch state: %w", durErr)
 	}
 	if req.IsResume && durable != nil {
 		instance.TotalTokens = max(instance.TotalTokens, durable.TotalTokens)
@@ -181,14 +229,19 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		instance.UsageBySession = mergeSessionUsage(instance.UsageBySession, durable.UsageBySession)
 	}
 	s.instancesMu.Lock()
-	if existing := s.instances[instanceID]; existing != nil {
+	existing := s.instances[instanceID]
+	if existing == resumeReplaces {
+		// Resuming under the same ID: the paused entry is replaced below.
+		existing = nil
+	}
+	if existing != nil {
 		replaceableResumePlaceholder := req.IsResume && isReplaceableResumePlaceholder(existing)
 		if !replaceableResumePlaceholder {
 			s.instancesMu.Unlock()
 			delete(s.dispatchReservations, instanceID)
 			s.dispatchMu.Unlock()
 			log.Printf("[scan] refusing live instance id collision for %q", instanceID)
-			return
+			return nil, errInstanceIDInUse
 		}
 		existing.mu.RLock()
 		if existing.Iterations > instance.Iterations {
@@ -220,7 +273,17 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		delete(s.dispatchReservations, instanceID)
 		s.dispatchMu.Unlock()
 		log.Printf("[scan] refusing legacy persisted instance id collision for %q", instanceID)
-		return
+		return nil, errInstanceIDInUse
+	}
+	// Remove the paused instance in the same critical section that installs
+	// its replacement, so the paused scan is never missing from the map: a
+	// refusal anywhere above leaves it in place and resumable.
+	if resumeReplaces != nil && !s.claimPausedInstanceLocked(resumeReplaces) {
+		s.instancesMu.Unlock()
+		delete(s.dispatchReservations, instanceID)
+		s.dispatchMu.Unlock()
+		log.Printf("[scan] refusing resume %q: paused instance %q is no longer paused or was already resumed", instanceID, resumeReplaces.ID)
+		return nil, errPausedInstanceGone
 	}
 	if req.IsResume {
 		retainKnownSessionProgress(instance)
@@ -229,6 +292,17 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 	delete(s.dispatchReservations, instanceID)
 	s.instancesMu.Unlock()
 	s.dispatchMu.Unlock()
+	registered = true
+	return &multiScanRun{req: req, instanceID: instanceID, instance: instance, ownership: ownership}, nil
+}
+
+// runRegisteredMultiScan runs a scan queue that registerMultiScan registered,
+// and releases its queue ownership lock when the queue ends.
+func (s *Server) runRegisteredMultiScan(run *multiScanRun, scanCfg *config.Config) {
+	req := run.req
+	instanceID := run.instanceID
+	instance := run.instance
+	defer run.ownership.release()
 
 	// Persist the queue state immediately, BEFORE the admission wait loop.
 	// Previously the first saveQueueState ran only after admission (well past
@@ -350,6 +424,18 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		} else {
 			log.Printf("[queue] preserving queue state for %s because exact terminal persistence failed", instanceID)
 		}
+		// No session writes this queue's scan.json any more. A stop that
+		// landed after the last session ended, or before the first one started
+		// on a resumed scan, has not reached it; record it so a restart does
+		// not rebuild the stopped scan as paused.
+		instance.mu.RLock()
+		lastScanDir := instance.scanDir
+		finishedAt := instance.FinishedAt
+		instance.mu.RUnlock()
+		if lastScanDir == "" {
+			lastScanDir = req.ResumeScanDir
+		}
+		s.persistStopToScanDir(lastScanDir, finalStatus, finalStopReason, finishedAt)
 		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
 		time.Sleep(500 * time.Millisecond)
 

@@ -274,20 +274,21 @@ func validDispatchID(id string) bool {
 	return true
 }
 
-// claimPausedInstance removes inst from s.instances if it is still the entry
-// registered under its ID and still paused, and reports whether this caller
-// removed it. Two overlapping resume requests can both find an instance
-// paused; only the one that claims it may start the replacement. Without the
-// claim the second request removed the first one's live replacement from the
-// map (leaving a running scan nobody could stop) or, with new_id, ran a second
-// session on the same scan dir. Re-checking the status here also keeps a stop
-// that landed after the handler's paused check from being undone.
-func (s *Server) claimPausedInstance(inst *ScanInstance) bool {
+// claimPausedInstanceLocked removes inst from s.instances if it is still the
+// entry registered under its ID and still paused, and reports whether this
+// caller removed it. The caller must hold instancesMu for writing.
+// registerMultiScan claims a resumed instance in the same critical section
+// that installs its replacement. Two overlapping resume requests can both find
+// an instance paused; only the one that claims it may start the replacement.
+// Without the claim the second request removed the first one's live
+// replacement from the map (leaving a running scan nobody could stop) or, with
+// new_id, ran a second session on the same scan dir. Re-checking the status
+// here also keeps a stop that landed after the handler's paused check from
+// being undone.
+func (s *Server) claimPausedInstanceLocked(inst *ScanInstance) bool {
 	if inst == nil {
 		return false
 	}
-	s.instancesMu.Lock()
-	defer s.instancesMu.Unlock()
 	if s.instances[inst.ID] != inst {
 		return false
 	}
@@ -445,6 +446,10 @@ type ScanRequest struct {
 	ResumeTotalTokens    int      `json:"-"`
 	ResumeToolCalls      int      `json:"-"`
 	queueOwnership       *queueOwnership
+
+	// resumeReplaces is the paused instance that a resume replaces in the
+	// same step that registers the new run (see registerMultiScan).
+	resumeReplaces *ScanInstance
 
 	// Code-scan internals, resolved server-side from CodeScan in handleScan.
 	// codeScanMode drives the agent's methodology; allowLoopbackPorts is the
@@ -1979,6 +1984,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Stop ALL running instances (use write lock since we're modifying instance state)
+	var stopped []*ScanInstance
 	s.instancesMu.Lock()
 	for _, inst := range s.instances {
 		inst.mu.Lock()
@@ -1993,10 +1999,15 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 			if inst.agent != nil {
 				inst.agent.Stop()
 			}
+			stopped = append(stopped, inst)
 		}
 		inst.mu.Unlock()
 	}
 	s.instancesMu.Unlock()
+	// Paused and rebuilt instances have no session left to write scan.json.
+	for _, inst := range stopped {
+		s.persistIdleInstanceStop(inst)
+	}
 
 	// Kill all spawned processes as a safety net
 	terminal.KillAllProcesses()
@@ -2702,6 +2713,13 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "instance stop is still finalizing", http.StatusConflict)
 			return
 		}
+		// The stop is durable in the dispatch snapshot. A paused or rebuilt
+		// instance has no session left to write scan.json, so record the stop
+		// there too; restart recovery rebuilds instances from scan.json.
+		s.instancesMu.RLock()
+		stoppedInst := s.instances[instanceID]
+		s.instancesMu.RUnlock()
+		s.persistIdleInstanceStop(stoppedInst)
 		if err := s.clearQueueStateDurable(instanceID); err != nil {
 			log.Printf("[queue] exact stop persisted for %s but queue deletion failed: %v", instanceID, err)
 			http.Error(w, "instance stopped but queue cleanup was not durable", http.StatusInternalServerError)
@@ -2786,6 +2804,9 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		// user stop is terminal (non-resumable); the runMultiScan defer also
 		// clears it on exit, so this is just the prompt path (issue #239).
 		s.clearQueueState(instanceID)
+		// A paused or rebuilt instance has no session left to write its
+		// scan.json; without this a restart rebuilds it as paused.
+		s.persistIdleInstanceStop(inst)
 
 		// Broadcast stop to clients watching this instance
 		s.broadcastToInstance(instanceID, WSEvent{Type: "stopped", Content: "Instance stopped by user"})
@@ -2966,10 +2987,29 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// The paused run holds its queue lock until it has fully exited. Take
+		// the lock before reading the saved queue state, which that run may
+		// still be writing, and so that a resume (with new_id too) never runs
+		// beside it on the same scan dir.
+		ownership, owned, err := s.acquireQueueOwnershipWithin(r.Context(), inst.ID, resumeOwnershipWait)
+		if err != nil {
+			log.Printf("[scan] resume %s: could not lock the scan queue: %v", inst.ID, err)
+			http.Error(w, "cannot resume: could not lock the scan queue", http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "cannot resume: the paused run is still shutting down; retry shortly",
+			})
+			return
+		}
+
 		// Key everything on the resolved instance, not the URL id, which may
 		// be a record id that resolveInstanceForAction mapped to it.
 		req, ok, reason := s.scanRequestForPausedInstance(inst.ID, inst)
 		if !ok {
+			ownership.release()
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "cannot resume: " + reason,
@@ -2977,22 +3017,46 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Remove the paused instance; runMultiScan registers its replacement.
-		// Only the request that removes this exact entry may start one.
-		if !s.claimPausedInstance(inst) {
-			w.WriteHeader(http.StatusConflict)
+		targetID := inst.ID
+		if r.URL.Query().Get("new_id") == "true" {
+			targetID = randomSlug()
+		} else {
+			// The new run keeps the lock for its whole lifetime.
+			req.queueOwnership = ownership
+		}
+		// Register the replacement now, in the step that removes the paused
+		// instance, rather than in the scan goroutine: a refusal (a durable
+		// exact stop, a concurrent resume) then answers this request and
+		// leaves the paused instance in place instead of dropping it after a
+		// 200, so that later resumes got 404.
+		req.resumeReplaces = inst
+		run, err := s.registerMultiScan(req, targetID)
+		if targetID != inst.ID {
+			// The paused run has exited; the new run owns its own ID's lock.
+			ownership.release()
+		}
+		if err != nil {
+			var tombstoned *tombstonedDispatchError
+			if errors.As(err, &tombstoned) {
+				// The durable snapshot says this scan was stopped; stop
+				// presenting it as paused and resumable.
+				s.settlePausedInstanceTombstone(inst, tombstoned.snapshot)
+				s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: inst.ID})
+			}
+			code := http.StatusConflict
+			if !errors.As(err, &tombstoned) && !errors.Is(err, errPausedInstanceGone) &&
+				!errors.Is(err, errInstanceIDInUse) && !errors.Is(err, errQueueOwnedElsewhere) {
+				code = http.StatusInternalServerError
+			}
+			w.WriteHeader(code)
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "cannot resume: the instance is no longer paused, or another resume claimed it",
+				"error": "cannot resume: " + err.Error(),
 			})
 			return
 		}
 
 		scanCfg := *s.cfg
-		targetID := inst.ID
-		if r.URL.Query().Get("new_id") == "true" {
-			targetID = randomSlug()
-		}
-		go s.runMultiScan(req, &scanCfg, targetID)
+		go s.runRegisteredMultiScan(run, &scanCfg)
 
 		s.broadcastToInstance(inst.ID, WSEvent{Type: "resumed", Content: "Scan resumed"})
 		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: inst.ID})
