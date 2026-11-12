@@ -36,12 +36,150 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
+	"net/url"
+	"path"
 	"strings"
 
 	"github.com/xalgord/xalgorix/v4/internal/auth"
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/llm"
 )
+
+// errAPIBaseNeedsKey is returned when a scan request moves LLM traffic to a
+// host the operator did not configure without supplying its own api_key.
+var errAPIBaseNeedsKey = errors.New("api_base points to a different host than the configured LLM endpoint; include api_key in the same request (stored provider credentials are never sent to a request-supplied host)")
+
+// checkScanRequestDestinations validates the outbound destinations a scan
+// request chooses — the notification webhook and the LLM api_base — before
+// any scan state exists. Every wire entry point that starts a scan (POST
+// /api/scan and the WebSocket scan message) must call it.
+func (s *Server) checkScanRequestDestinations(ctx context.Context, req ScanRequest) error {
+	if err := s.validateScanWebhook(req.DiscordWebhook); err != nil {
+		return err
+	}
+	return s.checkScanAPIBaseOverride(ctx, req)
+}
+
+// applyScanLLMOverrides copies a request's ad-hoc LLM overrides into the
+// per-scan config copy. A caller-supplied api_key replaces the stored
+// credential set for this scan, including the rotation pool: otherwise the
+// key rotator would swap the operator's pooled keys in on later requests to
+// whatever api_base the caller chose.
+func applyScanLLMOverrides(cfg *config.Config, req ScanRequest) {
+	if req.Model != "" {
+		cfg.LLM = req.Model
+	}
+	if req.APIKey != "" {
+		cfg.APIKey = req.APIKey
+		cfg.APIKeys = nil
+	}
+	if req.APIBase != "" {
+		cfg.APIBase = req.APIBase
+	}
+}
+
+// checkScanAPIBaseOverride guards the ad-hoc api_base override (R11.4).
+// Stored credentials — the configured key or key pool, an auth profile's key
+// or OAuth token — belong to the endpoint they resolve to. Machine API tokens
+// are deliberately kept away from provider credentials (see
+// machineTokenRouteDenylist), so a scan request may only point LLM traffic
+// outside that endpoint when it brings its own api_key. An override is "the
+// same endpoint" when it has the stored endpoint's origin and one path is a
+// segment prefix of the other (so a path-scoped gateway tenant cannot be
+// swapped for another). Installs that hold no stored credential are
+// unaffected.
+func (s *Server) checkScanAPIBaseOverride(ctx context.Context, req ScanRequest) error {
+	base := strings.TrimSpace(req.APIBase)
+	if base == "" || strings.TrimSpace(req.APIKey) != "" || s.cfg == nil {
+		return nil
+	}
+	stored := req
+	stored.APIBase = ""
+	ep, err := s.resolveScanCredentials(ctx, stored, s.cfg)
+	storedURL := s.cfg.APIBase
+	if err == nil && ep.URL != "" {
+		storedURL = ep.URL
+	}
+	if sameEndpointScope(base, storedURL) {
+		return nil
+	}
+	hasStored := strings.TrimSpace(s.cfg.APIKey) != "" || len(s.cfg.APIKeys) > 0
+	if err == nil {
+		hasStored = hasStored || ep.APIKey != "" || ep.AccessToken != ""
+	} else {
+		// Could not resolve which credential applies: assume a configured
+		// profile carries one.
+		hasStored = hasStored || strings.TrimSpace(s.cfg.LLMProfile) != "" || strings.TrimSpace(req.ProviderProfile) != ""
+	}
+	if !hasStored {
+		return nil
+	}
+	return errAPIBaseNeedsKey
+}
+
+// endpointOrigin returns the lower-cased scheme://host:port of an http(s) URL,
+// or "" when raw is not an absolute http(s) URL.
+func endpointOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	switch scheme {
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+	case "https":
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return ""
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+}
+
+// sameEndpointScope reports whether override stays on the stored endpoint:
+// same origin, the same query when the override sets one, and one cleaned
+// path a segment prefix of the other. Paths are compared decoded and with dot
+// segments resolved, so "/v1/../other" counts as "/other".
+func sameEndpointScope(override, stored string) bool {
+	origin := endpointOrigin(override)
+	if origin == "" || origin != endpointOrigin(stored) {
+		return false
+	}
+	o, err := url.Parse(strings.TrimSpace(override))
+	if err != nil {
+		return false
+	}
+	st, err := url.Parse(strings.TrimSpace(stored))
+	if err != nil {
+		return false
+	}
+	if o.RawQuery != "" && o.RawQuery != st.RawQuery {
+		return false
+	}
+	// Some servers treat ";" path parameters (e.g. "..;") as dot segments;
+	// path.Clean does not, so never count such an override as in scope.
+	if strings.Contains(o.Path, ";") {
+		return false
+	}
+	op, sp := cleanURLPath(o.Path), cleanURLPath(st.Path)
+	return pathSegmentPrefix(op, sp) || pathSegmentPrefix(sp, op)
+}
+
+func cleanURLPath(p string) string {
+	return strings.TrimRight(path.Clean("/"+p), "/")
+}
+
+// pathSegmentPrefix reports whether prefix is p or an ancestor of p on a
+// segment boundary ("" is the root and prefixes everything).
+func pathSegmentPrefix(prefix, p string) bool {
+	return prefix == "" || p == prefix || strings.HasPrefix(p, prefix+"/")
+}
 
 // errUnknownProviderProfile is returned by resolveScanCredentials
 // whenever the supplied ProviderProfile cannot be mapped to a live

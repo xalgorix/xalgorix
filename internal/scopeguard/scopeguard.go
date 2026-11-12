@@ -162,6 +162,13 @@ func SetLookupHost(fn func(host string) ([]string, error)) func(host string) ([]
 	return *prev
 }
 
+// LookupHost resolves host with the same resolver IsLocalOrListener uses, so
+// callers that need the addresses themselves see the same answers (and the
+// same test stubs installed via SetLookupHost).
+func LookupHost(host string) ([]string, error) {
+	return lookupHost(host)
+}
+
 // IsLocalOrListener returns true when target — a bare host,
 // host:port, scheme://host[:port][/path], or [ipv6][:port] —
 // classifies as pointing at the operator's own machine.

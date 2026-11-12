@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -151,21 +152,25 @@ func (c *wsClient) readPump() {
 
 		// Only authenticated (or loopback-when-auth-off) clients may override
 		// LLM provider settings — otherwise an attacker could repoint the
-		// agent's brain to an endpoint that returns crafted tool calls.
-		scanCfg := *c.server.cfg // shallow copy
-		if c.authenticated {
-			if in.Model != "" {
-				scanCfg.LLM = in.Model
-			}
-			if in.APIKey != "" {
-				scanCfg.APIKey = in.APIKey
-			}
-			if in.APIBase != "" {
-				scanCfg.APIBase = in.APIBase
-			}
-		} else if in.Model != "" || in.APIKey != "" || in.APIBase != "" {
+		// agent's brain to an endpoint that returns crafted tool calls. The
+		// overrides are cleared from the request too, because the per-scan
+		// LLM resolver reads them from the request, not only from scanCfg.
+		if !c.authenticated && (in.Model != "" || in.APIKey != "" || in.APIBase != "") {
 			log.Printf("[ws] dropping LLM-provider overrides from unauthenticated client %s", c.conn.RemoteAddr())
+			in.Model, in.APIKey, in.APIBase = "", "", ""
 		}
+
+		// Same destination checks as POST /api/scan: webhook self-scan
+		// protection and no stored credentials sent to a caller-chosen
+		// api_base.
+		if err := c.server.checkScanRequestDestinations(context.Background(), in.ScanRequest); err != nil {
+			log.Printf("[ws] refusing scan request from %s: %v", c.conn.RemoteAddr(), err)
+			c.sendScanRejected(err)
+			continue
+		}
+
+		scanCfg := *c.server.cfg // shallow copy
+		applyScanLLMOverrides(&scanCfg, in.ScanRequest)
 
 		go c.server.runMultiScan(in.ScanRequest, &scanCfg)
 	}
@@ -218,6 +223,25 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go client.writePump()
 	// Read pump runs in this goroutine (blocks until disconnect)
 	client.readPump()
+}
+
+// sendScanRejected tells this client why its scan message was refused. It
+// holds server.mu like broadcast does, so it never sends on a channel that
+// removeClient has already closed, and it never blocks the read loop.
+func (c *wsClient) sendScanRejected(reason error) {
+	data, err := json.Marshal(withEventTimestamp(WSEvent{Type: "error", Content: "Scan request refused: " + reason.Error()}))
+	if err != nil {
+		return
+	}
+	c.server.mu.RLock()
+	defer c.server.mu.RUnlock()
+	if _, ok := c.server.clients[c]; !ok {
+		return
+	}
+	select {
+	case c.send <- data:
+	default:
+	}
 }
 
 // removeClient safely removes a client from the server's client set.

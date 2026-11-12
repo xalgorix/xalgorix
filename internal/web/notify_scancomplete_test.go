@@ -80,6 +80,9 @@ func TestSendScanCompletionSummary_RespectsOptIn(t *testing.T) {
 
 	telegram := newTelegramStubServer(t)
 	s := newTestServer(t, &config.Config{RateLimitRequests: 60, RateLimitWindow: 60})
+	// The stub listens on loopback, which a caller-supplied per-scan webhook
+	// may not reach; configure it as the operator's global webhook instead.
+	s.discordWebhook = discord.URL
 	s.telegramBotToken = "123456789:ABC-DEF"
 	s.telegramChatID = "-1001234567890"
 	previousTelegramBase := swapTelegramAPIBaseForTest(telegram.srv.URL)
