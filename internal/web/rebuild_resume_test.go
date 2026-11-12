@@ -58,19 +58,24 @@ func TestClaimPausedInstanceAllowsOneResume(t *testing.T) {
 		defer s.instancesMu.RUnlock()
 		return s.instances[inst.ID] == inst
 	}
+	claim := func(inst *ScanInstance) bool {
+		s.instancesMu.Lock()
+		defer s.instancesMu.Unlock()
+		return s.claimPausedInstanceLocked(inst)
+	}
 
 	paused := &ScanInstance{ID: "573708e2", Status: "paused"}
 	register(paused)
-	if !s.claimPausedInstance(paused) {
+	if !claim(paused) {
 		t.Fatal("first claim failed")
 	}
-	if s.claimPausedInstance(paused) {
+	if claim(paused) {
 		t.Fatal("a second claim of the same paused instance succeeded")
 	}
 
 	replacement := &ScanInstance{ID: paused.ID, Status: "running"}
 	register(replacement)
-	if s.claimPausedInstance(paused) {
+	if claim(paused) {
 		t.Fatal("a stale claim removed the live replacement")
 	}
 	if !registered(replacement) {
@@ -79,14 +84,14 @@ func TestClaimPausedInstanceAllowsOneResume(t *testing.T) {
 
 	stopped := &ScanInstance{ID: "c0ef7e73", Status: "stopped"}
 	register(stopped)
-	if s.claimPausedInstance(stopped) {
+	if claim(stopped) {
 		t.Fatal("claimed an instance that was stopped after the paused check")
 	}
 	if !registered(stopped) {
 		t.Fatal("a refused claim removed the stopped instance")
 	}
 
-	if s.claimPausedInstance(nil) {
+	if claim(nil) {
 		t.Fatal("claimed a nil instance")
 	}
 }
