@@ -329,21 +329,40 @@ func recoverSummaryCall(s *Server) (r any) {
 	return nil
 }
 
-// TestHandleGetScanWalksDataDirOnce verifies that a scan-detail request for
-// an unfinished scan walks the data dir once, although it both resolves the
-// scan dir and attaches wildcard sub-scans. A finished scan walks once more,
-// after it was loaded, so its children are never older than itself.
+// TestHandleGetScanWalksDataDirOnce verifies that a scan-detail request
+// walks the data dir once, although it both resolves the scan dir and attaches
+// wildcard sub-scans. Only a finished record that can have sub-scans walks
+// once more, after it was loaded, so its children are never older than itself.
 func TestHandleGetScanWalksDataDirOnce(t *testing.T) {
 	for _, tc := range []struct {
-		status string
-		walks  int32
+		name     string
+		status   string
+		mode     string
+		subScans int
+		child    bool
+		walks    int32
 	}{
-		{"running", 1},
-		{"finished", 2},
+		{name: "running", status: "running", walks: 1},
+		{name: "running wildcard parent", status: "running", mode: "wildcard", walks: 1},
+		{name: "finished", status: "finished", walks: 1},
+		{name: "stopped", status: "stopped", walks: 1},
+		{name: "finished wildcard parent", status: "finished", mode: "wildcard", walks: 2},
+		{name: "finished parent with sub-scan total", status: "finished", subScans: 3, walks: 2},
+		{name: "finished legacy parent with a child", status: "finished", child: true, walks: 2},
 	} {
-		t.Run(tc.status, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t, nil)
-			writeSummaryScan(t, s, "scan-a", tc.status)
+			writeScanRecord(t, s.dataDir, "example.com/2026-06-01/scan-a", ScanRecord{
+				ID: "scan-a", Target: "example.com", Status: tc.status, ScanMode: tc.mode,
+				SubScanTotal: tc.subScans, StartedAt: "2026-06-01T10:00:00Z",
+			})
+			if tc.child {
+				// No instance ID on either record: legacy parents match
+				// children by target name.
+				writeScanRecord(t, s.dataDir, "a.example.com/2026-06-01/scan-a-child", ScanRecord{
+					ID: "scan-a-child", Target: "a.example.com", ParentTarget: "example.com", Status: "finished",
+				})
+			}
 			var walks atomic.Int32
 			s.scanSummaryWalkHook = func() { walks.Add(1) }
 
@@ -354,10 +373,71 @@ func TestHandleGetScanWalksDataDirOnce(t *testing.T) {
 				if w.Code != http.StatusOK {
 					t.Fatalf("GET %s = %d: %s", path, w.Code, w.Body.String())
 				}
+				var got ScanRecord
+				if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.ID != "scan-a" {
+					t.Fatalf("GET %s returned %q (err %v), want scan-a", path, got.ID, err)
+				}
 				if n := walks.Load(); n != tc.walks {
 					t.Fatalf("GET %s walked the data dir %d times, want %d", path, n, tc.walks)
 				}
 			}
 		})
+	}
+}
+
+// TestHandleGetScanFinishedWildcardParentSeesFreshChildren reproduces a
+// detail request whose summary walk ran before a wildcard parent and its last
+// child finished. The child finishes first, so by the time the parent is
+// loaded as finished, the request's summaries still show the child running.
+// Reusing them would mark the child stopped and the parent stopped with
+// incomplete_wildcard_subscans. The parent must walk again and report
+// finished.
+func TestHandleGetScanFinishedWildcardParentSeesFreshChildren(t *testing.T) {
+	s := newTestServer(t, nil)
+	const parentRel, childRel = "example.invalid/2026-06-01/parent-scan", "a.example.invalid/2026-06-01/child-scan"
+	parent := ScanRecord{
+		ID: "parent-scan", InstanceID: "parent-scan", Target: "example.invalid", ScanMode: "wildcard",
+		Status: "running", StartedAt: "2026-06-01T10:00:00Z", SubScanTotal: 1,
+		Discovery: &SubScanSummary{ID: "parent-scan", Status: "finished", Completion: "full"},
+	}
+	child := ScanRecord{
+		ID: "child-scan", InstanceID: "parent-scan", Target: "a.example.invalid", ParentTarget: "example.invalid",
+		ScanMode: "wildcard", Status: "running", StartedAt: "2026-06-01T10:05:00Z",
+	}
+	writeScanRecord(t, s.dataDir, parentRel, parent)
+	writeScanRecord(t, s.dataDir, childRel, child)
+
+	var walks atomic.Int32
+	entered, release := blockFirstSummaryWalk(s, &walks)
+	done := make(chan *httptest.ResponseRecorder)
+	go func() {
+		w := httptest.NewRecorder()
+		s.handleGetScan(w, httptest.NewRequest(http.MethodGet, "/api/scans/parent-scan", nil))
+		done <- w
+	}()
+	<-entered // the request's walk has read both records as running
+
+	child.Status, child.Completion, child.FinishedAt = "finished", "full", "2026-06-01T11:00:00Z"
+	writeScanRecord(t, s.dataDir, childRel, child)
+	parent.Status, parent.Completion, parent.FinishedAt = "finished", "full", "2026-06-01T11:01:00Z"
+	writeScanRecord(t, s.dataDir, parentRel, parent)
+	close(release)
+
+	w := <-done
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET = %d: %s", w.Code, w.Body.String())
+	}
+	var got ScanRecord
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "finished" || got.StopReason != "" {
+		t.Fatalf("parent status = %q, stop reason = %q; want finished with no stop reason", got.Status, got.StopReason)
+	}
+	if len(got.SubScans) != 1 || got.SubScans[0].ID != "child-scan" || got.SubScans[0].Status != "finished" {
+		t.Fatalf("sub-scans = %+v, want child-scan finished", got.SubScans)
+	}
+	if n := walks.Load(); n != 2 {
+		t.Fatalf("walks = %d, want 2 (the request's walk plus one after loading the finished parent)", n)
 	}
 }

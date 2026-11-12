@@ -1005,16 +1005,30 @@ func (s *Server) attachWildcardSubScans(rec *ScanRecord) {
 // parent that only delays child progress by one walk. A finished parent needs
 // children at least as new as itself: a child that finished just before the
 // parent would otherwise still look unfinished and mark the parent stopped.
-// So a finished parent walks again, after it was loaded.
+// So a finished parent walks again, after it was loaded. Only a record that
+// can have children needs that: a wildcard parent, or a record that already
+// has a child in the summaries (legacy parents match children by target).
+// Any other finished record reuses the summaries.
 func (s *Server) attachWildcardSubScansForDetail(rec *ScanRecord, summaries func() []scanEntry) {
 	if rec == nil || rec.ParentTarget != "" {
 		return
 	}
-	if isTerminalScanStatus(rec.Status) {
+	entries := summaries()
+	if isTerminalScanStatus(rec.Status) && (isWildcardAssessmentParent(rec) || hasChildScan(rec, entries)) {
 		s.attachWildcardSubScans(rec)
 		return
 	}
-	s.attachWildcardSubScansFrom(rec, summaries())
+	s.attachWildcardSubScansFrom(rec, entries)
+}
+
+// hasChildScan reports whether any entry is a child of parent.
+func hasChildScan(parent *ScanRecord, entries []scanEntry) bool {
+	for i := range entries {
+		if isChildOfScan(parent, &entries[i].rec) {
+			return true
+		}
+	}
+	return false
 }
 
 // attachWildcardSubScansFrom is the same as attachWildcardSubScans but reuses
