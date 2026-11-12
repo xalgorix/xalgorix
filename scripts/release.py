@@ -45,6 +45,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 
 REPO_DEFAULT = "xalgorix/xalgorix"
 ORIGIN_URL = "https://github.com/xalgorix/xalgorix.git"
@@ -257,7 +258,7 @@ class Release:
         revision = self.revision()
         release = json.loads(run(
             ["gh", "release", "view", self.tag, "--repo", self.repo, "--json",
-             "tagName,isDraft,isPrerelease,publishedAt,url,body,assets"],
+             "tagName,isDraft,isPrerelease,publishedAt,url,body,assets,apiUrl"],
             cwd=self.source,
         ))
         assert release["tagName"] == self.tag and not release["isPrerelease"]
@@ -269,11 +270,13 @@ class Release:
         local_names = {p.name for p in self.assets.iterdir()}
         remote = {asset["name"]: asset for asset in release["assets"]}
         assert set(remote) == local_names, f"asset set mismatch: {set(remote) ^ local_names}"
+        digests = self.asset_digests(release)
+        assert set(digests) == local_names, f"REST asset set mismatch: {set(digests) ^ local_names}"
         for name, asset in remote.items():
             data = (self.assets / name).read_bytes()
             assert asset["state"] == "uploaded", f"{name} not fully uploaded"
             assert asset["size"] == len(data), f"{name} size mismatch"
-            assert asset["digest"] == "sha256:" + hashlib.sha256(data).hexdigest(), f"{name} digest mismatch"
+            assert digests[name] == "sha256:" + hashlib.sha256(data).hexdigest(), f"{name} digest mismatch"
 
         assert run(["git", "cat-file", "-t", self.tag], cwd=self.source) == "tag", "tag is not annotated"
         assert run(["git", "rev-parse", f"{self.tag}^{{}}"], cwd=self.source) == revision, "tag points elsewhere"
@@ -295,6 +298,43 @@ class Release:
         }
         (self.workdir / f"release-verification-{self.tag}.json").write_text(json.dumps(result, indent=2) + "\n")
         emit(**result)
+
+    def asset_digests(self, release):
+        """Return ``{name: "sha256:<hex>"}`` for every asset of ``release``.
+
+        ``gh release view --json assets`` does not return asset digests on
+        every gh version, so read them from the release's REST resource, which
+        reports ``digest`` per asset. The resource is fetched by release id,
+        which also works for drafts. An asset without a digest is downloaded
+        and hashed instead.
+        """
+        api_url = release["apiUrl"]
+        release_id = api_url.rstrip("/").rsplit("/", 1)[-1]
+        assert release_id.isdigit() and api_url.endswith(f"/repos/{self.repo}/releases/{release_id}"), (
+            f"unexpected release API URL {api_url!r}"
+        )
+        rest = json.loads(run(["gh", "api", f"repos/{self.repo}/releases/{release_id}"], cwd=self.source))
+        assert rest["tag_name"] == self.tag and rest["draft"] == release["isDraft"], (
+            "REST release does not match gh release view"
+        )
+        digests = {}
+        for asset in rest["assets"]:
+            name = asset["name"]
+            assert name not in digests, f"duplicate asset {name}"
+            digests[name] = asset.get("digest") or self.downloaded_digest(name)
+        return digests
+
+    def downloaded_digest(self, name):
+        """Download one asset of this release and return ``"sha256:<hex>"``."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run(
+                ["gh", "release", "download", self.tag, "--repo", self.repo,
+                 "--pattern", name, "--dir", tmp],
+                cwd=self.source,
+            )
+            files = [p.name for p in Path(tmp).iterdir()]
+            assert files == [name], f"downloading {name} produced {files}"
+            return "sha256:" + hashlib.sha256((Path(tmp) / name).read_bytes()).hexdigest()
 
 
 def main():
