@@ -1755,7 +1755,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// id never produces a "started" instance the operator then has
 	// to clean up.
 	if _, err := s.resolveScanCredentials(r.Context(), req, s.cfg); err != nil {
-		if errors.Is(err, errUnknownProviderProfile) {
+		if errors.Is(err, errUnknownProviderProfile) || errors.Is(err, errAPIBaseNeedsKey) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
