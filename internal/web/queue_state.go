@@ -667,9 +667,10 @@ func (s *Server) acquireQueueOwnership(instanceID string) (*queueOwnership, bool
 	return &queueOwnership{file: f, path: path}, true, nil
 }
 
-// resumeOwnershipWait bounds how long a resume waits for a paused run that is
-// still exiting to release its queue lock.
-var resumeOwnershipWait = 3 * time.Second
+// queueOwnershipWait bounds how long a resume, or a stop recording itself in
+// scan.json, waits for a paused run that is still exiting to release its
+// queue lock.
+var queueOwnershipWait = 3 * time.Second
 
 // acquireQueueOwnershipWithin retries acquireQueueOwnership until it gets the
 // lock, wait has passed, or ctx is done.

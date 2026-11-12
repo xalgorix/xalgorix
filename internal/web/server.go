@@ -2991,17 +2991,27 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		// the lock before reading the saved queue state, which that run may
 		// still be writing, and so that a resume (with new_id too) never runs
 		// beside it on the same scan dir.
-		ownership, owned, err := s.acquireQueueOwnershipWithin(r.Context(), inst.ID, resumeOwnershipWait)
+		ownership, owned, err := s.acquireQueueOwnershipWithin(r.Context(), inst.ID, queueOwnershipWait)
 		if err != nil {
 			log.Printf("[scan] resume %s: could not lock the scan queue: %v", inst.ID, err)
 			http.Error(w, "cannot resume: could not lock the scan queue", http.StatusInternalServerError)
 			return
 		}
 		if !owned {
+			message := "cannot resume: the paused run is still shutting down; retry shortly"
+			s.instancesMu.RLock()
+			stillRegistered := s.instances[inst.ID] == inst
+			s.instancesMu.RUnlock()
+			inst.mu.RLock()
+			stillPaused := inst.Status == "paused"
+			inst.mu.RUnlock()
+			if !stillRegistered || !stillPaused {
+				// Another resume replaced it, or it was stopped, and the
+				// lock belongs to that run now.
+				message = "cannot resume: " + errPausedInstanceGone.Error()
+			}
 			w.WriteHeader(http.StatusConflict)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "cannot resume: the paused run is still shutting down; retry shortly",
-			})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 			return
 		}
 

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"log"
 	"path/filepath"
@@ -78,15 +79,35 @@ func (s *Server) persistStopToScanDir(dir, status, stopReason, finishedAt string
 // scan's has. A live run records the stop itself as its sessions and exit
 // path finish. Without this a restart rebuilt a stopped paused scan from its
 // scan.json as paused, and it could be resumed.
+//
+// The write happens only while this call holds the instance's queue lock and
+// inst is still the registered instance. A run holds that lock for its whole
+// life, and a resume takes it before replacing a paused instance, so a stop
+// that acted on an instance a resume has just replaced never writes into the
+// scan.json the new run is resuming.
 func (s *Server) persistIdleInstanceStop(inst *ScanInstance) {
 	if inst == nil {
 		return
 	}
 	inst.mu.RLock()
 	idle := inst.agent == nil && inst.cancel == nil && (!inst.snapshotFinalizing || inst.snapshotReady)
-	dir, status, stopReason, finishedAt := inst.scanDir, inst.Status, inst.StopReason, inst.FinishedAt
+	id, dir, status, stopReason, finishedAt := inst.ID, inst.scanDir, inst.Status, inst.StopReason, inst.FinishedAt
 	inst.mu.RUnlock()
-	if idle {
+	if !idle || dir == "" || !isPersistableStop(status, stopReason) {
+		return
+	}
+	// A paused run that is still exiting holds the lock briefly; wait for it
+	// so a stop that reached it too late for its exit path is still recorded.
+	ownership, owned, err := s.acquireQueueOwnershipWithin(context.Background(), id, queueOwnershipWait)
+	if err != nil || !owned {
+		// A live run owns the scan; it records the stop as it ends.
+		return
+	}
+	defer ownership.release()
+	s.instancesMu.RLock()
+	registered := s.instances[id] == inst
+	s.instancesMu.RUnlock()
+	if registered {
 		s.persistStopToScanDir(dir, status, stopReason, finishedAt)
 	}
 }
@@ -152,13 +173,16 @@ func (s *Server) applyDispatchTombstone(rec *ScanRecord, seen map[string]*ScanRe
 func tombstoneStop(tombstone *ScanRecord) (status, stopReason, finishedAt string) {
 	status = terminalSubScanStatus(tombstone.Status)
 	stopReason = tombstone.StopReason
-	switch {
-	case strings.EqualFold(strings.TrimSpace(tombstone.Status), "stopping") &&
-		(stopReason == "" || !isPersistableStop(status, stopReason)):
-		// Only an exact stop writes a stopping snapshot.
-		stopReason = "user_stopped"
-	case stopReason == "":
-		stopReason = "exact_dispatch_terminal"
+	// The reason must keep the stop final: a finished snapshot can carry a
+	// stale recoverable reason such as server_restart_resuming, which would
+	// make restart recovery treat the record as resumable again.
+	if stopReason == "" || !isPersistableStop(status, stopReason) {
+		if strings.EqualFold(strings.TrimSpace(tombstone.Status), "stopping") {
+			// Only an exact stop writes a stopping snapshot.
+			stopReason = "user_stopped"
+		} else {
+			stopReason = "exact_dispatch_terminal"
+		}
 	}
 	finishedAt = tombstone.FinishedAt
 	if finishedAt == "" {

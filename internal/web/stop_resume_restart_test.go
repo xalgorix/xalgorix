@@ -70,6 +70,7 @@ func TestRebuildHonoursDispatchTombstone(t *testing.T) {
 		{"stop still draining", "running", "", "stopping", "user_stopped", "stopped", "user_stopped", true},
 		{"stopping without reason", "pending", "", "stopping", "", "stopped", "user_stopped", true},
 		{"failed dispatch", "running", "", "failed", "queue_state_persist_failed", "failed", "queue_state_persist_failed", true},
+		{"stale recoverable reason stays final", "running", "", "finished", "server_restart_resuming", "stopped", "exact_dispatch_terminal", true},
 		{"recoverable interruption is not a tombstone", "paused", "user_paused", "stopped", "signal_terminated", "paused", "user_paused", false},
 		{"paused snapshot is not a tombstone", "paused", "user_paused", "paused", "user_paused", "paused", "user_paused", false},
 	}
@@ -253,9 +254,9 @@ func TestResumeRefusedByExactStopKeepsInstance(t *testing.T) {
 // keeps the paused instance when it gives up.
 func TestResumeWaitsForExitingPausedRun(t *testing.T) {
 	s := newTestServer(t, nil)
-	previousWait := resumeOwnershipWait
-	resumeOwnershipWait = 50 * time.Millisecond
-	t.Cleanup(func() { resumeOwnershipWait = previousWait })
+	previousWait := queueOwnershipWait
+	queueOwnershipWait = 50 * time.Millisecond
+	t.Cleanup(func() { queueOwnershipWait = previousWait })
 
 	const id = "550e8400-e29b-41d4-a716-446655440150"
 	writeScanRecord(t, s.dataDir, filepath.Join("example.test", "2026-11-12", "example.test_exiting"), ScanRecord{
@@ -467,5 +468,45 @@ func TestPersistStopToScanDir(t *testing.T) {
 	}
 	if status, _ := readScanStatus(t, paused); status != "paused" {
 		t.Fatalf("paused record status = %q", status)
+	}
+}
+
+// TestIdleStopSkipsReplacedOrOwnedInstance verifies that a stop is written
+// into scan.json only for the registered instance, and only while no run owns
+// its queue: a stop that acted on a paused instance that a resume has just
+// replaced must not write into the scan.json the new run is resuming.
+func TestIdleStopSkipsReplacedOrOwnedInstance(t *testing.T) {
+	s := newTestServer(t, nil)
+	previousWait := queueOwnershipWait
+	queueOwnershipWait = 50 * time.Millisecond
+	t.Cleanup(func() { queueOwnershipWait = previousWait })
+
+	const id = "550e8400-e29b-41d4-a716-446655440190"
+	rel := filepath.Join("example.test", "2026-11-12", "example.test_idle")
+	dir := filepath.Join(s.dataDir, rel)
+	writeScanRecord(t, s.dataDir, rel, ScanRecord{
+		ID: "example.test_idle", InstanceID: id, Target: "https://example.test",
+		StartedAt: "2026-11-12T10:00:00Z", Status: "paused", StopReason: "user_paused",
+	})
+	stale := &ScanInstance{ID: id, Status: "stopped", StopReason: "user_stopped", scanDir: dir}
+	s.instances[id] = &ScanInstance{ID: id, Status: "pending", scanDir: dir}
+	s.persistIdleInstanceStop(stale)
+	if status, _ := readScanStatus(t, dir); status != "paused" {
+		t.Fatalf("a stop of a replaced instance wrote %q into the resumed scan.json", status)
+	}
+
+	s.instances[id] = stale
+	held, owned, err := s.acquireQueueOwnership(id)
+	if err != nil || !owned {
+		t.Fatalf("hold the queue lock: owned=%v err=%v", owned, err)
+	}
+	s.persistIdleInstanceStop(stale)
+	if status, _ := readScanStatus(t, dir); status != "paused" {
+		t.Fatalf("a stop wrote %q while a run owned the queue", status)
+	}
+	held.release()
+	s.persistIdleInstanceStop(stale)
+	if status, why := readScanStatus(t, dir); status != "stopped" || why != "user_stopped" {
+		t.Fatalf("scan.json after the stop = %s/%s, want stopped/user_stopped", status, why)
 	}
 }

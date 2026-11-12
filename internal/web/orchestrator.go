@@ -427,15 +427,17 @@ func (s *Server) runRegisteredMultiScan(run *multiScanRun, scanCfg *config.Confi
 		// No session writes this queue's scan.json any more. A stop that
 		// landed after the last session ended, or before the first one started
 		// on a resumed scan, has not reached it; record it so a restart does
-		// not rebuild the stopped scan as paused.
+		// not rebuild the stopped scan as paused. Read the status again: a
+		// paused run can be stopped while it exits. A stop after this point
+		// records itself once this run releases the queue lock.
 		instance.mu.RLock()
 		lastScanDir := instance.scanDir
-		finishedAt := instance.FinishedAt
+		currentStatus, currentStopReason, finishedAt := instance.Status, instance.StopReason, instance.FinishedAt
 		instance.mu.RUnlock()
 		if lastScanDir == "" {
 			lastScanDir = req.ResumeScanDir
 		}
-		s.persistStopToScanDir(lastScanDir, finalStatus, finalStopReason, finishedAt)
+		s.persistStopToScanDir(lastScanDir, currentStatus, currentStopReason, finishedAt)
 		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
 		time.Sleep(500 * time.Millisecond)
 
