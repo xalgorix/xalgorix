@@ -52,7 +52,9 @@ func Register(r *tools.Registry) {
 			{Name: "headers", Description: "Request headers as JSON object", Required: false},
 			{Name: "body", Description: "Request body", Required: false},
 		},
-		Execute: sendRequest,
+		Execute: func(args map[string]string) (tools.Result, error) {
+			return sendRequestGuarded(r.RequestGuard(), args)
+		},
 	})
 
 	r.Register(&tools.Tool{
@@ -111,6 +113,12 @@ func clampRequestCount(raw string) int {
 }
 
 func sendRequest(args map[string]string) (tools.Result, error) {
+	return sendRequestGuarded(nil, args)
+}
+
+// sendRequestGuarded runs one send_request call. guard, when non-nil, is
+// applied to every redirect hop before it is followed.
+func sendRequestGuarded(guard tools.RequestGuard, args map[string]string) (tools.Result, error) {
 	targetURL := args["url"]
 	method := strings.ToUpper(args["method"])
 
@@ -138,9 +146,16 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 		}
 	}
 
-	client, err := httpClient()
+	shared, err := httpClient()
 	if err != nil {
 		return tools.Result{}, err
+	}
+	// The proxy pool's client is shared; guard a per-request copy. Only a
+	// client on the default (follow) redirect policy needs the hop check.
+	client := *shared
+	refusedHop := func() string { return "" }
+	if client.CheckRedirect == nil {
+		refusedHop = tools.GuardRedirects(&client, guard)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -154,6 +169,9 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 	}
 
 	var b strings.Builder
+	if note := refusedHop(); note != "" {
+		b.WriteString(note + "\n\n")
+	}
 	viaProxy := proxy.Required() || (config.Get().UseProxy && proxy.Enabled())
 	if viaProxy {
 		b.WriteString("[via proxy pool]\n")
