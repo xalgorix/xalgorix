@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -295,13 +296,86 @@ type scanRecordLite struct {
 	Events json.RawMessage `json:"events"`
 }
 
+// scanSummaryWalk is one walk of the data dir shared by every
+// findAllScanSummaries caller that joined it. results and panicValue are
+// written before done is closed and only read after.
+type scanSummaryWalk struct {
+	done       chan struct{}
+	results    []scanEntry
+	panicValue any
+	joiners    int // callers waiting on this walk; guarded by scanSummaryWalkMu
+}
+
 // findAllScanSummaries is the events-free, cached counterpart to findAllScans.
-// It walks the data dir (pruning artifact subtrees via walkScanDirs), parses
-// each scan.json without decoding its event log, and memoizes the result per
-// file keyed by (modtime, size). Subsequent walks only stat each scan.json and
-// re-parse the few that changed. Callers that need the event log (report
-// generation) must use findAllScans instead.
+// Callers that need the event log (report generation) must use findAllScans
+// instead.
+//
+// A walk lists every directory under the data dir, which takes seconds on a
+// busy install, and nearly every API request needs one. Running a walk per
+// request behind a single lock let requests arrive faster than walks finished:
+// the queue grew without bound and every request timed out, including ones
+// whose clients had long gone. So walks are shared. At most one runs at a time,
+// and every caller that arrives while it runs waits for the single walk queued
+// behind it. That walk starts only after the caller arrived, so the results
+// are as fresh as an unshared walk's: a scan.json written before the call is
+// always seen.
+//
+// Each caller receives its own copy of the slice. The records inside it are
+// shallow copies of cached values, so callers must not mutate their nested
+// slices or maps in place.
 func (s *Server) findAllScanSummaries() []scanEntry {
+	s.scanSummaryWalkMu.Lock()
+	w := s.scanSummaryWalkRunning
+	if w == nil {
+		w = &scanSummaryWalk{done: make(chan struct{})}
+		s.scanSummaryWalkRunning = w
+		s.scanSummaryWalkMu.Unlock()
+		s.runScanSummaryWalk(w)
+	} else {
+		// The running walk may have listed directories before this call, so
+		// its results can be stale. Join the walk queued behind it.
+		if s.scanSummaryWalkNext == nil {
+			s.scanSummaryWalkNext = &scanSummaryWalk{done: make(chan struct{})}
+		}
+		w = s.scanSummaryWalkNext
+		w.joiners++
+		s.scanSummaryWalkMu.Unlock()
+		<-w.done
+	}
+	if w.panicValue != nil {
+		panic(w.panicValue)
+	}
+	return append([]scanEntry(nil), w.results...)
+}
+
+// runScanSummaryWalk performs walk w, publishes its results, and starts the
+// walk queued behind it, if any callers joined one. A panicking walk still
+// releases its waiters, which re-panic in their own goroutines.
+func (s *Server) runScanSummaryWalk(w *scanSummaryWalk) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[scan] scan summary walk panicked: %v\n%s", r, debug.Stack())
+			w.panicValue = r
+		}
+		s.scanSummaryWalkMu.Lock()
+		next := s.scanSummaryWalkNext
+		s.scanSummaryWalkNext = nil
+		s.scanSummaryWalkRunning = next
+		s.scanSummaryWalkMu.Unlock()
+		close(w.done)
+		if next != nil {
+			go s.runScanSummaryWalk(next)
+		}
+	}()
+	w.results = s.walkScanSummaries()
+}
+
+// walkScanSummaries walks the data dir (pruning artifact subtrees via
+// walkScanDirs), parses each scan.json without decoding its event log, and
+// memoizes the result per file keyed by (modtime, size). Subsequent walks only
+// stat each scan.json and re-parse the few that changed. Only
+// runScanSummaryWalk calls it, so at most one walk runs at a time.
+func (s *Server) walkScanSummaries() []scanEntry {
 	var results []scanEntry
 
 	s.scanSummaryCacheMu.Lock()
@@ -342,6 +416,9 @@ func (s *Server) findAllScanSummaries() []scanEntry {
 		}
 	}
 
+	if s.scanSummaryWalkHook != nil {
+		s.scanSummaryWalkHook()
+	}
 	return results
 }
 
@@ -352,13 +429,20 @@ func (s *Server) findAllScanSummaries() []scanEntry {
 // load: findScanByID loads the whole record; the scan-detail path loads only a
 // tail of events (loadScanRecordForDetail).
 func (s *Server) resolveScanDirByID(scanID string) (string, bool) {
+	return s.resolveScanDirByIDFrom(scanID, s.findAllScanSummaries)
+}
+
+// resolveScanDirByIDFrom is resolveScanDirByID over summaries supplied by the
+// caller, so a request that needs the summaries again can reuse one walk.
+// summaries is not called for an invalid id.
+func (s *Server) resolveScanDirByIDFrom(scanID string, summaries func() []scanEntry) (string, bool) {
 	// Sanitize: prevent path traversal via ../
 	scanID = filepath.Base(scanID)
 	if scanID == "" || scanID == "." || scanID == ".." {
 		return "", false
 	}
 
-	entries := s.findAllScanSummaries()
+	entries := summaries()
 	resolveUniqueDir := func(topLevelOnly bool) (string, bool, bool) {
 		var matchedDir string
 		found := false
