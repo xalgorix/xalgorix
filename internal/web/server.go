@@ -845,6 +845,15 @@ type Server struct {
 	// whose file changes is re-parsed. See findAllScanSummaries.
 	scanSummaryCacheMu sync.Mutex
 	scanSummaryCache   map[string]scanSummaryCacheEntry
+	// scanSummaryWalkMu guards the shared walks behind findAllScanSummaries:
+	// the walk in progress, and the one queued behind it for callers that
+	// arrived while it ran.
+	scanSummaryWalkMu      sync.Mutex
+	scanSummaryWalkRunning *scanSummaryWalk
+	scanSummaryWalkNext    *scanSummaryWalk
+	// scanSummaryWalkHook, when set, runs at the end of every summary walk,
+	// before its results are shared. Tests use it to count and pace walks.
+	scanSummaryWalkHook func()
 	// admissionWake is a buffered (len=1) channel used by runMultiScan's
 	// admission loop to wait fairly for a freed slot. A scan instance ending
 	// signals this channel non-blockingly in its defer cleanup, waking
@@ -3546,8 +3555,9 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	if scanID == "" || scanID == "latest" {
 		// Find the latest top-level scan by StartedAt using the events-free
 		// summaries (cheap), then load only that one record with an event tail.
+		all := s.findAllScanSummaries()
 		summaries := []scanEntry{}
-		for _, entry := range s.findAllScanSummaries() {
+		for _, entry := range all {
 			if entry.rec.ParentTarget != "" {
 				continue
 			}
@@ -3568,7 +3578,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.applyInstanceSnapshot(rec, true)
-		s.attachWildcardSubScans(rec)
+		s.attachWildcardSubScansForDetail(rec, func() []scanEntry { return all })
 		finalizeScanRecordForResponse(rec)
 		finalizeEventsMeta(rec)
 		s.markDiscordWebhookConfigured(rec)
@@ -3644,15 +3654,28 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolving the scan dir and attaching wildcard sub-scans read the same
+	// summaries, so walk the data dir once per request. A finished record
+	// walks once more (see attachWildcardSubScansForDetail).
+	var summaryEntries []scanEntry
+	summariesLoaded := false
+	summaries := func() []scanEntry {
+		if !summariesLoaded {
+			summaryEntries = s.findAllScanSummaries()
+			summariesLoaded = true
+		}
+		return summaryEntries
+	}
+
 	if r.Method == http.MethodGet {
 		s.instancesMu.RLock()
 		inst := s.instances[scanID]
 		s.instancesMu.RUnlock()
 		if rec := s.scanRecordFromInstance(inst); rec != nil {
-			if dir, ok := s.resolveScanDirByID(scanID); ok {
+			if dir, ok := s.resolveScanDirByIDFrom(scanID, summaries); ok {
 				if persisted, ok2 := s.loadScanRecordForDetail(dir, detailEventTail); ok2 && persisted != nil {
 					s.applyInstanceSnapshot(persisted, true)
-					s.attachWildcardSubScans(persisted)
+					s.attachWildcardSubScansForDetail(persisted, summaries)
 					finalizeScanRecordForResponse(persisted)
 					finalizeEventsMeta(persisted)
 					s.markDiscordWebhookConfigured(persisted)
@@ -3663,7 +3686,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			s.attachWildcardSubScans(rec)
+			s.attachWildcardSubScansForDetail(rec, summaries)
 			finalizeScanRecordForResponse(rec)
 			finalizeEventsMeta(rec)
 			s.markDiscordWebhookConfigured(rec)
@@ -3675,7 +3698,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	dir, ok := s.resolveScanDirByID(scanID)
+	dir, ok := s.resolveScanDirByIDFrom(scanID, summaries)
 	if !ok {
 		http.Error(w, "scan not found", http.StatusNotFound)
 		return
@@ -3687,7 +3710,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.applyInstanceSnapshot(rec, true)
-	s.attachWildcardSubScans(rec)
+	s.attachWildcardSubScansForDetail(rec, summaries)
 	finalizeScanRecordForResponse(rec)
 	finalizeEventsMeta(rec)
 	s.markDiscordWebhookConfigured(rec)
