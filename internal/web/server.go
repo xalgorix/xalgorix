@@ -3765,7 +3765,8 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 
 	// Resolving the scan dir and attaching wildcard sub-scans read the same
 	// summaries, so walk the data dir once per request. A finished record
-	// walks once more (see attachWildcardSubScansForDetail).
+	// that can have sub-scans walks once more (see
+	// attachWildcardSubScansForDetail).
 	var summaryEntries []scanEntry
 	summariesLoaded := false
 	summaries := func() []scanEntry {
