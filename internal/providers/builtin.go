@@ -114,8 +114,8 @@ var builtinList = []Entry{
 	},
 	{
 		ID:          "copilot",
-		DisplayName: "Copilot",
-		BaseURL:     "",
+		DisplayName: "GitHub Copilot",
+		BaseURL:     "https://api.githubcopilot.com",
 		HeaderStyle: "openai",
 		AuthMethods: []string{"api_key", "oauth"},
 		Flow:        "device_code",
@@ -126,7 +126,13 @@ var builtinList = []Entry{
 		TokenEndpoint:               "https://github.com/login/oauth/access_token",
 		DeviceAuthorizationEndpoint: "https://github.com/login/device/code",
 		Scopes:                      []string{"read:user"},
-		Notes:                       "GitHub Copilot CLI device-code flow. The matching API base URL depends on the proxy you point at — leave empty and use Custom Provider for self-hosted Copilot proxies.",
+		// Native Copilot path (internal/llm/copilot_token.go): the stored
+		// GitHub credential — a device-code OAuth token (recommended) or a
+		// fine-grained PAT entered as the API key — is exchanged at
+		// api.github.com/copilot_internal/v2/token for a short-lived Copilot
+		// bearer, then used against this OpenAI-compatible base. Requires an
+		// active Copilot subscription on the account.
+		Notes: "GitHub Copilot via device-code OAuth (recommended) or a fine-grained PAT (github_pat_, needs copilot access) entered as the API key. Classic ghp_ PATs are not supported by Copilot. The GitHub token is exchanged for a short-lived Copilot token automatically.",
 	},
 	{
 		ID:          "deepinfra",

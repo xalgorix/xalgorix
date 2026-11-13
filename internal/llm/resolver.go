@@ -445,7 +445,15 @@ func BuildCatalogEndpoint(entry providers.Entry, prof auth.Profile, preferModel,
 		url = strings.TrimSuffix(url, "/v1")
 		url += "/v1beta/models/" + model + ":generateContent"
 	case "openai":
-		url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
+		if entry.ID == "copilot" {
+			// GitHub Copilot's OpenAI-compatible endpoint lives at the
+			// host root (api.githubcopilot.com/chat/completions) with no
+			// /v1 version segment — unlike the generic OpenAI path, which
+			// inserts /v1. Build it directly to avoid a 404.
+			url = strings.TrimRight(apiBase, "/") + "/chat/completions"
+		} else {
+			url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
+		}
 	case "openai_responses":
 		// OpenAI Responses API (Codex / ChatGPT subscription backend).
 		// The base URL already encodes the backend root (e.g.
@@ -502,6 +510,20 @@ func BuildCatalogEndpoint(entry providers.Entry, prof auth.Profile, preferModel,
 			req.Header.Set("OpenAI-Beta", "responses=experimental")
 			req.Header.Set("originator", "codex_cli_rs")
 		}
+	}
+
+	// GitHub Copilot is OpenAI-compatible but requires a token exchange
+	// (GitHub token -> short-lived Copilot bearer) plus editor-identity
+	// headers. The stored credential is the GitHub token — a device-code
+	// OAuth access token or a fine-grained PAT entered as the API key.
+	// copilotVendorOverride performs the cached exchange and rewrites
+	// Authorization + headers per request. See internal/llm/copilot_token.go.
+	if entry.ID == "copilot" {
+		githubToken := ep.APIKey
+		if ep.Auth == AuthOAuthBearer {
+			githubToken = ep.AccessToken
+		}
+		ep.VendorOverride = copilotVendorOverride(githubToken)
 	}
 	return ep, nil
 }
