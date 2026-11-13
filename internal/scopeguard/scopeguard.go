@@ -39,6 +39,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"golang.org/x/net/idna"
 )
 
 // Config carries the operator's listener identity. Callers set
@@ -83,10 +85,10 @@ func (c Config) localTargetsAllowed(hostPort string) bool {
 	if hostPort == "" {
 		return true
 	}
-	if pn, err := strconv.Atoi(hostPort); err == nil && pn == c.Port {
-		return false // never scan the dashboard's own port, on any local address
-	}
-	return true
+	pn, err := strconv.Atoi(hostPort)
+	// Never scan the dashboard's own port, on any local address; a port that
+	// is not a number cannot be told apart from it.
+	return err == nil && pn != c.Port
 }
 
 // loopbackPortAllowed reports whether hostPort (a decimal port string) is in
@@ -179,29 +181,48 @@ func LookupHost(host string) ([]string, error) {
 // SSRF targets (e.g. 169.254.169.254 cloud metadata, internal IPs
 // on the target's network).
 func IsLocalOrListener(cfg Config, target string) bool {
-	// Strip scheme if present (http://127.0.0.1 → 127.0.0.1)
-	host := target
-	hostPort := ""
-	if u, err := url.Parse(target); err == nil && u.Host != "" {
-		host = u.Hostname()
-		hostPort = u.Port()
-		// url.Port() is "" when the URL omits an explicit port. Fall back to
-		// the scheme's default (http->80, https->443) so the dashboard-port
-		// checks below — which compare hostPort against cfg.Port — are not
-		// silently bypassed for URLs like "https://127.0.0.1/".
-		if hostPort == "" {
-			hostPort = schemeDefaultPort(u.Scheme)
+	// A client may read a host out of target in more than one way (a
+	// browser and curl disagree about a backslash, for example). Classify
+	// every reading and refuse the target if any of them is this machine.
+	resolved := map[string]resolution{}
+	seen := map[string]bool{}
+	for _, r := range targetReadings(target) {
+		host := r.decodedHost()
+		// Classify the host the way the tools that connect to it read it,
+		// not only the way net.ParseIP and Go's resolver do: curl, Python,
+		// glibc and browsers accept numeric IPv4 forms ("2130706433",
+		// "0x7f.1", "0177.0.0.1", "127.1", "0"), a trailing dot and
+		// full-width digits, and resolve "*.localhost" to loopback. Hosts
+		// that look numeric but that no IPv4 parser agrees on are refused
+		// rather than sent to DNS.
+		hosts, ok := canonicalHosts(stripIPv6Zone(host))
+		if !ok {
+			return true
+		}
+		for _, h := range hosts {
+			key := h + " " + r.port
+			if h == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			if classifyHost(cfg, h, r.port, resolved) {
+				return true
+			}
 		}
 	}
-	// Also handle host:port without scheme
-	if h, p, err := net.SplitHostPort(host); err == nil {
-		host = h
-		if hostPort == "" {
-			hostPort = p
-		}
-	}
-	host = stripIPv6Zone(host)
+	return false
+}
 
+// resolution is a memoized lookupHost answer, so a host read in several ways
+// is still resolved once per IsLocalOrListener call.
+type resolution struct {
+	addrs []string
+	err   error
+}
+
+// classifyHost applies the Local_Or_Listener rules to one canonical host
+// (see canonicalHost) and its port ("" when unknown).
+func classifyHost(cfg Config, host, hostPort string, resolved map[string]resolution) bool {
 	// Self-listener textual fast-path. Block if the target's port
 	// matches our own listening port AND the host textually matches
 	// our bind address (or 0.0.0.0 / ::). This fires before DNS
@@ -212,8 +233,7 @@ func IsLocalOrListener(cfg Config, target string) bool {
 			if bind == "" {
 				bind = "127.0.0.1"
 			}
-			lowerHost := strings.ToLower(strings.TrimSpace(host))
-			if lowerHost == bind || lowerHost == "0.0.0.0" || lowerHost == "::" {
+			if host == bind || host == "0.0.0.0" || host == "::" {
 				return true
 			}
 		}
@@ -230,10 +250,11 @@ func IsLocalOrListener(cfg Config, target string) bool {
 	// blocked the exact bind host:port.
 	allowLoopback := cfg.loopbackPortAllowed(hostPort) || cfg.localTargetsAllowed(hostPort)
 
-	// Explicit textual matches (fast path) — these always mean "self"
-	lower := strings.ToLower(host)
-	if lower == "localhost" || lower == "0.0.0.0" || lower == "[::1]" || lower == "::1" {
-		if allowLoopback && lower != "0.0.0.0" {
+	// Explicit textual matches (fast path) — these always mean "self".
+	// "*.localhost" names are loopback too (RFC 6761): curl and browsers
+	// answer them without asking DNS.
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "0.0.0.0" || host == "::1" {
+		if allowLoopback && host != "0.0.0.0" {
 			return false
 		}
 		return true
@@ -249,11 +270,15 @@ func IsLocalOrListener(cfg Config, target string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		resolvedIPs = []net.IP{ip}
 	} else {
-		addrs, err := lookupHost(host)
-		if err != nil || len(addrs) == 0 {
+		res, done := resolved[host]
+		if !done {
+			res.addrs, res.err = lookupHost(host)
+			resolved[host] = res
+		}
+		if res.err != nil || len(res.addrs) == 0 {
 			return false // can't resolve — let it through, will fail naturally
 		}
-		for _, a := range addrs {
+		for _, a := range res.addrs {
 			if parsed := net.ParseIP(stripIPv6Zone(a)); parsed != nil {
 				resolvedIPs = append(resolvedIPs, parsed)
 			}
@@ -302,6 +327,301 @@ func IsLocalOrListener(cfg Config, target string) bool {
 	}
 
 	return false
+}
+
+// hostReading is one way a client may read the host and port of a target.
+type hostReading struct {
+	host   string // as written: may keep brackets, an IPv6 zone or escapes
+	port   string // "" when unknown
+	decode bool   // percent-escapes in host are not decoded yet
+}
+
+// decodedHost returns r.host with percent-escapes decoded when the reading
+// still needs it.
+func (r hostReading) decodedHost() string {
+	if r.decode && strings.Contains(r.host, "%") {
+		if dec, err := url.PathUnescape(r.host); err == nil {
+			return dec
+		}
+	}
+	return r.host
+}
+
+// ReadingHosts returns the canonical hosts IsLocalOrListener classifies for
+// target, one per way a client may read it, without classifying them. Hosts
+// that cannot be read are left out.
+func ReadingHosts(target string) []string {
+	var out []string
+	for _, r := range targetReadings(target) {
+		if hosts, ok := canonicalHosts(stripIPv6Zone(r.decodedHost())); ok {
+			out = append(out, hosts...)
+		}
+	}
+	return out
+}
+
+// targetReadings returns the host/port readings of target — a bare host,
+// host:port, [ipv6]:port, either optionally followed by a path, or a URL.
+// For URLs it returns what net/url reads and, for the network schemes curl
+// and browsers support, what those clients read: they drop tabs, newlines
+// and surrounding control characters, accept any run of slashes or
+// backslashes after "http:", and stop the authority at a backslash
+// (browsers) or only at "/?#" (curl, Python's urllib).
+func targetReadings(target string) []hostReading {
+	t := strings.TrimFunc(strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, target), func(r rune) bool { return r <= ' ' })
+	var out []hostReading
+	if u, err := url.Parse(t); err == nil && u.Host != "" {
+		port := u.Port()
+		// url.Port() is "" when the URL omits an explicit port. Fall back to
+		// the scheme's default (http->80, https->443) so the dashboard-port
+		// checks — which compare the port against cfg.Port — are not
+		// silently bypassed for URLs like "https://127.0.0.1/".
+		if port == "" {
+			port = schemeDefaultPort(u.Scheme)
+		}
+		out = append(out, hostReading{host: u.Hostname(), port: port})
+	}
+	if scheme, rest, ok := splitScheme(t); ok {
+		switch {
+		case IsNetworkURLScheme(scheme):
+			rest = strings.TrimLeft(rest, `/\`)
+			for _, stops := range []string{`/?#\`, "/?#"} {
+				out = append(out, authorityReading(rest, stops, schemeDefaultPort(scheme)))
+			}
+			return out
+		case strings.HasPrefix(rest, "//"):
+			if len(out) == 0 {
+				// A URL net/url refused ("code://My Project").
+				out = append(out, authorityReading(rest[2:], "/?#", ""))
+			}
+			return out
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	// No scheme: ignore any path, query or fragment after the host, and any
+	// userinfo before it ("user@127.0.0.1:9137/", as curl reads it).
+	if j := strings.IndexAny(t, "/?#"); j >= 0 {
+		t = t[:j]
+	}
+	if j := strings.LastIndexByte(t, '@'); j >= 0 {
+		t = t[j+1:]
+	}
+	host, port := splitHostPortLoose(t)
+	return []hostReading{{host: host, port: port}}
+}
+
+// splitScheme splits "scheme:rest" when target starts with a valid URL
+// scheme (RFC 3986: a letter, then letters, digits, "+", "-" or ".").
+func splitScheme(target string) (scheme, rest string, ok bool) {
+	i := strings.IndexByte(target, ':')
+	if i <= 0 {
+		return "", "", false
+	}
+	for j := 0; j < i; j++ {
+		c := target[j]
+		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		other := (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
+		if !letter && (j == 0 || !other) {
+			return "", "", false
+		}
+	}
+	return target[:i], target[i+1:], true
+}
+
+// IsNetworkURLScheme reports whether scheme is one curl or a browser opens
+// over the network. Those clients accept one to three (back)slashes after
+// "scheme:", so "gopher:/127.0.0.1:9137/" names a host.
+func IsNetworkURLScheme(scheme string) bool {
+	switch strings.ToLower(scheme) {
+	case "http", "https", "ws", "wss", "ftp", "ftps", "gopher", "gophers",
+		"dict", "imap", "imaps", "ldap", "ldaps", "mqtt", "mqtts", "pop3", "pop3s",
+		"rtsp", "scp", "sftp", "smb", "smbs", "smtp", "smtps", "telnet", "tftp":
+		return true
+	}
+	return false
+}
+
+// authorityReading reads host and port from the authority at the start of
+// rest, which ends at the first byte in stops; userinfo is dropped.
+func authorityReading(rest, stops, defaultPort string) hostReading {
+	if j := strings.IndexAny(rest, stops); j >= 0 {
+		rest = rest[:j]
+	}
+	if j := strings.LastIndexByte(rest, '@'); j >= 0 {
+		rest = rest[j+1:]
+	}
+	host, port := splitHostPortLoose(rest)
+	if port == "" {
+		port = defaultPort
+	}
+	return hostReading{host: host, port: port, decode: true}
+}
+
+// splitHostPortLoose splits host:port or [ipv6]:port and returns s unchanged
+// (with an empty port) when it is not in either form.
+func splitHostPortLoose(s string) (host, port string) {
+	if h, p, err := net.SplitHostPort(s); err == nil {
+		return h, p
+	}
+	return s, ""
+}
+
+// hostMappers apply the UTS #46 mappings clients use for lookups (full-width
+// digits and ideographic full stops become ASCII) without the STD3 rules, so
+// names with "_" or spaces are still mapped rather than rejected. Clients
+// differ on transitional processing (which drops zero-width joiners), so
+// both are applied.
+var hostMappers = []*idna.Profile{
+	idna.New(idna.MapForLookup(), idna.StrictDomainName(false), idna.Transitional(false)),
+	idna.New(idna.MapForLookup(), idna.StrictDomainName(false), idna.Transitional(true)),
+}
+
+// canonicalHosts returns host in the forms the operator's tools connect to:
+// lower case, IDNA-mapped (one form per mapping for a non-ASCII host),
+// without a trailing dot, and with any IPv4 form that inet_aton or a browser
+// accepts rewritten as a dotted quad. ok is false when the host looks
+// numeric but no IPv4 parser agrees on its value.
+func canonicalHosts(host string) ([]string, bool) {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if isASCII(h) {
+		c, ok := canonicalHost(h)
+		return []string{c}, ok
+	}
+	var out []string
+	for _, m := range hostMappers {
+		// A name a mapper rejects outright is one no client can resolve
+		// that way; keep it as written.
+		v := h
+		if mapped, err := m.ToASCII(h); err == nil || mapped != "" {
+			v = strings.ToLower(mapped)
+		}
+		c, ok := canonicalHost(v)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, c)
+	}
+	return out, true
+}
+
+// canonicalHost removes one trailing dot from a lower-case ASCII host and
+// rewrites any IPv4 form as a dotted quad (see canonicalHosts).
+func canonicalHost(h string) (string, bool) {
+	if strings.HasSuffix(h, ".") && !strings.HasSuffix(h, "..") {
+		h = strings.TrimSuffix(h, ".")
+	}
+	if !LooksNumericIPv4(h) {
+		return h, true
+	}
+	ip, ok := ParseIPv4Loose(h)
+	if !ok {
+		return "", false
+	}
+	return ip.String(), true
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// LooksNumericIPv4 reports whether every dot-separated label of s is a
+// decimal or 0x-hexadecimal number ("2130706433", "0x7f.1", "999.1.1.1").
+// No real host name has an all-numeric top-level label, so such a host is
+// meant as an address.
+func LooksNumericIPv4(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" {
+			return false
+		}
+		digits := label
+		hex := false
+		if len(label) >= 2 && label[0] == '0' && (label[1] == 'x' || label[1] == 'X') {
+			digits = label[2:]
+			hex = true
+		}
+		for i := 0; i < len(digits); i++ {
+			c := digits[i]
+			isDigit := c >= '0' && c <= '9'
+			isHex := hex && ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+			if !isDigit && !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ParseIPv4Loose parses s the way inet_aton and the WHATWG URL parser do:
+// one to four dot-separated parts, each decimal, octal (leading 0) or
+// hexadecimal (0x), where the last part fills the remaining bytes
+// ("127.1" is 127.0.0.1, "2130706433" is 127.0.0.1). It does not accept a
+// trailing dot or surrounding text.
+func ParseIPv4Loose(s string) (net.IP, bool) {
+	parts := strings.Split(s, ".")
+	if len(parts) > 4 {
+		return nil, false
+	}
+	vals := make([]uint64, len(parts))
+	for i, p := range parts {
+		v, ok := parseIPv4Part(p)
+		if !ok {
+			return nil, false
+		}
+		vals[i] = v
+	}
+	n := len(vals)
+	for _, v := range vals[:n-1] {
+		if v > 0xff {
+			return nil, false
+		}
+	}
+	if vals[n-1] >= uint64(1)<<(8*uint(5-n)) {
+		return nil, false
+	}
+	addr := vals[n-1]
+	for i, v := range vals[:n-1] {
+		addr |= v << (8 * uint(3-i))
+	}
+	return net.IPv4(byte(addr>>24), byte(addr>>16), byte(addr>>8), byte(addr)), true //nolint:gosec // G115: addr < 2^32 (checked above); each conversion keeps one octet
+}
+
+func parseIPv4Part(p string) (uint64, bool) {
+	if p == "" {
+		return 0, false
+	}
+	base := 10
+	switch {
+	case len(p) >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'):
+		base = 16
+		p = p[2:]
+		if p == "" {
+			return 0, true // "0x" is 0 to inet_aton and browsers
+		}
+	case len(p) > 1 && p[0] == '0':
+		base = 8
+		p = p[1:]
+	}
+	// An explicit base makes ParseUint reject signs, underscores and prefixes.
+	v, err := strconv.ParseUint(p, base, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // stripIPv6Zone returns an IPv6 literal without brackets or its zone

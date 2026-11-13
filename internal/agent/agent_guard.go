@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -527,6 +529,13 @@ func (a *Agent) checkHTTPHop(rawURL string) error {
 func extractHostsFromArgs(toolArgs map[string]string) []string {
 	seen := make(map[string]bool)
 	var out []string
+	add := func(h string) {
+		if h == "" || seen[h] {
+			return
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
 	for _, raw := range toolArgs {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -536,21 +545,254 @@ func extractHostsFromArgs(toolArgs map[string]string) []string {
 		// before reaching this guard, so no per-value truncation is
 		// performed here. The tokenizer runs over the raw value.
 		for _, span := range extractEmbeddedURLs(raw) {
-			h := extractHostFromTokenForScope(span)
-			if h == "" || seen[h] {
+			add(extractHostFromTokenForScope(span))
+		}
+		for _, tok := range scopeHostTokens(raw) {
+			if h := bareIPv6Host(raw, tok); h != "" {
+				add(h)
 				continue
 			}
-			seen[h] = true
-			out = append(out, h)
+			add(extractHostFromTokenForScope(tok.text))
+			for _, h := range colonListHosts(tok.text) {
+				add(h)
+			}
 		}
-		for _, tok := range scopeHostTokenSplit(raw) {
-			h := extractHostFromTokenForScope(tok)
-			if h == "" || seen[h] {
+		for _, h := range extractBracketedURLHosts(raw) {
+			add(h)
+		}
+		// Browsers and Python's urllib drop tabs and newlines inside a URL,
+		// and Python source can spell them as escapes ("http://loc\talhost/").
+		// The separator pass splits on them, so also read the URLs of the
+		// value with those characters removed. Removing them also joins
+		// ordinary lines, so only hosts written as addresses are kept here.
+		if stripped := stripURLControls(raw); stripped != raw {
+			candidates := extractEmbeddedURLs(stripped)
+			for _, tok := range scopeHostTokenSplit(stripped) {
+				if webSchemeToken(tok) {
+					candidates = append(candidates, tok)
+				}
+			}
+			for _, c := range candidates {
+				if h := extractHostFromTokenForScope(c); readsAsAddress(h) {
+					add(h)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// scopeToken is a token from scopeHostTokens and its offset in the
+// original string.
+type scopeToken struct {
+	text  string
+	start int
+}
+
+// scopeHostTokens splits s like scopeHostTokenSplit and keeps each token's
+// offset, so a caller can tell "data[::1]" from "nc ::1 80".
+func scopeHostTokens(s string) []scopeToken {
+	var out []scopeToken
+	start := -1
+	flush := func(end int) {
+		if start < 0 {
+			return
+		}
+		out = append(out, scopeToken{text: s[start:end], start: start})
+		start = -1
+	}
+	for i, r := range s {
+		if scopeTokenSeparator(r) {
+			flush(i)
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	flush(len(s))
+	return out
+}
+
+// bareIPv6Host returns tok as a host when it is an IPv6 literal, written
+// bare ("nc ::1 9137", "('::ffff:127.0.0.1', 80)") or in brackets outside a
+// URL ("curl -g '[::1]:9137/'", "--resolve h:443:[::1]", "TCP6:[::1]:80").
+// The usual path trims ':' from token edges, which turns "::1" into "1".
+// A literal inside a subscript such as data[::1] or arr[0, ::] is skipped.
+func bareIPv6Host(s string, tok scopeToken) string {
+	t := strings.Trim(tok.text, ".,;?!(){}\"'`<>")
+	if !strings.Contains(t, ":") || strings.Contains(t, "/") {
+		return ""
+	}
+	addr := t
+	if i := strings.IndexByte(addr, '%'); i >= 0 {
+		addr = addr[:i]
+	}
+	if net.ParseIP(addr) == nil || inSubscript(s, tok.start) {
+		return ""
+	}
+	return strings.ToLower(t)
+}
+
+// inSubscript reports whether offset pos of s is inside a bracket that
+// follows an identifier, "]" or ")" — an index or slice such as x[::1] —
+// rather than a bracketed address.
+func inSubscript(s string, pos int) bool {
+	depth := 0
+	for i := pos - 1; i >= 0 && pos-i <= 256; i-- {
+		switch s[i] {
+		case ']':
+			depth++
+		case '[':
+			if depth > 0 {
+				depth--
 				continue
 			}
-			seen[h] = true
-			out = append(out, h)
+			if i == 0 {
+				return false
+			}
+			c := s[i-1]
+			return c == '_' || c == ']' || c == ')' ||
+				(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		case '\n':
+			return false
 		}
+	}
+	return false
+}
+
+// colonListHosts returns the address fields of a token with several colons
+// that is not an IPv6 literal, such as curl's "--resolve host:443:127.0.0.1"
+// and "--connect-to host:443:2130706433:9137" or socat's "TCP:127.0.0.1:80",
+// where the whole token is otherwise classified as one unresolvable name.
+// Dotted addresses and localhost names count in any field; a number without
+// dots counts only as the address of curl's name:port:address form, so
+// slices such as data[0x0:0x10:2] and PCI addresses such as 0000:00:1f.3
+// are left alone.
+func colonListHosts(token string) []string {
+	token = strings.Trim(token, ".,;:?!(){}\"'`<>")
+	if strings.Count(token, ":") < 2 || strings.Contains(token, "://") || strings.ContainsAny(token, "/[]") {
+		return nil
+	}
+	if i := strings.IndexByte(token, '%'); net.ParseIP(token) != nil || (i >= 0 && net.ParseIP(token[:i]) != nil) {
+		return nil
+	}
+	parts := strings.Split(token, ":")
+	curlForm := !scopeguard.LooksNumericIPv4(parts[0]) && isDecimalPort(parts[1])
+	var out []string
+	for i, part := range parts {
+		if !isAddressShaped(part) {
+			continue
+		}
+		if scopeguard.LooksNumericIPv4(part) && !strings.Contains(part, ".") && (!curlForm || i != 2) {
+			continue
+		}
+		out = append(out, strings.ToLower(part))
+	}
+	return out
+}
+
+// urlControlEscapes matches the ways Python and shell source spell a tab,
+// newline or carriage return inside a string literal.
+var urlControlEscapes = regexp.MustCompile(`(?i)\\(?:[tnr]|x0[9ad]|u000[9ad]|u0000000[9ad]|0?1[12]|0?15)`)
+
+// stripURLControls removes tabs, newlines and carriage returns, written
+// literally or as escapes.
+func stripURLControls(s string) string {
+	s = urlControlEscapes.ReplaceAllString(s, "")
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// webSchemeToken reports whether token starts with a network URL scheme
+// followed by something ("http:/h", "https:\\h", "gopher:/h:70/"). Browsers
+// and curl accept those spellings; net/url reads them as having no host.
+func webSchemeToken(token string) bool {
+	i := strings.IndexByte(token, ':')
+	if i <= 0 || !scopeguard.IsNetworkURLScheme(token[:i]) {
+		return false
+	}
+	return strings.TrimLeft(token[i+1:], `/\`) != ""
+}
+
+// isAddressShaped reports whether h is written as an address rather than a
+// name: an IP literal, localhost or *.localhost, or a numeric IPv4 form
+// curl and glibc accept. Numbers that are rarely addresses in practice (see
+// isNonAddressNumber) and two- or three-part decimals such as "127.1", which
+// are far more often floats or versions, are excluded.
+func isAddressShaped(h string) bool {
+	l := strings.ToLower(h)
+	if l == "localhost" || strings.HasSuffix(l, ".localhost") {
+		return true
+	}
+	if net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(l, "["), "]")) != nil {
+		return true
+	}
+	if !scopeguard.LooksNumericIPv4(l) || isNonAddressNumber(l) {
+		return false
+	}
+	return !isVersionLike(l) || strings.Count(l, ".") == 3
+}
+
+// readsAsAddress reports whether h (a host, or a whole URL handed on to the
+// classifier) names its host as an address: h itself, or any host the
+// classifier would read out of it.
+func readsAsAddress(h string) bool {
+	if h == "" {
+		return false
+	}
+	if isAddressShaped(h) {
+		return true
+	}
+	for _, rh := range scopeguard.ReadingHosts(h) {
+		if isAddressShaped(rh) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDecimalPort reports whether p is a port number curl and the other
+// clients accept: 1-65535 in decimal.
+func isDecimalPort(p string) bool {
+	if p == "" || len(p) > 5 {
+		return false
+	}
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535 && strings.Trim(p, "0123456789") == ""
+}
+
+// extractBracketedURLHosts returns the IPv6 literals written as URL hosts
+// ("http://[::1]:8080/", "http://user@[::ffff:127.0.0.1]/"). The separator
+// pass splits on '[' and ']', so without this the address inside the
+// brackets is never classified. Only a bracket that directly follows "//"
+// or "@" counts, so Python slices such as data[::1] are left alone.
+func extractBracketedURLHosts(s string) []string {
+	var out []string
+	for i := 0; i < len(s); i++ {
+		if s[i] != '[' || i == 0 {
+			continue
+		}
+		if s[i-1] != '@' && (i < 2 || s[i-2:i] != "//") {
+			continue
+		}
+		j := strings.IndexByte(s[i+1:], ']')
+		if j <= 0 {
+			continue
+		}
+		inner := s[i+1 : i+1+j]
+		if strings.ContainsAny(inner, " \t\r\n[") {
+			continue
+		}
+		if !strings.Contains(inner, ":") {
+			continue
+		}
+		out = append(out, strings.ToLower(inner))
+		i += j + 1
 	}
 	return out
 }
@@ -581,22 +823,72 @@ func extractHostFromTokenForScope(token string) string {
 	// shape.
 	token = strings.Trim(token, ".,;:?!(){}\"'`<>")
 
-	if strings.Contains(token, "://") {
-		if u, err := url.Parse(token); err == nil && u.Hostname() != "" {
+	if webSchemeToken(token) {
+		// Browsers and curl also open "http:/host", "http:\\host" and
+		// "http://a\@host", which net/url reads differently or refuses.
+		// Hand anything but a plain URL to the classifier, which reads it
+		// the way those clients do.
+		if u, err := url.Parse(token); err == nil && u.Host != "" && !strings.Contains(token, `\`) {
 			return strings.ToLower(u.Hostname())
+		}
+		return strings.ToLower(token)
+	}
+	if strings.Contains(token, "://") {
+		u, err := url.Parse(token)
+		if err == nil && u.Hostname() != "" {
+			return strings.ToLower(u.Hostname())
+		}
+		if err != nil && !strings.HasPrefix(token, "://") {
+			// net/url refuses some URLs (an unescaped space or escape in
+			// the host). Hand the whole URL to the classifier, which reads
+			// its authority directly.
+			return strings.ToLower(token)
 		}
 	}
 
-	if h, _, err := net.SplitHostPort(token); err == nil && h != "" {
+	// host:port, optionally followed by a path ("127.0.0.1:9137/api").
+	hostPort := token
+	if i := strings.IndexByte(hostPort, '/'); i > 0 {
+		hostPort = hostPort[:i]
+	}
+	if h, p, err := net.SplitHostPort(hostPort); err == nil && h != "" {
 		// SplitHostPort keeps brackets around the host for [ipv6]:port,
 		// so peel them and accept the inner IP literal.
 		h = strings.TrimPrefix(h, "[")
 		h = strings.TrimSuffix(h, "]")
+		// A number before a colon is an address only with a real port
+		// after it: "data[0x0:0x10]" and "08:30" are not hosts. A dotted
+		// IPv4 literal is always one ("root@127.0.0.1:/tmp/" for scp).
+		if scopeguard.LooksNumericIPv4(h) && net.ParseIP(h) == nil && (!isDecimalPort(p) || isNonAddressNumber(h)) {
+			return ""
+		}
 		return strings.ToLower(h)
 	}
 
 	if ip := net.ParseIP(token); ip != nil {
 		return strings.ToLower(token)
+	}
+	// A four-part numeric form ("0177.0.0.1", "127.000.000.001") is an
+	// address to curl, Python and glibc even though net.ParseIP rejects it;
+	// classify it instead of dropping it as a version string below.
+	if strings.Count(token, ".") == 3 && isAddressShaped(token) {
+		return strings.ToLower(token)
+	}
+	// "127.0.0.1/", "localhost/api": curl and wget take a schemeless host
+	// followed by a path. Classify the head when it is written as a dotted
+	// address or a localhost name; other x/y tokens are file paths or
+	// arithmetic ("2147483647/2"). "0.0.0.0/0" and "::/0" mean "any
+	// address" in firewall rules, not this machine.
+	if i := strings.IndexByte(token, '/'); i > 0 {
+		head, rest := token[:i], token[i+1:]
+		anyNetwork := false
+		if ip := net.ParseIP(head); ip != nil && ip.IsUnspecified() {
+			anyNetwork = rest != "" && len(rest) <= 3 && strings.Trim(rest, "0123456789") == ""
+		}
+		dotlessNumber := scopeguard.LooksNumericIPv4(head) && !strings.Contains(head, ".")
+		if !anyNetwork && !dotlessNumber && isAddressShaped(head) {
+			return strings.ToLower(head)
+		}
 	}
 	if strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]") {
 		inner := token[1 : len(token)-1]
@@ -619,6 +911,23 @@ func extractHostFromTokenForScope(token string) string {
 		return strings.ToLower(token)
 	}
 	return ""
+}
+
+// isNonAddressNumber reports a number in host:port position that is not an
+// address in practice: a one- to three-digit decimal ("0:10" in a Python
+// slice, "08:30", "16:9"), or a numeric form that no IPv4 parser accepts
+// ("4294967296"). The classifier would read "0" as 0.0.0.0 and refuse
+// numeric forms it cannot parse, which would block ordinary code and times.
+// Addresses written as URLs ("http://0:9137/") are still classified.
+func isNonAddressNumber(h string) bool {
+	if !scopeguard.LooksNumericIPv4(h) {
+		return false
+	}
+	if len(h) <= 3 && !strings.Contains(h, ".") && !strings.ContainsAny(h, "xX") {
+		return true
+	}
+	_, ok := scopeguard.ParseIPv4Loose(h)
+	return !ok
 }
 
 // looksLikeFilename returns true when token has the shape <name>.<ext>
