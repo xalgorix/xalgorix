@@ -306,7 +306,11 @@ func listFilesForContext(contextID string, args map[string]string) (tools.Result
 	if err != nil {
 		return tools.Result{}, err
 	}
-	return listFilesAtPath(path)
+	canonical, rerr := sandbox.Default().CheckRead(scanctx.Get(strings.TrimSpace(contextID)), "fileedit.list", path)
+	if rerr != nil {
+		return tools.Result{Error: rerr.Error()}, nil
+	}
+	return listFilesAtPath(canonical)
 }
 
 func listFilesAtPath(path string) (tools.Result, error) {
@@ -343,28 +347,94 @@ func searchFilesForContext(contextID string, args map[string]string) (tools.Resu
 	if err != nil {
 		return tools.Result{}, err
 	}
-	return searchFilesAtPath(pattern, resolved, args["include"])
+	return searchFilesWithPolicy(sandbox.Default(), scanctx.Get(strings.TrimSpace(contextID)), pattern, resolved, args["include"])
 }
 
-func searchFilesAtPath(pattern, path, include string) (tools.Result, error) {
-	// Use ripgrep if available, fallback to grep
-	cmdArgs := []string{"-n", "--color=never", "-r"}
-	binary := "rg"
-
-	if include != "" {
-		cmdArgs = append(cmdArgs, "--glob", include)
+// searchFilesWithPolicy runs the recursive search under the read
+// deny-list. A search reads file contents, so it is refused when its root
+// resolves into a deny-list entry, to the filesystem root, or under /proc
+// (process environment files), and deny-list entries
+// below the root are skipped. Both the check and the search use the
+// symlink-resolved root: grep and rg follow a symlink given as the root,
+// so the original spelling could hide where the search really runs.
+func searchFilesWithPolicy(policy *sandbox.Policy, sc *scanctx.ScanContext, pattern, root, include string) (tools.Result, error) {
+	canonical, rerr := policy.CheckRead(sc, "fileedit.search", root)
+	if rerr != nil {
+		return tools.Result{Error: rerr.Error()}, nil
 	}
+	if canonical == "/" || canonical == "/proc" || strings.HasPrefix(canonical, "/proc/") {
+		return tools.Result{Error: fmt.Sprintf("search_files: searching %s (resolves to %s) is not permitted", root, canonical)}, nil
+	}
+	return searchFilesAtPath(pattern, canonical, include, searchExclusions(policy.ReadDenyRoots(), canonical))
+}
 
-	cmdArgs = append(cmdArgs, pattern, path)
+// searchExclusions returns exclusion globs for the deny-list entries
+// located under root: the entry's base name (glob metacharacters escaped)
+// plus "*", so the ".tmp" siblings the policy also denies are skipped too.
+// Matching is by name, so a same-named file elsewhere under the root is
+// skipped as well; the search fails closed rather than open.
+func searchExclusions(denyRoots []string, root string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, deny := range denyRoots {
+		if !isWithinPath(root, deny) {
+			continue
+		}
+		name := filepath.Base(deny)
+		if name == "." || name == string(filepath.Separator) {
+			continue
+		}
+		glob := escapeGlob(name) + "*"
+		if seen[glob] {
+			continue
+		}
+		seen[glob] = true
+		out = append(out, glob)
+	}
+	return out
+}
 
-	result, err := tools.RunCommand(binary, cmdArgs...)
+// escapeGlob backslash-escapes the glob metacharacters understood by
+// ripgrep's --glob and grep's --exclude.
+func escapeGlob(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if strings.ContainsRune(`\*?[]{}`, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// searchCommandArgs builds the ripgrep and grep argument lists. Exclusions
+// come after the caller's include glob (for both tools the last matching
+// glob wins) and "--" keeps a pattern that starts with "-" from being read
+// as a flag. ripgrep recurses by default (its -r flag is --replace);
+// --hidden --no-ignore make it search the same files grep -r does.
+func searchCommandArgs(pattern, path, include string, exclude []string) (rgArgs, grepArgs []string) {
+	rgArgs = []string{"-n", "--color=never", "--hidden", "--no-ignore"}
+	grepArgs = []string{"-rn", "--color=never"}
+	if include != "" {
+		rgArgs = append(rgArgs, "--glob", include)
+		grepArgs = append(grepArgs, "--include", include)
+	}
+	for _, name := range exclude {
+		rgArgs = append(rgArgs, "--glob", "!"+name)
+		grepArgs = append(grepArgs, "--exclude", name, "--exclude-dir", name)
+	}
+	rgArgs = append(rgArgs, "--", pattern, path)
+	grepArgs = append(grepArgs, "--", pattern, path)
+	return rgArgs, grepArgs
+}
+
+func searchFilesAtPath(pattern, path, include string, exclude []string) (tools.Result, error) {
+	// Use ripgrep if available, fallback to grep
+	rgArgs, grepArgs := searchCommandArgs(pattern, path, include, exclude)
+
+	result, err := tools.RunCommand("rg", rgArgs...)
 	if err != nil {
 		// Fallback to grep
-		grepArgs := []string{"-rn", "--color=never"}
-		if include != "" {
-			grepArgs = append(grepArgs, "--include", include)
-		}
-		grepArgs = append(grepArgs, pattern, path)
 		result, err = tools.RunCommand("grep", grepArgs...)
 		if err != nil {
 			return tools.Result{Output: "No matches found."}, nil

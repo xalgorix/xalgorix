@@ -24,7 +24,10 @@ import (
 // Two boundary semantics are exposed:
 //
 //   - CheckResolve enforces the Allow_List for WRITES (R5.x / R8.x).
-//     Writes must land inside cfg.Workspace, cfg.HomeDir, or /tmp.
+//     Writes must land inside cfg.Workspace, cfg.HomeDir, or /tmp, and
+//     never under a deny-list root: the deny-list wins over the
+//     Allow_List, so credential stores that live inside Data_Dir stay
+//     read- and write-protected.
 //   - CheckRead enforces only the deny-list for READS. Reads succeed
 //     anywhere on the filesystem unless the canonical path falls
 //     under a deny-list root (~/.ssh, ~/.aws, /etc/shadow, etc.).
@@ -40,20 +43,24 @@ type Policy struct {
 	roots []string
 
 	// readDeny holds canonical absolute prefixes that REVOKE the
-	// default-allow read policy. Empty/duplicate entries are dropped
-	// at construction time. Reads are otherwise permitted everywhere
-	// the OS will read (so wordlists in /usr/share/seclists work).
+	// default-allow read policy and take precedence over the write
+	// Allow_List. Empty/duplicate entries are dropped at construction
+	// time; each entry is kept both as given and with its symlinks
+	// resolved, so a symlinked home or Data_Dir cannot hide a member.
+	// Reads are otherwise permitted everywhere the OS will read (so
+	// wordlists in /usr/share/seclists work).
 	readDeny []string
 }
 
 // New constructs a Policy from the supplied Allow_List roots. Each
-// root is canonicalized via filepath.Abs + filepath.Clean. Empty
+// root is canonicalized via filepath.Abs + filepath.Clean and, when it
+// goes through a symlink, also kept in its resolved form. Empty
 // entries and duplicates (after canonicalization) are dropped, and
 // the resulting slice is sorted by length descending so deeper roots
 // match before their parents.
 //
-// New never touches the filesystem; missing roots are accepted and
-// will simply never match. Use Default() in production code.
+// New only stats the roots (to resolve symlinks); missing roots are
+// accepted and will simply never match. Use Default() in production code.
 //
 // The deny-list (passed via NewWithReadDeny / Default) is left empty
 // here, which means CheckRead allows reads anywhere. Tests that want
@@ -63,14 +70,38 @@ func New(roots ...string) *Policy {
 }
 
 // NewWithReadDeny constructs a Policy with explicit write roots and
-// read deny-list. Both slices are canonicalized + deduplicated +
-// sorted longest-first. See New for the write-roots semantics; see
-// CheckRead for the deny-list semantics.
+// deny-list. Both slices are canonicalized + deduplicated + sorted
+// longest-first. See New for the write-roots semantics; see CheckRead
+// and CheckResolve for the deny-list semantics.
+//
+// Both the write roots and the deny-list entries are also kept in their
+// symlink-resolved form (the same rule Resolve applies to tool paths), so
+// a symlinked Data_Dir or home keeps working as a root and cannot hide a
+// deny entry; this constructor may therefore stat the filesystem.
 func NewWithReadDeny(roots, readDeny []string) *Policy {
 	return &Policy{
-		roots:    canonicalizeRootList(roots),
-		readDeny: canonicalizeRootList(readDeny),
+		roots:    canonicalizeRootList(withResolvedSymlinks(roots)),
+		readDeny: canonicalizeRootList(withResolvedSymlinks(readDeny)),
 	}
+}
+
+// withResolvedSymlinks returns entries plus, for every entry whose
+// symlink-resolved form differs, that resolved form. Tool paths are
+// compared after symlink resolution, so a deny entry spelled through a
+// symlinked directory (for example a Data_Dir that is a symlink) would
+// otherwise never match.
+func withResolvedSymlinks(entries []string) []string {
+	out := make([]string, 0, len(entries)*2)
+	for _, raw := range entries {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		out = append(out, raw)
+		if resolved, err := canonicalize(raw); err == nil && resolved != filepath.Clean(raw) {
+			out = append(out, resolved)
+		}
+	}
+	return out
 }
 
 // canonicalizeRootList canonicalizes, dedups, and sorts a list of
@@ -177,14 +208,9 @@ func (p *Policy) ReadDenyRoots() []string {
 // ScanDir is non-empty, otherwise under cfg.Workspace (which mirrors
 // Workspace_Root / Data_Dir). Absolute inputs are honored as-is.
 //
-// Canonicalization rule (R5.2):
-//
-//   - if the joined path exists, filepath.EvalSymlinks chases the chain;
-//   - if it does not, filepath.EvalSymlinks is applied to the parent
-//     and joined with filepath.Base of the input so a symlinked
-//     directory containing a not-yet-created leaf is honored;
-//   - if EvalSymlinks fails for an unexpected reason (permissions,
-//     I/O error), Resolve falls back to filepath.Clean(filepath.Abs(...)).
+// Canonicalization rule (R5.2): symlinks are resolved component by
+// component, including dangling links, and components that do not exist
+// yet are appended under the deepest existing ancestor; see canonicalize.
 func (p *Policy) Resolve(sc *scanctx.ScanContext, raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("path policy: empty path")
@@ -262,10 +288,30 @@ func (p *Policy) Check(canonical string) error {
 //
 // CheckResolve is the WRITE entry point. Use CheckRead for read paths
 // — reads are permitted everywhere except deny-list members.
+//
+// The deny-list is checked first and wins over both the Allow_List and
+// the active ScanDir: a path the agent may not read (the scanner's own
+// credential stores, ~/.ssh, ...) is never writable either, even when
+// it sits inside Data_Dir.
 func (p *Policy) CheckResolve(sc *scanctx.ScanContext, toolName, raw string) (string, error) {
 	canonical, err := p.Resolve(sc, raw)
 	if err != nil {
 		return "", err
+	}
+	if err := p.CheckReadCanonical(canonical); err != nil {
+		rej := &PathRejectError{Path: canonical, Roots: p.ReadDenyRoots()}
+		var pre *PathRejectError
+		if errors.As(err, &pre) {
+			rej = pre
+		}
+		rej.Tool = toolName
+		rej.ScanCtxID = scanContextID(sc)
+
+		safe.IncPathReject()
+		log.Printf("[path-policy] write-deny tool=%s scan=%s path=%s deny=%v",
+			rej.Tool, rej.ScanCtxID, rej.Path, p.readDeny)
+
+		return "", rej
 	}
 	if err := p.Check(canonical); err != nil {
 		if isWithinActiveScanDir(sc, canonical) {
@@ -351,6 +397,12 @@ func (p *Policy) CheckRead(sc *scanctx.ScanContext, toolName, raw string) (strin
 // returned error has Path and Roots populated (with the deny-list
 // roots) but Tool / ScanCtxID empty — CheckRead fills those.
 //
+// Besides the entry itself and everything under it, an entry also
+// covers its ".tmp" siblings (entry + ".tmp*"), where the credential
+// stores stage atomic rewrites, and every process environment file
+// under /proc is refused: the scanner's environment carries the values
+// from its env files.
+//
 // Side-effect-free: never touches the filesystem, never increments
 // counters, never logs.
 func (p *Policy) CheckReadCanonical(canonical string) error {
@@ -359,21 +411,29 @@ func (p *Policy) CheckReadCanonical(canonical string) error {
 		return fmt.Errorf("path policy: abs(%s): %w", canonical, err)
 	}
 	abs = filepath.Clean(abs)
+	reject := &PathRejectError{
+		Path:  abs,
+		Roots: append([]string(nil), p.readDeny...),
+	}
+	if IsProcEnviron(abs) {
+		return reject
+	}
 	for _, deny := range p.readDeny {
-		if abs == deny {
-			return &PathRejectError{
-				Path:  abs,
-				Roots: append([]string(nil), p.readDeny...),
-			}
-		}
-		if strings.HasPrefix(abs, deny+string(filepath.Separator)) {
-			return &PathRejectError{
-				Path:  abs,
-				Roots: append([]string(nil), p.readDeny...),
-			}
+		if abs == deny ||
+			strings.HasPrefix(abs, deny+string(filepath.Separator)) ||
+			strings.HasPrefix(abs, deny+".tmp") {
+			return reject
 		}
 	}
 	return nil
+}
+
+// IsProcEnviron reports whether abs names a process environment file
+// (/proc/<pid>/environ, /proc/<pid>/task/<tid>/environ, /proc/self/environ).
+// A prefix entry cannot cover every pid, so the policy matches these by
+// shape.
+func IsProcEnviron(abs string) bool {
+	return strings.HasPrefix(abs, "/proc/") && filepath.Base(abs) == "environ"
 }
 
 // resolutionBase picks the directory relative paths resolve against.
@@ -400,31 +460,90 @@ func scanContextID(sc *scanctx.ScanContext) string {
 	return sc.ID
 }
 
-// canonicalize implements the R5.2 canonicalization rule.
+// canonicalize implements the R5.2 canonicalization rule: the path the
+// OS would actually open. Symlinks are resolved component by component,
+// including dangling ones (followed through their target text), and
+// components that do not exist yet are kept as written under the deepest
+// existing ancestor. A dangling link such as <scan>/notes.txt -> ~/.secret
+// therefore canonicalizes to ~/.secret, not to its own location, because
+// creating notes.txt would write through the link.
 func canonicalize(path string) (string, error) {
 	abs, absErr := filepath.Abs(path)
 	if absErr != nil {
 		return "", fmt.Errorf("path policy: abs(%s): %w", path, absErr)
 	}
-	abs = filepath.Clean(abs)
+	return resolveSymlinks(filepath.Clean(abs))
+}
 
-	if _, statErr := os.Lstat(abs); statErr == nil {
-		// Path exists — chase the symlink chain end-to-end.
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			return filepath.Clean(resolved), nil
+// maxSymlinkHops bounds symlink chains (and loops) during resolution;
+// Linux itself gives up after 40.
+const maxSymlinkHops = 40
+
+// resolveSymlinks walks abs one component at a time the way the kernel
+// does: ".." steps out of the already-resolved directory, a symlink's
+// target is spliced in front of the remaining components (relative
+// targets resolve against the link's directory), and the first missing
+// or unreadable component ends the walk with the rest appended verbatim.
+// A loop or overlong chain is an error so callers fail closed.
+func resolveSymlinks(abs string) (string, error) {
+	root := filepath.VolumeName(abs) + string(filepath.Separator)
+	resolved := root
+	pending := splitComponents(abs)
+	hops := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
 		}
-		// EvalSymlinks failed for a reason other than non-existence
-		// (permissions, broken symlink, I/O). Fall back to the
-		// abs+clean form so the boundary check still runs.
-		return abs, nil
+		next := filepath.Join(resolved, part)
+		info, err := os.Lstat(next)
+		if err != nil {
+			// Nothing on disk to follow from here on. A ".." left in the
+			// remaining components (it can only come from a link target)
+			// would step back out of the missing directory and onto
+			// components this walk never resolved; the kernel fails such a
+			// path with ENOENT, so refuse it rather than fold it textually.
+			for _, rest := range pending {
+				if rest == ".." {
+					return "", fmt.Errorf("path policy: %s steps back out of missing %s", abs, next)
+				}
+			}
+			return filepath.Join(append([]string{next}, pending...)...), nil
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			resolved = next
+			continue
+		}
+		hops++
+		if hops > maxSymlinkHops {
+			return "", fmt.Errorf("path policy: too many symlinks resolving %s", abs)
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", fmt.Errorf("path policy: readlink(%s): %w", next, err)
+		}
+		if filepath.IsAbs(target) {
+			resolved = filepath.VolumeName(target) + string(filepath.Separator)
+		}
+		pending = append(splitComponents(target), pending...)
 	}
+	return resolved, nil
+}
 
-	// Path does not exist. EvalSymlink the parent so a symlinked
-	// directory containing a not-yet-created leaf is honored.
-	parent := filepath.Dir(abs)
-	leaf := filepath.Base(abs)
-	if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-		return filepath.Clean(filepath.Join(resolved, leaf)), nil
+// splitComponents splits a path into its components, dropping the volume
+// name and empty elements.
+func splitComponents(p string) []string {
+	p = strings.TrimPrefix(p, filepath.VolumeName(p))
+	var out []string
+	for _, part := range strings.Split(p, string(filepath.Separator)) {
+		if part != "" {
+			out = append(out, part)
+		}
 	}
-	return abs, nil
+	return out
 }

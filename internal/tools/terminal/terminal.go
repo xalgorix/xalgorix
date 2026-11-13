@@ -2107,10 +2107,14 @@ var blockedPatterns = []struct {
 	{"os.remove", "file deletion"},
 	// Noisy / false-positive-heavy tools
 	{"nikto", "nikto is blocked — too many false positives. Use nuclei or manual testing instead"},
-	// The scanner's own credential file is never part of testing a target.
+	// The scanner's own credential files are never part of testing a target.
 	// Best-effort, like the rest of this list (see the boundary note below);
-	// the environment scrub in commandEnv is the matching defense for env vars.
-	{".xalgorix.env", "access to the scanner credential file is not permitted"},
+	// the environment scrub in commandEnv is the matching defense for env vars
+	// and the sandbox deny-list covers the file tools. "xalgorix.env" (no
+	// leading dot) also matches /etc/xalgorix.env.
+	{"xalgorix.env", "access to the scanner credential file is not permitted"},
+	{"llm_keys.json", "access to the scanner credential file is not permitted"},
+	{"auth-profiles.json", "access to the scanner credential file is not permitted"},
 }
 
 // isBlockedCommand checks if a command matches any blocked pattern.
