@@ -205,7 +205,9 @@ func formatEnvLine(key, value string) string {
 }
 
 func writePrivateFileAtomically(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".xalgorix.env-*")
+	// The ".tmp" suffix on the env file's own name keeps the staging file
+	// under the agent file-tool deny-list entry for that env file.
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temporary env file: %w", err)
 	}

@@ -641,9 +641,10 @@ func load() *Config {
 		SkillsDir:   filepath.Join(xalgorixHome, "skills"),
 		BrowserPath: envOr("XALGORIX_BROWSER_PATH", ""),
 
-		// Filesystem read deny-list. Defaults applied in resolveReadDenyList
-		// (sensitive home and system paths); user list extends them.
-		ReadDenyList: resolveReadDenyList(home, os.Getenv("XALGORIX_READ_DENY_LIST")),
+		// Filesystem deny-list. Defaults applied in resolveReadDenyList
+		// (sensitive home and system paths plus the scanner's own
+		// credential files); user list extends them.
+		ReadDenyList: resolveReadDenyList(home, dataDir, os.Getenv("XALGORIX_READ_DENY_LIST")),
 	}
 
 	// Debug: show loaded config so users can verify correct env was picked up.
@@ -1029,12 +1030,56 @@ func defaultReadDenyList(home string) []string {
 	}
 }
 
-// resolveReadDenyList composes the default deny-list with any extra
-// entries supplied via XALGORIX_READ_DENY_LIST. Entries in the env var
-// are colon-separated (Linux PATH convention); an empty string yields
-// the defaults. Empty tokens are skipped.
-func resolveReadDenyList(home, raw string) []string {
+// scannerCredentialPaths lists the files where Xalgorix keeps its own
+// credentials: the dotenv files load() reads at startup (dashboard
+// password, API tokens, provider keys), the provider key store and auth
+// profile store at the Data_Dir root, and the CLI credential files the
+// OAuth drivers in internal/auth import. The agent never needs these to
+// test a target, and the key store and profile store sit inside the
+// write Allow_List (Data_Dir), so listing them here keeps the
+// Filesystem_Tools from reading or rewriting them.
+func scannerCredentialPaths(home, dataDir string) []string {
+	if home == "" {
+		home = "/root"
+	}
+	out := []string{
+		"/etc/xalgorix.env",
+		"/root/.xalgorix.env",
+		filepath.Join(home, ".xalgorix.env"),
+		// OAuth driver credential sources (internal/auth/driver_*.go).
+		filepath.Join(home, ".claude", ".credentials.json"),
+		filepath.Join(home, ".config", "anthropic", "credentials.json"),
+		filepath.Join(home, ".codex", "auth.json"),
+	}
+	if sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER")); sudoUser != "" {
+		out = append(out, filepath.Join("/home", sudoUser, ".xalgorix.env"))
+	}
+	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
+		out = append(out, filepath.Join(codexHome, "auth.json"))
+	}
+	if codexFile := strings.TrimSpace(os.Getenv("XALGORIX_CODEX_AUTH_FILE")); codexFile != "" {
+		out = append(out, codexFile)
+	}
+	if dataDir != "" {
+		// Prefix matching also covers the legacy nested
+		// <dataDir>/llm_keys.json/llm_keys.json layout.
+		out = append(out,
+			filepath.Join(dataDir, "llm_keys.json"),
+			filepath.Join(dataDir, "auth-profiles.json"),
+		)
+	}
+	return out
+}
+
+// resolveReadDenyList composes the default deny-list and the scanner's
+// own credential files with any extra entries supplied via
+// XALGORIX_READ_DENY_LIST. Entries in the env var are colon-separated
+// (Linux PATH convention); an empty string yields the defaults. Empty
+// tokens are skipped. The sandbox applies the result to reads and,
+// with precedence over the write Allow_List, to writes.
+func resolveReadDenyList(home, dataDir, raw string) []string {
 	out := defaultReadDenyList(home)
+	out = append(out, scannerCredentialPaths(home, dataDir)...)
 	if raw == "" {
 		return out
 	}
