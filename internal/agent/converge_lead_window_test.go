@@ -80,10 +80,10 @@ func TestSaturatedFinishWithoutLeads(t *testing.T) {
 		t.Fatalf("finalized after %d steps, want exactly 10 (the idle limit)", got)
 	}
 	content := finishedContent(t, a)
-	if strings.Contains(content, "fully exhausted") {
-		t.Errorf("saturated finish must not claim the plan was exhausted:\n%s", content)
+	if strings.Contains(content, "Scan finished: every planned check ran") {
+		t.Errorf("saturated finish must not claim every planned check ran:\n%s", content)
 	}
-	if !strings.Contains(content, "closed WITHOUT being executed") {
+	if !strings.Contains(content, "did not run") {
 		t.Errorf("saturated finish must say tasks were closed unexecuted:\n%s", content)
 	}
 	for _, task := range a.state.Plan.Tasks {
@@ -264,7 +264,7 @@ func TestLegacyPlanExhaustedPathUnchanged(t *testing.T) {
 	if a.state.LeadIdleResets != 0 || a.state.LeadWindowStartIteration != 0 {
 		t.Error("legacy path used ConvergeFinish lead handling")
 	}
-	if c := finishedContent(t, a); !strings.Contains(c, "fully exhausted") {
+	if c := finishedContent(t, a); !strings.Contains(c, "every planned check ran") {
 		t.Errorf("legacy exhausted-plan message changed:\n%s", c)
 	}
 }

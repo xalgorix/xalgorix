@@ -123,7 +123,7 @@ func scanCompletionAssessment(state *ScanState) (string, []string) {
 		maxRej = defaultMaxFinishRejections
 	}
 	if state.FinishAttempts > maxRej {
-		reasons = append(reasons, StopReasonFinishGateExhausted+": gates released the finish after the bounded rejection ceiling")
+		reasons = append(reasons, StopReasonFinishGateExhausted+": the scan reached its finish limit before every check was confirmed")
 	}
 
 	// Principled finish that closed plan work WITHOUT executing it and has no
@@ -131,7 +131,7 @@ func scanCompletionAssessment(state *ScanState) (string, []string) {
 	// of a plan that was mostly never run.
 	if !state.DelegatedAgent {
 		if untested := untestedAtFinishCount(state); untested > 0 && validatedFindingCount(state) == 0 {
-			reasons = append(reasons, fmt.Sprintf("%s: %d plan task(s) were closed without being executed at the principled finish and no finding was validated", StopReasonUntestedAtFinish, untested))
+			reasons = append(reasons, fmt.Sprintf("%s: %s closed at the finish without running", StopReasonUntestedAtFinish, plannedChecks(untested)))
 		}
 	}
 
@@ -169,21 +169,80 @@ func scanHasBlockedWork(state *ScanState, owner string) bool {
 	return false
 }
 
-// formatIncompleteSummary renders the honest incomplete banner for the final
-// event content. It never reads as "full assessment completed".
+// formatIncompleteSummary renders the coverage note appended to the final
+// event content, which hosted dashboards show to customers in the scan log.
+// It is written for the person who ordered the scan: plain words, no alarm
+// styling, no engine internals. It still never reads as full coverage when
+// work remains, because a clean result over untested areas is not a clean bill
+// of health. The typed reasons are unchanged (completionStopReason and the
+// telemetry read them); only their display is reworded here.
 func formatIncompleteSummary(status string, reasons []string) string {
 	var b strings.Builder
-	b.WriteString("⚠️ ASSESSMENT " + strings.ToUpper(status))
 	if status == CompletionStatusIncomplete {
-		b.WriteString(" — the applicable surface was NOT fully tested. Remaining work:")
+		b.WriteString("Coverage note: the scan finished before every planned check ran, so areas that weren't tested may still have issues. Remaining:")
 		for _, r := range reasons {
-			b.WriteString("\n  • " + r)
+			b.WriteString("\n  • " + customerReason(r))
 		}
-		b.WriteString("\nThe scan remains resumable: the hypothesis ledger and this remaining-work list are preserved.")
-	} else {
-		b.WriteString(" — all applicable work is settled; blocked work is recorded with its typed reason and remains resumable.")
+		b.WriteString("\nResume or re-run the scan to cover them.")
+		return b.String()
 	}
+	b.WriteString("Coverage note: everything that could be tested was tested. Some checks were blocked and could not run; each is recorded with its reason and can be resumed.")
 	return b.String()
+}
+
+// customerReasonPrefixes rewords the start of each typed remaining-work reason
+// for display. Typed stop-reason prefixes are dropped; their text is already
+// plain language.
+var customerReasonPrefixes = []struct{ from, to string }{
+	{StopReasonUntestedAtFinish + ": ", ""},
+	{StopReasonFinishGateExhausted + ": ", ""},
+	{"hypotheses claimed but not closed: ", "leads still open: "},
+	{"hypotheses proven but unreported: ", "confirmed leads not yet reported: "},
+	{"plan task ", "planned check "},
+}
+
+func customerReason(reason string) string {
+	for _, p := range customerReasonPrefixes {
+		if strings.HasPrefix(reason, p.from) {
+			return p.to + strings.TrimPrefix(reason, p.from)
+		}
+	}
+	return reason
+}
+
+// plannedChecksNoun renders "1 planned check" / "N planned checks".
+func plannedChecksNoun(n int) string {
+	if n == 1 {
+		return "1 planned check"
+	}
+	return fmt.Sprintf("%d planned checks", n)
+}
+
+// plannedChecks renders "1 planned check was" / "N planned checks were".
+func plannedChecks(n int) string {
+	if n == 1 {
+		return plannedChecksNoun(n) + " was"
+	}
+	return plannedChecksNoun(n) + " were"
+}
+
+// saturatedCoverageSentence says, in plain words, what a saturated finish left
+// untested. It returns "" when nothing was left, otherwise a sentence that
+// starts with a space so callers can append it.
+func saturatedCoverageSentence(untested, touched, applicable int) string {
+	routes := "routes that accept input"
+	if applicable == 1 {
+		routes = "route that accepts input"
+	}
+	switch {
+	case untested > 0 && applicable > 0:
+		return fmt.Sprintf(" %s did not run, and injection testing reached %d of %d %s.", plannedChecksNoun(untested), touched, applicable, routes)
+	case untested > 0:
+		return fmt.Sprintf(" %s did not run.", plannedChecksNoun(untested))
+	case applicable > 0:
+		return fmt.Sprintf(" Injection testing reached %d of %d %s.", touched, applicable, routes)
+	}
+	return ""
 }
 
 // scanTelemetrySummary produces the compact structured telemetry block emitted
