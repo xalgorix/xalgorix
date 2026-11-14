@@ -571,14 +571,17 @@ func (a *Agent) convergeFinishIdleLimit() int {
 // summary, completion-status assessment, telemetry), so the terminal event is
 // indistinguishable from a normal graceful completion and never loses findings.
 func (a *Agent) emitPlanCompleteFinish(findingCount int, saturated bool) {
-	idle := a.state.FindingIdleIterations
-	content := fmt.Sprintf("Assessment finalized: the structural plan is fully exhausted and no new finding was validated in the last %d iterations (diminishing-returns tail). Findings already reported are preserved.", idle)
+	// This text reaches the person who ordered the scan (hosted dashboards
+	// show it in the scan log), so it uses plain words. Operator detail such
+	// as idle-iteration counts is in the telemetry message emitted below.
+	content := "Scan finished: every planned check ran, and testing stopped once further checks were no longer finding new issues. Reported findings are saved."
 	if saturated {
 		// The saturated finish closes work it never ran; say so instead of
-		// claiming the plan was exhausted.
+		// claiming every planned check ran.
 		touched, applicable := routeTouchCounts(a.state)
-		content = fmt.Sprintf("Assessment finalized at coverage saturation: no new finding was validated in the last %d iterations (diminishing-returns tail). %d plan task(s) were closed WITHOUT being executed and are recorded as untested residual; %d/%d applicable injectable routes were tested. Findings already reported are preserved.",
-			idle, untestedAtFinishCount(a.state), touched, applicable)
+		content = "Scan finished: testing stopped once further checks were no longer finding new issues." +
+			saturatedCoverageSentence(untestedAtFinishCount(a.state), touched, applicable) +
+			" Reported findings are saved."
 	}
 	content = authoritativeFinishSummary(content, findingCount)
 	status, reasons := settleCompletion(a.state)
