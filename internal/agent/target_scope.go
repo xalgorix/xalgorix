@@ -197,18 +197,30 @@ var (
 // Subdomain discovery tooling, refused in single-host scans.
 var subdomainEnumPattern = regexp.MustCompile(`(?i)\b(?:subfinder|amass|assetfinder|findomain|sublist3r|knockpy|shuffledns|puredns|crt\.sh|gobuster\s+dns)\b`)
 
+// Network tools whose arguments name a request destination, checked against
+// the single-host boundary below. Read-only/local tools are exempt above, and
+// the destination parser ignores payload hosts, so SSRF/open-redirect/OOB
+// payloads that must name off-target hosts are never treated as destinations.
+var fetchDestinationTools = map[string]bool{
+	"terminal_execute": true, "python_action": true, "http_request": true,
+	"send_request": true, "browser_action": true, "page_agent": true, "pageagent": true,
+}
+
 // shouldBlockForTargetScope refuses tool calls that leave the operator's
 // target boundaries: another port of a port-pinned host, a port scan of
-// such a host beyond its pinned ports, or subdomain discovery in a
-// single-host scan.
+// such a host beyond its pinned ports, subdomain discovery in a single-host
+// scan, or — in a single-host scan — a fetch whose destination is a host
+// other than the target (a backend/API/CDN found in the target's pages).
 func (a *Agent) shouldBlockForTargetScope(toolName string, toolArgs map[string]string) (bool, string) {
-	if targetScopeExemptTools[strings.ToLower(toolName)] {
+	lowerTool := strings.ToLower(toolName)
+	if targetScopeExemptTools[lowerTool] {
 		return false, ""
 	}
 	pins := pinnedTargetPorts(a.targets)
 	if len(pins) == 0 && !a.singleHostScope {
 		return false, ""
 	}
+	fetchTool := a.singleHostScope && fetchDestinationTools[lowerTool]
 	keys := make([]string, 0, len(toolArgs))
 	for k := range toolArgs {
 		keys = append(keys, k)
@@ -228,8 +240,87 @@ func (a *Agent) shouldBlockForTargetScope(toolName string, toolArgs map[string]s
 			return true, "This is a single-host scan: subdomains are outside it, so subdomain discovery " +
 				"does not run. Keep testing the configured host; a wildcard scan covers subdomains."
 		}
+		if fetchTool {
+			for _, h := range fetchDestinationHosts(v) {
+				if !a.fetchHostInScope(h) {
+					return true, fmt.Sprintf(
+						"%s is a different host than the scan target. This is a single-host scan: test only "+
+							"the configured target. Hosts you find in its pages, redirects, or JavaScript "+
+							"(APIs, CDNs, backends on other domains) are outside this engagement — note them "+
+							"if useful, but do not fetch, scan, or report them. A wildcard scan covers related hosts.", h)
+				}
+			}
+		}
 	}
 	return false, ""
+}
+
+// fetchDestinationHosts returns the hosts of literal http(s)/ws(s) URLs in a
+// command that are REQUEST DESTINATIONS, not payload values. A URL whose
+// scheme is immediately preceded (ignoring one surrounding quote and spaces)
+// by '=' or ':' is a payload — a query-string value (?url=http://…), a form
+// field, or a JSON/dict value ("url":"http://…") — and is skipped, so SSRF,
+// open-redirect, and OOB payloads that must name off-target hosts do not trip
+// the boundary. A command that builds its URL from a variable has no literal
+// to match and is left alone (fail-open), never a false block.
+func fetchDestinationHosts(value string) []string {
+	var out []string
+	for _, loc := range scopeURLPattern.FindAllStringIndex(value, -1) {
+		if isPayloadURLContext(value, loc[0]) {
+			continue
+		}
+		tok := strings.TrimRight(value[loc[0]:loc[1]], ";,)'\"`")
+		if h, _ := referenceHostPort(tok); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// isPayloadURLContext reports whether the URL starting at urlStart is the value
+// of an assignment ('=') or a key ('name:' / "name": / 'name':) rather than a
+// standalone fetch target.
+func isPayloadURLContext(s string, urlStart int) bool {
+	i := urlStart - 1
+	if i >= 0 && (s[i] == '\'' || s[i] == '"' || s[i] == '`') {
+		i--
+	}
+	for i >= 0 && (s[i] == ' ' || s[i] == '\t') {
+		i--
+	}
+	return i >= 0 && (s[i] == '=' || s[i] == ':')
+}
+
+// fetchHostInScope reports whether a request destination host is inside the
+// scan's boundary. The target host (and its www. variant) and OOB callback
+// domains are always in scope. In a single-host scan nothing else is; in a
+// broader scan, a host in a target's registrable domain is also in scope.
+func (a *Agent) fetchHostInScope(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" {
+		return true
+	}
+	if oastHostPattern.MatchString(host) {
+		return true
+	}
+	for _, t := range a.targets {
+		if th, _ := targetHostPort(t); th != "" && sameSiteHost(th, host) {
+			return true
+		}
+	}
+	if a.singleHostScope {
+		return false
+	}
+	fam := registrableDomain(host)
+	if fam == "" {
+		return false
+	}
+	for _, t := range a.targets {
+		if th, _ := targetHostPort(t); th != "" && registrableDomain(th) == fam {
+			return true
+		}
+	}
+	return false
 }
 
 // pinnedPortViolation inspects one argument value for references to a
@@ -320,6 +411,7 @@ func (a *Agent) targetBoundaryPromptSection(targets []string) string {
 	}
 	if a.singleHostScope {
 		b.WriteString("- This is a single-host scan. Do not enumerate subdomains (no subdomain discovery tools or certificate-transparency lookups); subdomains belong to wildcard scans. This narrows the generic scope rules above, which mention subdomains.\n")
+		b.WriteString("- Test only the configured host. Backend APIs, CDNs, and other hosts on different domains that you find in the target's responses, redirects, or JavaScript are outside this scan: record them as notes if useful, but do not fetch, probe, or report them. Finish the configured host's own routes — reaching out to a different host spends the scan on something the operator did not ask to test. (Off-target hosts named only as payloads — SSRF, open-redirect, OOB callbacks — are fine; they test the target.)\n")
 	}
 	b.WriteString("These boundaries are enforced: tool calls that cross them are refused.")
 	return b.String()
