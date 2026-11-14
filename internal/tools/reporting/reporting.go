@@ -892,6 +892,10 @@ If you cannot exploit it, downgrade severity to 'info' and report as information
 	// confirmed it OR its own proof demonstrates concrete exploitation.
 	verifiedFlag := verifierConfirmed || exploitProven
 
+	// Guarantee a replayable curl command in the PoC for any HTTP(S) finding
+	// that doesn't already have one, built from the reported method + endpoint.
+	ensureCurlPoC(args, target, endpoint)
+
 	vuln := Vulnerability{
 		Title:              title,
 		Severity:           severity,
