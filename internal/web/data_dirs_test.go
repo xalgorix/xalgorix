@@ -53,6 +53,8 @@ func seedDataDirLayout(t *testing.T, s *Server) dataDirLayout {
 			t.Fatalf("seed dir %q: %v", dir, err)
 		}
 	}
+	// A Scan_Folder holds scan output; an empty folder is not deletable.
+	seedScanRecord(t, l.scanFolder)
 	if err := os.WriteFile(l.regularFile, []byte("not a scan dir"), 0o644); err != nil {
 		t.Fatalf("seed file %q: %v", l.regularFile, err)
 	}
@@ -156,9 +158,7 @@ func TestResolveDeletableDataDir_ContainmentProperty(t *testing.T) {
 		strings.Repeat("a", 200),
 	}
 	for _, name := range valid {
-		if err := os.MkdirAll(filepath.Join(s.dataDir, name), 0o755); err != nil {
-			t.Fatalf("seed %q: %v", name, err)
-		}
+		seedScanRecord(t, filepath.Join(s.dataDir, name))
 	}
 
 	crafted := []string{
