@@ -734,15 +734,97 @@ func (s *Server) sendScanCompletionSummary(discordWebhook string, totalTargets, 
 // Mode-specific target handlers
 // ────────────────────────────────────────────────────────
 
+// Bounds on a scan folder built from a target. os.Root creates folders one
+// level at a time, so the OS path limit no longer rejects absurdly deep
+// targets; these caps keep folder creation cheap and every scan folder short
+// enough to hold its files.
+const (
+	maxScanTargetDirSegments = 32
+	maxScanDirPathLen        = 1024
+)
+
 // makeScanDir creates a per-target scan directory with nested structure: target/date/randomslug
 func (s *Server) makeScanDir(target string) string {
 	dateDir := time.Now().Format("2006-01-02")
 	scanDirName := fmt.Sprintf("%s_%s", sanitizeTarget(target), randomSlug())
-	scanDir := filepath.Join(s.dataDir, target, dateDir, scanDirName)
-	if err := os.MkdirAll(scanDir, 0700); err != nil {
+	rel := filepath.Join(scanTargetDirPath(target), dateDir, scanDirName)
+	var err error
+	if len(filepath.Join(s.dataDir, rel)) > maxScanDirPathLen {
+		err = fmt.Errorf("folder path longer than %d bytes", maxScanDirPathLen)
+	} else {
+		err = s.createScanDir(rel, true)
+	}
+	if err != nil {
+		// The target's folder is unusable (it runs through a symlink, into
+		// another scan's folder, or cannot be created). Keep the scan inside
+		// the data dir under "unknown" rather than lose its record.
+		log.Printf("[WARN] Scan folder for target %q is unusable (%v); storing the scan under unknown/", target, err)
+		rel = filepath.Join("unknown", dateDir, scanDirName)
+		err = s.createScanDir(rel, true)
+	}
+	scanDir := filepath.Join(s.dataDir, rel)
+	if err != nil {
 		log.Printf("[ERROR] Failed to create scan directory %s: %v", scanDir, err)
 	}
 	return scanDir
+}
+
+// createScanDir creates rel, a path relative to the data dir, through an
+// os.Root so a symlink already inside the data dir cannot send the new folders
+// anywhere else on disk. With refuseNested it also refuses to put a new scan
+// inside an existing scan's folder: the scan walker stops at the first
+// scan.json, so a nested scan would never be listed, retained or deleted on
+// its own.
+func (s *Server) createScanDir(rel string, refuseNested bool) error {
+	if err := os.MkdirAll(s.dataDir, 0o700); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(s.dataDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if refuseNested {
+		for dir := filepath.Dir(rel); dir != "." && dir != string(os.PathSeparator); dir = filepath.Dir(dir) {
+			// Same test the scan walker uses: any non-folder named scan.json.
+			if info, err := root.Lstat(filepath.Join(dir, "scan.json")); err == nil && !info.IsDir() {
+				return fmt.Errorf("%s already holds a scan", dir)
+			}
+		}
+	}
+	return root.MkdirAll(rel, 0o700)
+}
+
+// scanTargetDirPath maps a scan target to the folder, relative to the data
+// dir, that its scans are stored under. Targets come from whoever starts the
+// scan, so the folder is rebuilt from the target's path segments with empty
+// and dot-only segments dropped: no target can climb out of the data dir or
+// collapse onto it. Ordinary targets keep their existing layout
+// ("example.com", "https:/example.com/app"). A first segment naming one of
+// the data dir's reserved stores (uploads, schedules, saved scans, dot state)
+// gets a prefix so scan output never lands inside those stores.
+func scanTargetDirPath(target string) string {
+	segments := strings.FieldsFunc(target, func(r rune) bool {
+		return r == '/' || r == filepath.Separator
+	})
+	kept := make([]string, 0, len(segments))
+	for _, seg := range segments {
+		// "." and ".." (and longer runs of dots) never name a target folder.
+		if strings.Trim(seg, ". ") == "" {
+			continue
+		}
+		if len(kept) == maxScanTargetDirSegments {
+			return "unknown"
+		}
+		kept = append(kept, seg)
+	}
+	if len(kept) == 0 {
+		return "unknown"
+	}
+	if reservedTopLevelEntry(kept[0]) {
+		kept[0] = "target-" + kept[0]
+	}
+	return strings.Join(kept, string(os.PathSeparator))
 }
 
 func (s *Server) findLatestScanDirForTarget(target string) string {
@@ -806,7 +888,7 @@ func (s *Server) resumeScanDirOrNew(scanDir, target string) (string, bool) {
 		log.Printf("[AUTO-RESUME] Ignoring unsafe resume scan dir %q", scanDir)
 		return s.makeScanDir(target), false
 	}
-	if err := os.MkdirAll(cleanDir, 0700); err != nil {
+	if err := s.createScanDir(rel, false); err != nil {
 		log.Printf("[AUTO-RESUME] Failed to reuse scan dir %s: %v", cleanDir, err)
 		return s.makeScanDir(target), false
 	}
