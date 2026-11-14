@@ -11,13 +11,21 @@ import (
 )
 
 // reservedTopLevelNames are direct children of Data_Dir that hold system
-// state, not scan output. Neither the retention sweeper nor the data-dir
-// delete endpoint may remove them. This is the single source of truth both
-// destructive paths consult so they cannot diverge on what is protected.
+// state, not scan output. The data-dir delete endpoint and the startup sweep
+// never remove them, and the retention sweeper and DELETE /api/scans/{id}
+// never remove anything inside them except saved scans under _saved (see
+// safeToDeleteScanDir). This is the
+// single source of truth those destructive paths consult so they cannot
+// diverge on what is protected.
 var reservedTopLevelNames = map[string]struct{}{
-	"logos":                   {},
-	"_schedules":              {},
-	"_saved":                  {},
+	"logos":      {},
+	"_schedules": {},
+	"_saved":     {},
+	// Uploaded scan-context artifacts (uploads.go) and extracted source
+	// archives (uploads_source.go). Scans and schedules reference them by
+	// path, so they must outlive any one scan.
+	"context":                 {},
+	"sources":                 {},
 	"auth-profiles.json":      {},
 	"auth-profiles.json.lock": {},
 	"llm_keys.json":           {},
@@ -26,8 +34,11 @@ var reservedTopLevelNames = map[string]struct{}{
 
 // reservedTopLevelEntry reports whether name is a Reserved_Entry: an exact
 // match against reservedTopLevelNames, any queue_state*.json file, or any
-// dotfile / dot-prefixed sentinel.
+// dotfile / dot-prefixed sentinel. The match ignores case: on a
+// case-insensitive filesystem "Sources" opens the same directory as
+// "sources".
 func reservedTopLevelEntry(name string) bool {
+	name = strings.ToLower(name)
 	if _, ok := reservedTopLevelNames[name]; ok {
 		return true
 	}
@@ -220,6 +231,11 @@ func scanIsRunning(running map[string]bool, rec ScanRecord) bool {
 // safeToDeleteScanDir guards os.RemoveAll against ever escaping dataDir
 // or targeting dataDir itself. The directory must be a strict
 // descendant of dataDir (rel is not ".", does not start with "..").
+//
+// It also refuses anything inside a reserved top-level entry other than
+// _saved (which holds saved scans): the scan walk descends into the upload
+// stores, so an uploaded artifact or source archive that contains a file
+// named scan.json would otherwise look like an expired scan.
 func (s *Server) safeToDeleteScanDir(dir string) bool {
 	cleanDir := filepath.Clean(dir)
 	root := filepath.Clean(s.dataDir)
@@ -231,6 +247,10 @@ func (s *Server) safeToDeleteScanDir(dir string) bool {
 		return false
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+	if !strings.EqualFold(first, "_saved") && reservedTopLevelEntry(first) {
 		return false
 	}
 	return true

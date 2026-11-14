@@ -1684,25 +1684,32 @@ func (s *Server) initDataDir() {
 		log.Printf("Error: failed to create data directory %s: %v", s.dataDir, err)
 	}
 
-	// Cleanup scans older than 30 days
+	// Cleanup scans older than 30 days. Only folders that hold scan output
+	// age out here: reserved/system entries (upload stores, schedules, saved
+	// scans, dot-prefixed state) and folders without a scan record are kept.
 	entries, _ := os.ReadDir(s.dataDir)
 	cutoff := time.Now().AddDate(0, 0, -30)
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		// Explicitly skip folder names starting with '_' or named 'logos'
-		if strings.HasPrefix(e.Name(), "_") || e.Name() == "logos" {
+		name := e.Name()
+		if strings.HasPrefix(name, "_") || reservedTopLevelEntry(name) {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			_ = os.RemoveAll(filepath.Join(s.dataDir, e.Name()))
-			log.Printf("Cleaned up old scan: %s", e.Name())
+		if !info.ModTime().Before(cutoff) {
+			continue
 		}
+		dir := filepath.Join(s.dataDir, name)
+		if !dirHoldsScanRecord(dir) {
+			continue
+		}
+		_ = os.RemoveAll(dir)
+		log.Printf("Cleaned up old scan: %s", name)
 	}
 
 	// Check for interrupted queues — will auto-resume after server starts
@@ -3703,8 +3710,10 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 	// may differ from scan record IDs (directory slugs). We need to clean up both.
 	if r.Method == http.MethodDelete {
 		// Try to find and delete from disk
+		// safeToDeleteScanDir keeps the delete inside Data_Dir and out of the
+		// upload stores, where uploaded content can carry a scan.json.
 		dir, rec := s.findScanByID(scanID)
-		if dir != "" {
+		if dir != "" && s.safeToDeleteScanDir(dir) {
 			_ = os.RemoveAll(dir)
 		}
 		if rec != nil {
@@ -3712,7 +3721,7 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 				if entry.dir == dir {
 					continue
 				}
-				if isChildOfScan(rec, &entry.rec) {
+				if isChildOfScan(rec, &entry.rec) && s.safeToDeleteScanDir(entry.dir) {
 					_ = os.RemoveAll(entry.dir)
 				}
 			}

@@ -72,6 +72,8 @@ func instanceIsActive(status string) bool {
 //  3. R2.2 — strict single-segment containment under Data_Dir.
 //  4. R2.3 / R2.4 — existence, type, and symlink checks via os.Lstat
 //     (Lstat does NOT follow a final-component symlink).
+//  5. The folder must hold scan output (dirHoldsScanRecord); any other
+//     directory is "not a scan directory".
 func (s *Server) resolveDeletableDataDir(name string) (string, error) {
 	// R2.1 — explicit separator / dotdot / NUL / absolute checks, BEFORE
 	// touching the filesystem and BEFORE the reserved check. Traversal tokens
@@ -124,7 +126,50 @@ func (s *Server) resolveDeletableDataDir(name string) (string, error) {
 	if !fi.IsDir() {
 		return "", errNotAScanDir // R2.3
 	}
+	// Only a folder that holds scan output is a Scan_Folder. Anything else
+	// under Data_Dir (an operator's own folder, an empty leftover, state a
+	// future feature adds) is refused rather than removed.
+	if !dirHoldsScanRecord(abs) {
+		return "", errNotAScanDir
+	}
 	return abs, nil
+}
+
+// scanRecordMaxDepth bounds how many directory levels below a top-level folder
+// dirHoldsScanRecord searches. Scan folders are <target>/<date>/<slug>, and a
+// URL-shaped target adds a few levels ("https:/host/path/..."); 8 covers that
+// with room to spare. A record deeper than this makes the folder "not a scan
+// directory", which only ever refuses a delete.
+const scanRecordMaxDepth = 8
+
+// dirHoldsScanRecord reports whether root holds at least one scan record: a
+// regular file named scan.json in root or a directory up to
+// scanRecordMaxDepth levels below it. Like walkScanDirs (the scan list's
+// discovery walk) it does not follow symlinked directories; unlike it, it
+// stops at the first record found and ignores a symlink named scan.json.
+func dirHoldsScanRecord(root string) bool {
+	return dirHoldsScanRecordDepth(root, scanRecordMaxDepth)
+}
+
+func dirHoldsScanRecordDepth(dir string, depth int) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() == "scan.json" && e.Type().IsRegular() {
+			return true
+		}
+	}
+	if depth <= 0 {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() && dirHoldsScanRecordDepth(filepath.Join(dir, e.Name()), depth-1) {
+			return true
+		}
+	}
+	return false
 }
 
 // scanFolderHasRunningScan reports whether any active scan instance is still
