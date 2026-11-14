@@ -197,18 +197,29 @@ var (
 // Subdomain discovery tooling, refused in single-host scans.
 var subdomainEnumPattern = regexp.MustCompile(`(?i)\b(?:subfinder|amass|assetfinder|findomain|sublist3r|knockpy|shuffledns|puredns|crt\.sh|gobuster\s+dns)\b`)
 
+// Network tools whose arguments name a request destination, checked against
+// the single-host boundary below.
+var fetchDestinationTools = map[string]bool{
+	"terminal_execute": true, "python_action": true, "http_request": true,
+	"send_request": true, "browser_action": true, "page_agent": true, "pageagent": true,
+}
+
 // shouldBlockForTargetScope refuses tool calls that leave the operator's
 // target boundaries: another port of a port-pinned host, a port scan of
-// such a host beyond its pinned ports, or subdomain discovery in a
-// single-host scan.
+// such a host beyond its pinned ports, subdomain discovery in a single-host
+// scan, or — in a single-host scan — a request to another organization's
+// domain (a third-party API, CDN, or partner backend found in the target's
+// pages).
 func (a *Agent) shouldBlockForTargetScope(toolName string, toolArgs map[string]string) (bool, string) {
-	if targetScopeExemptTools[strings.ToLower(toolName)] {
+	lowerTool := strings.ToLower(toolName)
+	if targetScopeExemptTools[lowerTool] {
 		return false, ""
 	}
 	pins := pinnedTargetPorts(a.targets)
 	if len(pins) == 0 && !a.singleHostScope {
 		return false, ""
 	}
+	fetchTool := a.singleHostScope && fetchDestinationTools[lowerTool]
 	keys := make([]string, 0, len(toolArgs))
 	for k := range toolArgs {
 		keys = append(keys, k)
@@ -228,8 +239,176 @@ func (a *Agent) shouldBlockForTargetScope(toolName string, toolArgs map[string]s
 			return true, "This is a single-host scan: subdomains are outside it, so subdomain discovery " +
 				"does not run. Keep testing the configured host; a wildcard scan covers subdomains."
 		}
+		if fetchTool {
+			for _, h := range fetchDestinationHosts(v) {
+				if a.otherOrganizationHost(h) {
+					return true, fmt.Sprintf(
+						"%s belongs to a different organization than the scan target. This is a single-host "+
+							"scan of the configured target: third-party APIs, CDNs, and partner backends you "+
+							"find in its pages, redirects, or JavaScript are outside this engagement — note them "+
+							"if useful, but do not fetch, scan, or report them. The target's own subdomains (for "+
+							"example its API or login host) are fine. Hosts used only as payloads (SSRF, "+
+							"open-redirect, OOB callbacks) are fine too.", h)
+				}
+			}
+		}
 	}
 	return false, ""
+}
+
+// plainHostPattern accepts a literal DNS host name. A host that carries shell
+// or format syntax ("site.com$path", "$h", "%s", "{host}") is a template, not
+// a destination: the real host is unknown until the shell expands it, so it is
+// never treated as off-target.
+var plainHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$`)
+
+// numericHostPattern matches IP-literal spellings that net.ParseIP rejects
+// (octal "0177.0.0.1", short "127.1", hex "0x7f.0.0.1"); SSRF payloads use them.
+var numericHostPattern = regexp.MustCompile(`^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*$`)
+
+// fetchDestinationHosts returns the literal DNS host names of http(s)/ws(s)
+// URLs in a command that read as REQUEST DESTINATIONS. It deliberately misses
+// rather than over-matches, because a false block silently drops coverage:
+//   - a URL preceded (past one quote and spaces) by '=' or ':' is a payload
+//     value — a query parameter, form field, header, or JSON/dict value;
+//   - templated hosts (shell variables, format strings) are skipped;
+//   - IP literals are skipped: SSRF payloads use them, and the target is often
+//     tested by its own IP.
+func fetchDestinationHosts(value string) []string {
+	var out []string
+	for _, loc := range scopeURLPattern.FindAllStringIndex(value, -1) {
+		if isPayloadURLContext(value, loc[0]) {
+			continue
+		}
+		tok := strings.TrimRight(value[loc[0]:loc[1]], ";,)'\"`")
+		h, _ := referenceHostPort(tok)
+		if h == "" || net.ParseIP(h) != nil || numericHostPattern.MatchString(h) || !plainHostPattern.MatchString(h) {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// isPayloadURLContext reports whether the URL starting at urlStart is the value
+// of an assignment ('=') or a key ('name:' / "name": / 'name':) rather than a
+// standalone fetch target.
+func isPayloadURLContext(s string, urlStart int) bool {
+	i := urlStart - 1
+	if i >= 0 && (s[i] == '\'' || s[i] == '"' || s[i] == '`') {
+		i--
+	}
+	for i >= 0 && (s[i] == ' ' || s[i] == '\t') {
+		i--
+	}
+	return i >= 0 && (s[i] == '=' || s[i] == ':')
+}
+
+// payloadTestDomains are names that stand for "an attacker-controlled or
+// external host" in test payloads, or are callback/catch services that the
+// scanner polls directly. They are never a third party's production service.
+var payloadTestDomains = map[string]bool{
+	"example.com": true, "example.net": true, "example.org": true,
+	"evil.com": true, "evil.net": true, "evil.org": true,
+	"attacker.com": true, "attacker.net": true, "malicious.com": true,
+	"webhook.site": true, "oastify.com": true, "burpcollaborator.net": true,
+	"requestbin.net": true, "pipedream.net": true, "canarytokens.com": true,
+	"interact.sh": true, "dnslog.cn": true, "ceye.io": true,
+	// Echo and egress-check services used to verify outbound requests.
+	"httpbin.org": true, "httpbingo.org": true, "ipify.org": true, "ifconfig.me": true, "ipinfo.io": true,
+	"jsonplaceholder.typicode.com": true,
+	// Wildcard-DNS / rebinding names that resolve to internal addresses: SSRF payloads.
+	"nip.io": true, "sslip.io": true, "xip.io": true, "localtest.me": true, "lvh.me": true,
+	"1u.ms": true, "rbndr.us": true,
+	// Disposable inboxes used to create test accounts for authenticated testing.
+	"mail.tm": true, "mail.gw": true, "guerrillamail.com": true,
+	// The usual open-redirect payload destination.
+	"google.com": true,
+}
+
+// researchServiceDomains are public references the agent reads (exploit PoCs,
+// advisories, archives, package metadata). Reading them is research, not a
+// scan of another organization.
+var researchServiceDomains = map[string]bool{
+	"github.com": true, "githubusercontent.com": true, "github.io": true, "gitlab.com": true,
+	"archive.org": true, "packetstormsecurity.com": true, "exploit-db.com": true,
+	"nist.gov": true, "mitre.org": true, "cve.org": true, "maven.org": true,
+	"npmjs.org": true, "npmjs.com": true, "pypi.org": true, "rubygems.org": true,
+	"pkg.go.dev": true, "go.dev": true, "osv.dev": true, "rdap.org": true,
+}
+
+// inDomainSet reports whether host or any parent domain of it is in set. It
+// matches by suffix rather than registrable domain, because some listed names
+// (githubusercontent.com, nip.io) are public suffixes themselves.
+func inDomainSet(host string, set map[string]bool) bool {
+	for h := host; h != ""; {
+		if set[h] {
+			return true
+		}
+		i := strings.IndexByte(h, '.')
+		if i < 0 {
+			break
+		}
+		h = h[i+1:]
+	}
+	return false
+}
+
+// reservedTestTLDs can never be a real third-party domain (RFC 2606 / 6761).
+var reservedTestTLDs = []string{".test", ".example", ".invalid", ".localhost", ".local"}
+
+// otherOrganizationHost reports whether a request destination belongs to a
+// different organization than every scan target: a registrable domain (eTLD+1)
+// that no target shares. The target host, its www./apex form, and its own
+// subdomains are the same organization. OOB callback hosts and payload test
+// domains are never "another organization". An unresolvable registrable
+// domain is treated as same-organization, so ambiguity never blocks.
+func (a *Agent) otherOrganizationHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" || oastHostPattern.MatchString(host) {
+		return false
+	}
+	for _, tld := range reservedTestTLDs {
+		if strings.HasSuffix(host, tld) {
+			return false
+		}
+	}
+	if inDomainSet(host, payloadTestDomains) || inDomainSet(host, researchServiceDomains) ||
+		strings.HasPrefix(host, "rdap.") || strings.HasPrefix(host, "whois.") {
+		return false
+	}
+	fam := registrableDomain(host)
+	if fam == "" {
+		return false
+	}
+	known := false
+	for _, t := range a.targets {
+		th, _ := targetHostPort(t)
+		if th == "" {
+			continue
+		}
+		if sameSiteHost(th, host) {
+			return false
+		}
+		tf := registrableDomain(th)
+		if tf == "" {
+			continue
+		}
+		known = true
+		if tf == fam {
+			return false
+		}
+		// A domain that embeds the target's brand label ("sso-target.com",
+		// "xtarget.com" for target.com) is either the same organization or a
+		// crafted allowlist-bypass payload for open-redirect/CORS testing —
+		// never an unrelated third party.
+		if label := strings.SplitN(tf, ".", 2)[0]; len(label) >= 4 && strings.Contains(fam, label) {
+			return false
+		}
+	}
+	// No target with a resolvable registrable domain (e.g. an IP target): do
+	// not guess what "another organization" means.
+	return known
 }
 
 // pinnedPortViolation inspects one argument value for references to a
@@ -320,6 +499,7 @@ func (a *Agent) targetBoundaryPromptSection(targets []string) string {
 	}
 	if a.singleHostScope {
 		b.WriteString("- This is a single-host scan. Do not enumerate subdomains (no subdomain discovery tools or certificate-transparency lookups); subdomains belong to wildcard scans. This narrows the generic scope rules above, which mention subdomains.\n")
+		b.WriteString("- Hosts on other organizations' domains that you find in the target's responses, redirects, or JavaScript (third-party APIs, CDNs, partner backends) are outside this scan: record them as notes if useful, but do not fetch, probe, or report them. The target's own subdomains that the application itself calls (such as its API or login host) may be tested. Hosts named only as payloads (SSRF, open-redirect, OOB callbacks) are fine; they test the target.\n")
 	}
 	b.WriteString("These boundaries are enforced: tool calls that cross them are refused.")
 	return b.String()
