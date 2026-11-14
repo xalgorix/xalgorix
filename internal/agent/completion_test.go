@@ -343,8 +343,11 @@ func TestCompletion_FinishGateExhaustionIsIncomplete(t *testing.T) {
 	}
 	assertAny(t, reasons, "finish_gate_exhausted")
 	banner := formatIncompleteSummary(status, reasons)
-	if !strings.Contains(banner, "NOT fully tested") {
+	if !strings.Contains(banner, "before every planned check ran") {
 		t.Fatalf("the incomplete banner must never read as a full assessment: %q", banner)
+	}
+	if !strings.Contains(banner, "finish limit before every check was confirmed") {
+		t.Fatalf("the gate-exhaustion reason must be stated in plain words: %q", banner)
 	}
 }
 
