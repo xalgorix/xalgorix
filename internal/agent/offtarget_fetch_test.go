@@ -122,3 +122,50 @@ func TestTargetBoundaryPromptSection_OtherOrganizations(t *testing.T) {
 		}
 	}
 }
+
+// Shapes taken from live false blocks after the guard shipped (target names are
+// synthetic). Each must be allowed, while real other-organization fetches stay
+// blocked.
+func TestShouldBlockForTargetScope_LiveFalseBlockShapes(t *testing.T) {
+	a := &Agent{targets: []string{tgtURL}, singleHostScope: true}
+	allowed := map[string]string{
+		"SVG xmlns in an upload payload":   `post("/files", "probe.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>")`,
+		"XSD namespace in Clark notation":  `python3 -c "XS='{http://www.w3.org/2001/XMLSchema}'; print(XS)"`,
+		"WSDL namespace via concatenation": `python3 -c "W='{'+'http://schemas.xmlsoap.org/wsdl/'+'}'"`,
+		"crawler User-Agent string":        `curl -sk -A "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)" ` + tgtURL,
+		"DNS-over-HTTPS lookup of target":  `curl -s "https://cloudflare-dns.com/dns-query?name=app.acmecorp-target.com&type=A" -H 'accept: application/dns-json'`,
+		"package CDN read":                 `curl -s https://unpkg.com/nanoid@4.0.2/index.js`,
+		"temp inbox for a test account":    `curl -s "https://www.1secmail.com/api/v1/?action=getDomainList"`,
+	}
+	for name, cmd := range allowed {
+		if blocked, reason := a.shouldBlockForTargetScope("terminal_execute", map[string]string{"command": cmd}); blocked {
+			t.Errorf("%s: must be allowed, got blocked: %s", name, reason)
+		}
+	}
+	blocked := map[string]map[string]string{
+		"curl to another org":           {"terminal_execute": "curl -sk " + otherOrg},
+		"requests.get(\"other org\")":   {"python_action": `requests.get("` + otherOrg + `")`},
+		"python URL list then fetched":  {"python_action": `for u in ["` + otherOrg + `"]: requests.get(u)`},
+		"shell loop over other-org URL": {"terminal_execute": `for u in "` + otherOrg + `" "https://cdn.thirdparty-assets.org/a.js"; do curl -sk "$u"; done`},
+		"http_request to another org":   {"http_request": otherOrg},
+		"ffuf against another org":      {"terminal_execute": `ffuf -u "https://stage.partnervendor-backend.net/FUZZ" -w common.txt`},
+		// Tuple- and list-held URLs stay destinations: in real traffic they are
+		// fetched by the following loop as often as they are payloads.
+		"test-case tuple then fetched": {"python_action": `t("IAM verify","` + otherOrg + `")`},
+		"second URL in a host list":    {"python_action": `for h in ["` + tgtURL + `","https://www.partnervendor-backend.net"]: s.get(h+"/robots.txt")`},
+	}
+	for name, call := range blocked {
+		for tool, v := range call {
+			key := "command"
+			switch tool {
+			case "python_action":
+				key = "code"
+			case "http_request":
+				key = "url"
+			}
+			if ok, _ := a.shouldBlockForTargetScope(tool, map[string]string{key: v}); !ok {
+				t.Errorf("%s: other-organization fetch must stay blocked", name)
+			}
+		}
+	}
+}

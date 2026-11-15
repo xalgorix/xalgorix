@@ -290,9 +290,19 @@ func fetchDestinationHosts(value string) []string {
 	return out
 }
 
-// isPayloadURLContext reports whether the URL starting at urlStart is the value
-// of an assignment ('=') or a key ('name:' / "name": / 'name':) rather than a
-// standalone fetch target.
+// isPayloadURLContext reports whether the URL starting at urlStart is a value
+// inside a larger expression rather than a standalone fetch target. Looking back
+// past one opening quote and any spaces, the URL is a payload when it follows:
+//   - '=' or ':' — an assignment, query/form value, header, or JSON/dict value;
+//   - '{'        — XML Clark notation ("{http://ns}tag");
+//   - '+'        — string concatenation, or a URL inside a User-Agent string
+//     ("(compatible; bot/2.0; +http://…)").
+//
+// '(', '[' and ',' are deliberately NOT payload context. requests.get("https://…")
+// is a real destination, and replaying real scan traffic showed that URLs held
+// in lists and tuples (["https://a","https://b"], ("case","https://…")) are
+// fetched by the loop that follows about as often as they are payloads, so
+// treating them as payloads let genuine other-organization fetches through.
 func isPayloadURLContext(s string, urlStart int) bool {
 	i := urlStart - 1
 	if i >= 0 && (s[i] == '\'' || s[i] == '"' || s[i] == '`') {
@@ -301,7 +311,14 @@ func isPayloadURLContext(s string, urlStart int) bool {
 	for i >= 0 && (s[i] == ' ' || s[i] == '\t') {
 		i--
 	}
-	return i >= 0 && (s[i] == '=' || s[i] == ':')
+	if i < 0 {
+		return false
+	}
+	switch s[i] {
+	case '=', ':', '{', '+':
+		return true
+	}
+	return false
 }
 
 // payloadTestDomains are names that stand for "an attacker-controlled or
@@ -321,9 +338,20 @@ var payloadTestDomains = map[string]bool{
 	"nip.io": true, "sslip.io": true, "xip.io": true, "localtest.me": true, "lvh.me": true,
 	"1u.ms": true, "rbndr.us": true,
 	// Disposable inboxes used to create test accounts for authenticated testing.
-	"mail.tm": true, "mail.gw": true, "guerrillamail.com": true,
+	"mail.tm": true, "mail.gw": true, "guerrillamail.com": true, "1secmail.com": true,
 	// The usual open-redirect payload destination.
 	"google.com": true,
+	// DNS-over-HTTPS resolvers, used to resolve the target itself.
+	"cloudflare-dns.com": true, "dns.google": true,
+}
+
+// namespaceDomains host XML/SOAP/schema namespace URIs ("http://www.w3.org/2000/svg",
+// "http://schemas.xmlsoap.org/wsdl/"). In payloads and parsing code these are
+// identifiers, not fetch targets, and they belong to no scanned organization.
+var namespaceDomains = map[string]bool{
+	"w3.org": true, "xmlsoap.org": true, "purl.org": true, "oasis-open.org": true,
+	"openxmlformats.org": true, "schemas.microsoft.com": true, "schemas.android.com": true,
+	"maven.apache.org": true, "springframework.org": true,
 }
 
 // researchServiceDomains are public references the agent reads (exploit PoCs,
@@ -335,6 +363,8 @@ var researchServiceDomains = map[string]bool{
 	"nist.gov": true, "mitre.org": true, "cve.org": true, "maven.org": true,
 	"npmjs.org": true, "npmjs.com": true, "pypi.org": true, "rubygems.org": true,
 	"pkg.go.dev": true, "go.dev": true, "osv.dev": true, "rdap.org": true,
+	// Package CDNs, read to inspect the exact library version a target ships.
+	"unpkg.com": true, "jsdelivr.net": true, "cdnjs.cloudflare.com": true,
 }
 
 // inDomainSet reports whether host or any parent domain of it is in set. It
@@ -374,6 +404,7 @@ func (a *Agent) otherOrganizationHost(host string) bool {
 		}
 	}
 	if inDomainSet(host, payloadTestDomains) || inDomainSet(host, researchServiceDomains) ||
+		inDomainSet(host, namespaceDomains) ||
 		strings.HasPrefix(host, "rdap.") || strings.HasPrefix(host, "whois.") {
 		return false
 	}
