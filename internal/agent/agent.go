@@ -499,8 +499,10 @@ func NewAgent(cfg *config.Config, name string, events chan Event, localGuard sco
 		children:     make(map[*Agent]struct{}),
 	}
 	// Redirect hops get the same local-machine and port-pin checks as the
-	// URL a tool is called with.
+	// URL a tool is called with, and every direct connection gets the
+	// local-machine check on the address it actually dials.
 	reg.SetRequestGuard(a.checkHTTPHop)
+	reg.SetDialGuard(a.checkDialAddr)
 	if cfg.IterationDelaySec > 0 {
 		a.iterationDelayMs.Store(int64(cfg.IterationDelaySec * 1000))
 	}

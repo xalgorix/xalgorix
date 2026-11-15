@@ -40,20 +40,21 @@ func Register(r *tools.Registry) {
 			{Name: "max_bytes", Description: "Max response body bytes to return (default 51200, max 524288). Raise it to read large client-side JS bundles when hunting hidden API endpoints, routes, and secrets on SPAs.", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
-			return executeWithContext(r.GetScanContextID(), r.RequestGuard(), args)
+			return executeWithContext(r.GetScanContextID(), r.RequestGuard(), r.DialGuard(), args)
 		},
 	})
 }
 
 func execute(args map[string]string) (tools.Result, error) {
-	return executeWithContext("", nil, args)
+	return executeWithContext("", nil, nil, args)
 }
 
 // ProbeTarget makes a bounded, read-only availability request using the same
 // proxy, TLS, attribution headers, and scan session as ordinary HTTP tools.
 // It returns only the HTTP status; response content is never added to the
-// agent conversation.
-func ProbeTarget(ctx context.Context, contextID, targetURL string) (int, error) {
+// agent conversation. dialGuard, when non-nil, checks every direct connection
+// (see tools.GuardDials).
+func ProbeTarget(ctx context.Context, contextID, targetURL string, dialGuard tools.DialGuard) (int, error) {
 	targetURL = strings.TrimSpace(targetURL)
 	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		targetURL = "https://" + targetURL
@@ -67,7 +68,7 @@ func ProbeTarget(ctx context.Context, contextID, targetURL string) (int, error) 
 	}
 	scanheaders.Apply(req.Header, config.Get().ScanHeaders)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	client, err := buildClient(5, false, config.Get().TLSSkipVerify)
+	client, err := buildClient(5, false, config.Get().TLSSkipVerify, dialGuard)
 	if err != nil {
 		return 0, err
 	}
@@ -80,8 +81,9 @@ func ProbeTarget(ctx context.Context, contextID, targetURL string) (int, error) 
 }
 
 // executeWithContext runs one http_request call. guard, when non-nil, is
-// applied to every redirect hop before it is followed.
-func executeWithContext(contextID string, guard tools.RequestGuard, args map[string]string) (tools.Result, error) {
+// applied to every redirect hop before it is followed; dialGuard, when
+// non-nil, to every direct connection (see tools.GuardDials).
+func executeWithContext(contextID string, guard tools.RequestGuard, dialGuard tools.DialGuard, args map[string]string) (tools.Result, error) {
 	targetURL := strings.TrimSpace(args["url"])
 	if targetURL == "" {
 		return tools.Result{}, fmt.Errorf("url is required")
@@ -194,7 +196,7 @@ func executeWithContext(contextID string, guard tools.RequestGuard, args map[str
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	}
 
-	client, err := buildClient(timeout, followRedirects, config.Get().TLSSkipVerify)
+	client, err := buildClient(timeout, followRedirects, config.Get().TLSSkipVerify, dialGuard)
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -333,7 +335,9 @@ func isBinaryContentType(ct string) bool {
 // skipped. Set only from tests to avoid mutating the shared global config.
 var testTLSInsecure bool
 
-func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool) (*http.Client, error) {
+// buildClient returns a client private to one request. dialGuard, when
+// non-nil, checks every direct connection it makes (see tools.GuardDials).
+func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool, dialGuard tools.DialGuard) (*http.Client, error) {
 	tr, ok := http.DefaultTransport.(*http.Transport)
 	if ok {
 		tr = tr.Clone()
@@ -367,6 +371,9 @@ func buildClient(timeoutSec int, followRedirects bool, tlsSkipVerify bool) (*htt
 			}
 			tr.Proxy = http.ProxyURL(proxyURL)
 		}
+	}
+	if err := tools.GuardDials(tr, dialGuard); err != nil {
+		return nil, err
 	}
 
 	c := &http.Client{

@@ -135,7 +135,7 @@ func (a *Agent) verifyTimingTool(args map[string]string) (tools.Result, error) {
 			return nil, "", fmt.Errorf("%s", stop)
 		}
 		body := strings.ReplaceAll(template, timingNoncePlaceholder, newTimingNonce())
-		resp, sendErr := httpclient.SendRaw(httpclient.RawRequest{
+		resp, sendErr := a.sendRaw(httpclient.RawRequest{
 			Method: method, URL: absURL, Headers: headers, Body: body,
 			FollowRedirects: false, TimeoutSec: timeoutSec,
 		})

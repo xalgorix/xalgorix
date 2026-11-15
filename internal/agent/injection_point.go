@@ -127,7 +127,7 @@ func (a *Agent) sendInjectionRequest(method, reqURL, body, contentType string, h
 		}
 		h["Content-Type"] = contentType
 	}
-	resp, e := httpclient.SendRaw(httpclient.RawRequest{
+	resp, e := a.sendRaw(httpclient.RawRequest{
 		Method:          method,
 		URL:             reqURL,
 		Headers:         h,
