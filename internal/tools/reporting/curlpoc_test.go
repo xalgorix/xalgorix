@@ -98,3 +98,27 @@ func TestEnsureCurlPoC_QuotesSingleQuoteInURL(t *testing.T) {
 		t.Fatalf("a single quote in the URL must be shell-escaped, got:\n%s", got)
 	}
 }
+
+func TestEnsureCurlPoC_QuotesUnsafeMethod(t *testing.T) {
+	cases := []struct{ method, want string }{
+		{"PROPFIND", "-X PROPFIND 'https://app.example.com/x'"},
+		{"m-search", "-X M-SEARCH 'https://app.example.com/x'"},
+		{"post;true", "-X 'POST;TRUE' 'https://app.example.com/x'"},
+		{"post|sh", "-X 'POST|SH' 'https://app.example.com/x'"},
+		{"$(true)", "-X '$(TRUE)' 'https://app.example.com/x'"},
+		{"`true`", "-X '`TRUE`' 'https://app.example.com/x'"},
+		{"po'st", `-X 'PO'\''ST' 'https://app.example.com/x'`},
+		{"post>out", "-X 'POST>OUT' 'https://app.example.com/x'"},
+		{"-o", "-X '-O' 'https://app.example.com/x'"},
+		{"post\n$(true)", "-X POST 'https://app.example.com/x'"},
+	}
+	for _, c := range cases {
+		args := map[string]string{"method": c.method}
+		ensureCurlPoC(args, "https://app.example.com", "https://app.example.com/x")
+		lines := strings.Split(args["poc_script_code"], "\n")
+		want := "curl -sk " + c.want + " --data '<body — see exploitation proof>'"
+		if len(lines) < 2 || lines[1] != want {
+			t.Errorf("method %q: want curl line\n%s\ngot:\n%s", c.method, want, args["poc_script_code"])
+		}
+	}
+}
