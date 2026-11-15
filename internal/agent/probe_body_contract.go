@@ -109,7 +109,7 @@ func (a *Agent) probeBodyContractTool(args map[string]string) (tools.Result, err
 			return nil, stop
 		}
 		payload, _ := json.Marshal(bodyMap)
-		resp, e := httpclient.SendRaw(httpclient.RawRequest{
+		resp, e := a.sendRaw(httpclient.RawRequest{
 			Method: method, URL: u.String(), Headers: headers,
 			Body: string(payload), FollowRedirects: false, TimeoutSec: 30,
 		})

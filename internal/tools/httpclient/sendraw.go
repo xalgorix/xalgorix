@@ -9,6 +9,7 @@ import (
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
 	"github.com/xalgord/xalgorix/v4/internal/scanheaders"
+	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
 // defaultBrowserUA mirrors the User-Agent the http_request tool sends so raw
@@ -32,6 +33,10 @@ type RawRequest struct {
 	FollowRedirects bool
 	TimeoutSec      int // <=0 → 30, capped at 60
 	MaxBodyBytes    int // <=0 → default cap, capped at the hard ceiling
+	// DialGuard, when non-nil, checks every direct connection after DNS
+	// resolution (see tools.GuardDials), so a host the caller checked by
+	// name cannot resolve somewhere else when the request connects.
+	DialGuard tools.DialGuard
 }
 
 // RawResponse is the structured result of SendRaw.
@@ -95,7 +100,7 @@ func SendRaw(req RawRequest) (*RawResponse, error) {
 		httpReq.Header.Set("User-Agent", defaultBrowserUA)
 	}
 
-	client, err := buildClient(timeout, req.FollowRedirects, config.Get().TLSSkipVerify)
+	client, err := buildClient(timeout, req.FollowRedirects, config.Get().TLSSkipVerify, req.DialGuard)
 	if err != nil {
 		return nil, err
 	}

@@ -39,7 +39,7 @@ func TestProbeTargetReturnsStatusWithoutFollowingRedirect(t *testing.T) {
 		_, _ = w.Write([]byte("available"))
 	}))
 	defer srv.Close()
-	status, err := ProbeTarget(context.Background(), "", srv.URL+"/redirect")
+	status, err := ProbeTarget(context.Background(), "", srv.URL+"/redirect", nil)
 	if err != nil || status != http.StatusFound {
 		t.Fatalf("ProbeTarget redirect status = %d, %v", status, err)
 	}

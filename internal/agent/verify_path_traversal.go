@@ -75,7 +75,7 @@ func (a *Agent) verifyPathTraversalTool(args map[string]string) (tools.Result, e
 		return tools.Result{Error: stop}, nil
 	}
 	baselineURL := baseURL + "xalgorix-missing-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	baseline, err := httpclient.SendRaw(httpclient.RawRequest{
+	baseline, err := a.sendRaw(httpclient.RawRequest{
 		Method: "GET", URL: baselineURL, Headers: headers,
 		FollowRedirects: false, TimeoutSec: 30,
 	})
@@ -87,7 +87,7 @@ func (a *Agent) verifyPathTraversalTool(args map[string]string) (tools.Result, e
 			return tools.Result{Error: stop}, nil
 		}
 		probeURL := baseURL + strings.Repeat("../", depth) + "etc/passwd"
-		probe, probeErr := httpclient.SendRaw(httpclient.RawRequest{
+		probe, probeErr := a.sendRaw(httpclient.RawRequest{
 			Method: "GET", URL: probeURL, Headers: headers,
 			FollowRedirects: false, TimeoutSec: 30,
 		})

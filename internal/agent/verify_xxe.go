@@ -234,7 +234,7 @@ func (a *Agent) verifyXXETool(args map[string]string) (tools.Result, error) {
 // caller) and returns the response details used by the differential proof.
 func (a *Agent) sendXMLProbe(method, rawURL string, headers map[string]string, body string) (xxeProbeCapture, error) {
 	reqLine := fmt.Sprintf("%s %s (xml body, %dB)", method, rawURL, len(body))
-	resp, e := httpclient.SendRaw(httpclient.RawRequest{
+	resp, e := a.sendRaw(httpclient.RawRequest{
 		Method:          method,
 		URL:             rawURL,
 		Headers:         headers,

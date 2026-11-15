@@ -59,6 +59,7 @@ func (a *Agent) verifyFinding(req reporting.VerificationRequest) reporting.Verif
 	vreg := tools.NewRegistry()
 	vreg.SetScanContextID(a.scanCtx.ID)
 	vreg.SetRequestGuard(a.checkHTTPHop)
+	vreg.SetDialGuard(a.checkDialAddr)
 	terminal.Register(vreg)
 	httpclient.Register(vreg)
 	browser.Register(vreg)

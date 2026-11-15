@@ -153,7 +153,7 @@ func hasAmbientCookie(headers map[string]string) bool {
 // compact request line.
 func (a *Agent) sendStateChangeProbe(method, rawURL string, headers map[string]string, body string) (status int, respBody, reqLine string, err error) {
 	reqLine = fmt.Sprintf("%s %s (forged cross-site Origin, no CSRF token)", method, rawURL)
-	resp, e := httpclient.SendRaw(httpclient.RawRequest{
+	resp, e := a.sendRaw(httpclient.RawRequest{
 		Method:          method,
 		URL:             rawURL,
 		Headers:         headers,

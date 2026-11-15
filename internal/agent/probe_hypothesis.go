@@ -95,7 +95,7 @@ func (a *Agent) probeHypothesisTool(args map[string]string) (tools.Result, error
 	authed := len(headers) > 0
 	reqLine := method + " " + u.String()
 
-	resp, sErr := httpclient.SendRaw(httpclient.RawRequest{
+	resp, sErr := a.sendRaw(httpclient.RawRequest{
 		Method:          method,
 		URL:             u.String(),
 		Headers:         headers,

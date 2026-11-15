@@ -83,7 +83,7 @@ func (a *Agent) verifyAuthBypassTool(args map[string]string) (tools.Result, erro
 		return tools.Result{Error: stop}, nil
 	}
 	canonicalURL := u.String()
-	baseline, err := httpclient.SendRaw(httpclient.RawRequest{
+	baseline, err := a.sendRaw(httpclient.RawRequest{
 		Method: "GET", URL: canonicalURL, FollowRedirects: false, TimeoutSec: 30,
 	})
 	if err != nil {
@@ -111,7 +111,7 @@ func (a *Agent) verifyAuthBypassTool(args map[string]string) (tools.Result, erro
 	// that same shell is not mistaken for a reached protected handler.
 	catchAllNorm := ""
 	softURL := origin + canonicalPath + "-xalgorix-nonexistent-" + strconv.FormatInt(time.Now().UnixNano(), 36) + query
-	if soft, softErr := httpclient.SendRaw(httpclient.RawRequest{
+	if soft, softErr := a.sendRaw(httpclient.RawRequest{
 		Method: "GET", URL: softURL, FollowRedirects: false, TimeoutSec: 30,
 	}); softErr == nil && soft.StatusCode >= 200 && soft.StatusCode < 300 {
 		catchAllNorm = normalizeBodyForDiff(string(soft.Body))
@@ -122,7 +122,7 @@ func (a *Agent) verifyAuthBypassTool(args map[string]string) (tools.Result, erro
 			return tools.Result{Error: stop}, nil
 		}
 		variantURL := origin + variant + query
-		probe, probeErr := httpclient.SendRaw(httpclient.RawRequest{
+		probe, probeErr := a.sendRaw(httpclient.RawRequest{
 			Method: "GET", URL: variantURL, FollowRedirects: false, TimeoutSec: 30,
 		})
 		if probeErr != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/xalgord/xalgorix/v4/internal/methodology"
 	"github.com/xalgord/xalgorix/v4/internal/scopeguard"
+	"github.com/xalgord/xalgorix/v4/internal/tools/httpclient"
 )
 
 // shouldBlockForMissingAuthPrerequisites prevents an anonymous assessment from
@@ -521,6 +522,28 @@ func (a *Agent) checkHTTPHop(rawURL string) error {
 		}
 	}
 	return nil
+}
+
+// checkDialAddr is the dial guard the agent installs on its tool registries
+// (tools.Registry.SetDialGuard) and passes to SendRaw. The HTTP tools call it
+// with the "ip:port" each direct connection is about to use, after DNS
+// resolution. The URL checks above resolve a hostname once and the connection
+// resolves it again, so a name that answers with a public address first and
+// a loopback address second (DNS rebinding) passes them; this check sees the
+// address actually dialed and applies the same local-machine and listener
+// rule, including the provisioned-port and local-target opt-ins.
+func (a *Agent) checkDialAddr(address string) error {
+	if scopeguard.IsLocalOrListener(a.localGuard, address) {
+		return fmt.Errorf("it is the operator's machine or the dashboard's listener")
+	}
+	return nil
+}
+
+// sendRaw is httpclient.SendRaw with the agent's dial guard, for the probe and
+// verify tools that check a host by name before sending to it.
+func (a *Agent) sendRaw(req httpclient.RawRequest) (*httpclient.RawResponse, error) {
+	req.DialGuard = a.checkDialAddr
+	return httpclient.SendRaw(req)
 }
 
 // extractHostsFromArgs scans every value in toolArgs for URL/host

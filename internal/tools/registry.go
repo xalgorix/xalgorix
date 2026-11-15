@@ -128,6 +128,9 @@ type Registry struct {
 	// requestGuard is consulted by the HTTP tools for every redirect hop
 	// (see request_guard.go).
 	requestGuard RequestGuard
+	// dialGuard is consulted by the HTTP tools for every direct connection
+	// (see request_guard.go).
+	dialGuard DialGuard
 }
 
 // NewRegistry creates a new tool registry.

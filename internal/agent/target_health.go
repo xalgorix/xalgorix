@@ -21,7 +21,7 @@ func (a *Agent) confirmTargetUnresponsive() bool {
 		if err := a.ctx.Err(); err != nil {
 			return 0, err
 		}
-		return httpclient.ProbeTarget(a.ctx, contextID, target)
+		return httpclient.ProbeTarget(a.ctx, contextID, target, a.checkDialAddr)
 	})
 	return confirmed && a.ctx.Err() == nil
 }

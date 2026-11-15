@@ -116,7 +116,7 @@ func (a *Agent) authzMatrixTool(args map[string]string) (tools.Result, error) {
 		if i > 0 && delay > 0 {
 			time.Sleep(delay)
 		}
-		resp, sErr := httpclient.SendRaw(httpclient.RawRequest{
+		resp, sErr := a.sendRaw(httpclient.RawRequest{
 			Method:          method,
 			URL:             u.String(),
 			Headers:         mergeHeaders(extra, id.headers),
