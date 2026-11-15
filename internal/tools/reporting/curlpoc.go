@@ -31,6 +31,11 @@ var curlPresentRE = regexp.MustCompile(`(?:^|[\s;&|("` + "`" + `])curl\s`)
 // "POST https://host/graphql".
 var curlLeadingVerbRE = regexp.MustCompile(`^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+`)
 
+// curlBareMethodRE matches an HTTP method that is safe to place on a shell
+// command line unquoted. The method is model-supplied text, so anything else
+// is shell-quoted like the URL.
+var curlBareMethodRE = regexp.MustCompile(`^[A-Z][A-Z0-9_-]*$`)
+
 // ensureCurlPoC fills args["poc_script_code"] with a replayable curl command
 // for an HTTP(S) finding's affected endpoint when it does not already contain
 // one. It is a no-op for non-HTTP findings.
@@ -46,7 +51,11 @@ func ensureCurlPoC(args map[string]string, target, endpoint string) {
 	method := strings.ToUpper(curlFirstToken(args["method"]))
 	curl := "curl -sk"
 	if method != "" && method != "GET" {
-		curl += " -X " + method
+		if curlBareMethodRE.MatchString(method) {
+			curl += " -X " + method
+		} else {
+			curl += " -X " + curlShellQuote(method)
+		}
 	}
 	curl += " " + curlShellQuote(reqURL)
 	if method != "" && method != "GET" && method != "HEAD" {
