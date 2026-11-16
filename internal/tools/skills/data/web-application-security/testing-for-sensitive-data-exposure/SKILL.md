@@ -56,7 +56,7 @@ nist_csf:
 
 - **Authorization**: Written penetration testing agreement with data handling scope
 - **Burp Suite Professional**: For intercepting and analyzing responses for sensitive data
-- **trufflehog**: Secret scanning tool (`pip install trufflehog`)
+- **trufflehog**: Secret scanning tool (`sudo apt-get install trufflehog` on Kali, or a release binary from https://github.com/trufflesecurity/trufflehog)
 - **gitleaks**: Git repository secret scanner (`go install github.com/gitleaks/gitleaks/v8@latest`)
 - **curl/httpie**: For manual endpoint testing
 - **Browser DevTools**: For examining local storage, session storage, and cached data

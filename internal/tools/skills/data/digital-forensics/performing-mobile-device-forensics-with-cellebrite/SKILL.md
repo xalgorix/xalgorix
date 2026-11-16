@@ -69,9 +69,9 @@ The extraction type and device lock state silently bound what you can recover. D
 # If device is locked, document lock type (PIN, pattern, biometric)
 # Cellebrite UFED can bypass certain lock types depending on device model
 
-# Install open-source tools as alternatives
-pip install aleapp    # Android Logs Events And Protobuf Parser
-pip install ileapp    # iOS Logs Events And Properties Parser
+# Install open-source tools as alternatives (from the upstream repos)
+git clone https://github.com/abrignoni/ALEAPP.git && pip install -r ALEAPP/requirements.txt   # Android Logs Events And Protobuf Parser
+git clone https://github.com/abrignoni/iLEAPP.git && pip install -r iLEAPP/requirements.txt   # iOS Logs Events And Properties Parser
 sudo apt-get install libimobiledevice-utils  # iOS acquisition on Linux
 ```
 
@@ -126,7 +126,7 @@ sha256sum /cases/case-2024-001/mobile/*.dd > /cases/case-2024-001/mobile/acquisi
 ```bash
 # === Android analysis with ALEAPP ===
 # ALEAPP processes Android file system extractions
-python3 -m aleapp \
+python3 ALEAPP/aleapp.py \
    -t fs \
    -i /cases/case-2024-001/mobile/android_extraction/ \
    -o /cases/case-2024-001/analysis/aleapp_report/
@@ -143,7 +143,7 @@ python3 -m aleapp \
 # - Device settings and accounts
 
 # === iOS analysis with iLEAPP ===
-python3 -m ileapp \
+python3 iLEAPP/ileapp.py \
    -t tar \
    -i /cases/case-2024-001/mobile/ios_backup.tar \
    -o /cases/case-2024-001/analysis/ileapp_report/

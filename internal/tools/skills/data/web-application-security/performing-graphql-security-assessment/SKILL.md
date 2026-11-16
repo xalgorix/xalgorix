@@ -288,7 +288,7 @@ curl -s -X POST \
 | **GraphQL Voyager** | Interactive schema visualization tool |
 | **Altair GraphQL Client** | Desktop GraphQL IDE for crafting and testing queries |
 | **clairvoyance** | Schema enumeration when introspection is disabled |
-| **graphql-cop** | GraphQL security auditing tool (`pip install graphql-cop`) |
+| **graphql-cop** | GraphQL security auditing tool (`git clone https://github.com/dolevf/graphql-cop.git`) |
 | **BatchQL** | GraphQL batching attack tool for rate limit bypass |
 
 ## Common Scenarios

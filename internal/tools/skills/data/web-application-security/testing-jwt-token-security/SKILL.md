@@ -46,7 +46,7 @@ nist_csf:
 ## Prerequisites
 
 - **Authorization**: Written penetration testing agreement for the target
-- **jwt_tool**: JWT attack toolkit (`pip install jwt_tool` or `git clone https://github.com/ticarpi/jwt_tool.git`)
+- **jwt_tool**: JWT attack toolkit (`git clone https://github.com/ticarpi/jwt_tool.git`, then `pip install -r jwt_tool/requirements.txt`)
 - **Burp Suite Professional**: With JSON Web Token extension from BApp Store
 - **Python PyJWT**: For scripting custom JWT attacks (`pip install pyjwt`)
 - **Hashcat**: For brute-forcing HMAC secrets (`apt install hashcat`)

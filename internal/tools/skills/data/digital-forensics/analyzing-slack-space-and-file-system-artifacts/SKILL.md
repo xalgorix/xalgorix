@@ -192,9 +192,7 @@ bulk_extractor -o /cases/case-2024-001/analysis/bulk_extract/ \
 # Parse USN Journal with MFTECmd
 MFTECmd.exe -f "C:\cases\ntfs\UsnJrnl_J" --csv "C:\cases\analysis" --csvf usn_journal.csv
 
-# Python USN Journal parsing
-pip install pyusn
-
+# Python USN Journal parsing (standard library only)
 python3 << 'PYEOF'
 import struct
 import csv

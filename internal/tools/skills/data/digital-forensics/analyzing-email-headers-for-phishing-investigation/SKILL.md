@@ -63,7 +63,7 @@ cp /mnt/evidence/Users/suspect/AppData/Local/Microsoft/Outlook/phishing_email.em
    /cases/case-2024-001/email/
 
 # If working with PST file, extract individual messages
-pip install pypff
+pip install libpff-python   # libyal bindings, imported as pypff
 python3 << 'PYEOF'
 import pypff
 

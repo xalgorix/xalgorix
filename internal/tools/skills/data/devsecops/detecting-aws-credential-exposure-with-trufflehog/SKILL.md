@@ -46,7 +46,7 @@ nist_csf:
 
 ## Prerequisites
 
-- TruffleHog v3 installed (`brew install trufflehog` or `pip install trufflehog`)
+- TruffleHog v3 installed (`brew install trufflehog`, `sudo apt-get install trufflehog` on Kali, or the release install script)
 - git-secrets installed for pre-commit hook integration (`brew install git-secrets`)
 - Access to source code repositories (GitHub, GitLab, Bitbucket, or local git repos)
 - AWS CLI configured with permissions to check key status (`iam:ListAccessKeys`, `iam:GetAccessKeyLastUsed`)
@@ -60,7 +60,7 @@ Install TruffleHog v3 and verify it can detect the AWS credential patterns.
 
 ```bash
 # Install TruffleHog v3
-pip install trufflehog
+sudo apt-get install trufflehog   # Kali
 
 # Or install from binary release
 curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin

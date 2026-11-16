@@ -48,7 +48,7 @@ nist_csf:
 
 ## Prerequisites
 
-- binwalk v3.x installed (`pip install binwalk3` or from system package manager)
+- binwalk v3.x installed (`cargo install binwalk`; some distro packages still ship v2)
 - Python 3.8+ with standard libraries (struct, math, hashlib, subprocess)
 - SquashFS tools (`unsquashfs`) for mounting extracted SquashFS filesystems
 - Jefferson for JFFS2 filesystem extraction (`pip install jefferson`)

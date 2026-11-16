@@ -63,7 +63,7 @@ nist_csf:
 
 - Python 3.10+ with `requests`, `json`, and `csv` libraries
 - [Sherlock](https://github.com/sherlock-project/sherlock) installed (`pip install sherlock-project`)
-- [theHarvester](https://github.com/laramies/theHarvester) installed (`pip install theHarvester`)
+- [theHarvester](https://github.com/laramies/theHarvester) installed (`sudo apt-get install theharvester` on Kali, or from the GitHub repo)
 - [SpiderFoot](https://github.com/smicallef/spiderfoot) 4.0+ running on localhost:5001
 - Access to an LLM API (OpenAI, Anthropic, or local model via Ollama)
 - Optional: Maltego CE for graph visualization of correlation results
