@@ -51,8 +51,23 @@ func TestOtherOrganizationHost(t *testing.T) {
 		"evil.com", "www.example.com", "x.oast.live", "169.254.169.254.nip.io", // payloads / OOB
 		"raw.githubusercontent.com", "api.osv.dev", "rdap.verisign.com", "api.mail.tm", // research / utility
 		"internal.test", // reserved TLD
+		// Not a real TLD: internal names and payload placeholders.
+		"kubernetes.default.svc", "metadata.google.internal", "attacker.tld", "a.b", "x.y.z.q",
+		// Bare interactsh servers, egress checks, and lookup services.
+		"oast.pro", "oast.fun", "icanhazip.com", "neverssl.com", "nghttp2.org",
+		"vuldb.com", "seclists.org", "api.msrc.microsoft.com", "grep.app", "html.duckduckgo.com",
+		// Self-described attacker stand-ins and suffix-confusion payloads.
+		"attacker-domain.xyz", "evil-site.net",
+		"app.acmecorp-target.com.lookalike.net", "acmecorp-target.comlookalike.net",
 	}
-	other := []string{"api.partnervendor-backend.net", "cdn.thirdparty-assets.org", "partner.example-unrelated.io"}
+	other := []string{
+		"api.partnervendor-backend.net", "cdn.thirdparty-assets.org", "partner.example-unrelated.io",
+		// Real organizations stay blocked: a messaging API reached with a
+		// credential leaked by the target, a builder platform's CDN, another
+		// tenant's deployment, and a cloud credential service.
+		"api.telegram.org", "cdn.siteplatform-host.me", "acmeapi.app.othertenant.com",
+		"sts.eu-central-1.amazonaws.com", "www.microsoft.com",
+	}
 	for _, h := range same {
 		if a.otherOrganizationHost(h) {
 			t.Errorf("%s must NOT count as another organization", h)
@@ -136,6 +151,11 @@ func TestShouldBlockForTargetScope_LiveFalseBlockShapes(t *testing.T) {
 		"DNS-over-HTTPS lookup of target":  `curl -s "https://cloudflare-dns.com/dns-query?name=app.acmecorp-target.com&type=A" -H 'accept: application/dns-json'`,
 		"package CDN read":                 `curl -s https://unpkg.com/nanoid@4.0.2/index.js`,
 		"temp inbox for a test account":    `curl -s "https://www.1secmail.com/api/v1/?action=getDomainList"`,
+		"SSRF list naming a bare OOB host": `for U in "https://example.com/mcb" "https://oast.pro/" "https://x.burpcollaborator.net/"; do curl -sk "` + tgtURL + `/fetch?u=$U"; done`,
+		"SSRF tuple with internal name":    `python3 -c "C=[('k8s','https://kubernetes.default.svc/'),('meta','http://metadata.google.internal/')]"`,
+		"suffix-confusion CORS payload":    `for o in "https://acmecorp-target.com.lookalike.net" "https://attacker-domain.xyz"; do curl -sk "` + tgtURL + `" -H "Origin: $o"; done`,
+		"egress IP check":                  `curl -s https://icanhazip.com`,
+		"advisory lookup":                  `curl -s "https://vuldb.com/?search=acme+portal"`,
 	}
 	for name, cmd := range allowed {
 		if blocked, reason := a.shouldBlockForTargetScope("terminal_execute", map[string]string{"command": cmd}); blocked {
