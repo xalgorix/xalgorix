@@ -1471,10 +1471,21 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 
 	// ── PHASE 2: Scan each subdomain individually ──
 	wildcardStopped := false
+	// interruptReason is the recoverable stop reason when the loop ends because
+	// of a server shutdown observed before the instance status was flipped.
+	interruptReason := ""
 	for j := resumeFromSubIndex; j < len(subdomains); j++ {
 		subdomain := subdomains[j]
-		// Per-instance stop only (Stop All / single-stop / pause / delete all
-		// flip the instance status, which instanceInterrupted observes).
+		// Stop All / single-stop / pause / delete flip the instance status,
+		// which instanceInterrupted observes. A server shutdown is checked
+		// separately: its signal handler flips instance statuses only after
+		// it has already stopped the agents.
+		if s.serverShuttingDown() {
+			log.Printf("[INFO] Subdomain loop interrupted by server shutdown at %d/%d for %s", j+1, len(subdomains), target)
+			interruptReason = "server_shutdown"
+			wildcardStopped = true
+			break
+		}
 		if s.instanceInterrupted(req.InstanceID) {
 			log.Printf("[INFO] Subdomain loop stopped by user at %d/%d for %s", j+1, len(subdomains), target)
 			if !serverInstanceHasExactStopEvent(s, req.InstanceID) {
@@ -1569,7 +1580,19 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 				llmClient:            s.scanLLMClientForRequest(req, scanCfg),
 			}
 			s.executeScanSession(subSess)
+			// A child cut short by a stop or a server shutdown is not an
+			// assessed host. Leave the resume index on it (no progress save
+			// below) so the next run continues its saved session; advancing
+			// here dropped the host from the inventory for good.
 			if s.instanceInterrupted(req.InstanceID) {
+				wildcardStopped = true
+				return
+			}
+			if s.serverShuttingDown() || wildcardChildInterrupted(subSess.record) {
+				interruptReason = "server_shutdown"
+				if wildcardChildInterrupted(subSess.record) {
+					interruptReason = subSess.record.StopReason
+				}
 				wildcardStopped = true
 				return
 			}
@@ -1661,6 +1684,10 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 			if status, stopReason := s.instanceRunStatus(req.InstanceID); isInterruptedInstanceStatus(status) {
 				parentRecord.Status = status
 				parentRecord.StopReason = stopReason
+			} else if interruptReason != "" {
+				// Keep the parent recoverable: a shutdown is not a user stop.
+				parentRecord.Status = "stopped"
+				parentRecord.StopReason = interruptReason
 			} else {
 				parentRecord.Status = "stopped"
 				parentRecord.StopReason = "user_stopped"

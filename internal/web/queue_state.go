@@ -547,6 +547,22 @@ func (s *Server) instanceRunStatus(instanceID string) (string, string) {
 	return status, stopReason
 }
 
+// serverShuttingDown reports whether a SIGTERM/SIGINT shutdown has begun. The
+// signal handler closes shutdownChan before it stops any agent and before it
+// flips instance statuses, so a session that returns because of the shutdown
+// always observes it here even while its instance still reads "running".
+func (s *Server) serverShuttingDown() bool {
+	if s.shutdownChan == nil {
+		return false
+	}
+	select {
+	case <-s.shutdownChan:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) instanceInterrupted(instanceID string) bool {
 	if instanceID == "" {
 		return false

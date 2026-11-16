@@ -256,6 +256,18 @@ func wildcardChildOutcome(rec *ScanRecord) string {
 	return "finished"
 }
 
+// wildcardChildInterrupted reports whether a child session ended because the
+// scan or the server was interrupted (graceful shutdown, signal, restart)
+// rather than because its host assessment ran to an end. Such a host is not
+// assessed: the coordinator must keep it at the resume index so the next run
+// continues its saved session instead of skipping to the next host.
+func wildcardChildInterrupted(rec *ScanRecord) bool {
+	if rec == nil || !strings.EqualFold(strings.TrimSpace(rec.Status), "stopped") {
+		return false
+	}
+	return isInterruptedRecoverableRecord(rec.Status, rec.StopReason)
+}
+
 // isMandatoryWildcardEntry reports whether an inventory entry is one of the
 // mandatory assessment subjects for this target (the exact operator-supplied
 // host or the authorized registrable root). The explicit wildcard resource cap
