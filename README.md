@@ -60,18 +60,11 @@ Xalgorix is supported by proxy-infrastructure partners — handy for checking ho
 
 <table>
   <tr>
-    <td align="center" valign="middle" width="50%">
-      <a href="mailto:partners@xalgorix.com?subject=README%20sponsorship"><img src="assets/sponsor_placeholder.svg" alt="Your logo here: this sponsor spot is open" height="132" /></a>
-    </td>
-    <td align="center" valign="middle" width="50%">
+    <td align="center" valign="middle">
       <a href="https://proxy-seller.com/?partner=11571212D46044C9"><img src="assets/proxyseller_xalgorix.jpg" alt="Proxy-Seller" height="132" /></a>
     </td>
   </tr>
   <tr>
-    <td align="center" valign="top">
-      <b><a href="mailto:partners@xalgorix.com?subject=README%20sponsorship">Your brand here</a></b><br/>
-      <sub>This sponsor spot is open<br/>Email <a href="mailto:partners@xalgorix.com?subject=README%20sponsorship">partners@xalgorix.com</a> to claim it</sub>
-    </td>
     <td align="center" valign="top">
       <b><a href="https://proxy-seller.com/?partner=11571212D46044C9">Proxy-Seller</a></b><br/>
       <sub>47M+ residential IPs · 220+ locations · residential, mobile, ISP &amp; datacenter<br/>Xalgorix users get <b>15% off</b> with <code>XALGORIX</code></sub>
