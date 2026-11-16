@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // Target boundaries the operator expressed through the scan request itself,
@@ -331,9 +333,13 @@ var payloadTestDomains = map[string]bool{
 	"webhook.site": true, "oastify.com": true, "burpcollaborator.net": true,
 	"requestbin.net": true, "pipedream.net": true, "canarytokens.com": true,
 	"interact.sh": true, "dnslog.cn": true, "ceye.io": true,
+	// interactsh's public servers. The scanner polls them directly, and SSRF
+	// payload lists name them bare ("https://oast.pro/"), which the
+	// "<token>.oast.*" callback pattern does not cover.
+	"oast.pro": true, "oast.fun": true, "oast.live": true, "oast.site": true, "oast.online": true, "oast.me": true,
 	// Echo and egress-check services used to verify outbound requests.
 	"httpbin.org": true, "httpbingo.org": true, "ipify.org": true, "ifconfig.me": true, "ipinfo.io": true,
-	"jsonplaceholder.typicode.com": true,
+	"jsonplaceholder.typicode.com": true, "icanhazip.com": true, "neverssl.com": true, "nghttp2.org": true,
 	// Wildcard-DNS / rebinding names that resolve to internal addresses: SSRF payloads.
 	"nip.io": true, "sslip.io": true, "xip.io": true, "localtest.me": true, "lvh.me": true,
 	"1u.ms": true, "rbndr.us": true,
@@ -363,6 +369,9 @@ var researchServiceDomains = map[string]bool{
 	"nist.gov": true, "mitre.org": true, "cve.org": true, "maven.org": true,
 	"npmjs.org": true, "npmjs.com": true, "pypi.org": true, "rubygems.org": true,
 	"pkg.go.dev": true, "go.dev": true, "osv.dev": true, "rdap.org": true,
+	// Vulnerability databases, mailing-list archives, code and web search.
+	"vuldb.com": true, "seclists.org": true, "msrc.microsoft.com": true,
+	"grep.app": true, "duckduckgo.com": true,
 	// Package CDNs, read to inspect the exact library version a target ships.
 	"unpkg.com": true, "jsdelivr.net": true, "cdnjs.cloudflare.com": true,
 }
@@ -384,8 +393,25 @@ func inDomainSet(host string, set map[string]bool) bool {
 	return false
 }
 
-// reservedTestTLDs can never be a real third-party domain (RFC 2606 / 6761).
-var reservedTestTLDs = []string{".test", ".example", ".invalid", ".localhost", ".local"}
+// unmanagedTLDHost reports whether host ends in a label that is not a real,
+// ICANN-managed top-level domain. That covers the RFC 2606/6761 names (.test,
+// .example, .invalid, .localhost, .local), cluster and internal names
+// (kubernetes.default.svc, metadata.google.internal), and the placeholders
+// agents write into payloads (attacker.tld, app.target, a.b). No other
+// organization can own such a name on the public internet.
+func unmanagedTLDHost(host string) bool {
+	tld := host[strings.LastIndexByte(host, '.')+1:]
+	if tld == "" {
+		return false
+	}
+	_, icann := publicsuffix.PublicSuffix(tld)
+	return !icann
+}
+
+// payloadLabelPattern matches registrable domains that announce themselves as
+// attacker-controlled stand-ins in payloads ("attacker-domain.xyz",
+// "evil-site.net"), beyond the exact names in payloadTestDomains.
+var payloadLabelPattern = regexp.MustCompile(`^(?:attacker|evil|malicious)`)
 
 // otherOrganizationHost reports whether a request destination belongs to a
 // different organization than every scan target: a registrable domain (eTLD+1)
@@ -395,13 +421,8 @@ var reservedTestTLDs = []string{".test", ".example", ".invalid", ".localhost", "
 // domain is treated as same-organization, so ambiguity never blocks.
 func (a *Agent) otherOrganizationHost(host string) bool {
 	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	if host == "" || oastHostPattern.MatchString(host) {
+	if host == "" || oastHostPattern.MatchString(host) || unmanagedTLDHost(host) {
 		return false
-	}
-	for _, tld := range reservedTestTLDs {
-		if strings.HasSuffix(host, tld) {
-			return false
-		}
 	}
 	if inDomainSet(host, payloadTestDomains) || inDomainSet(host, researchServiceDomains) ||
 		inDomainSet(host, namespaceDomains) ||
@@ -409,7 +430,7 @@ func (a *Agent) otherOrganizationHost(host string) bool {
 		return false
 	}
 	fam := registrableDomain(host)
-	if fam == "" {
+	if fam == "" || payloadLabelPattern.MatchString(fam) {
 		return false
 	}
 	known := false
@@ -434,6 +455,11 @@ func (a *Agent) otherOrganizationHost(host string) bool {
 		// crafted allowlist-bypass payload for open-redirect/CORS testing —
 		// never an unrelated third party.
 		if label := strings.SplitN(tf, ".", 2)[0]; len(label) >= 4 && strings.Contains(fam, label) {
+			return false
+		}
+		// The target's whole domain with an attacker suffix ("target.com.evil.net",
+		// "target.comevil.net") is a suffix-confusion bypass payload.
+		if strings.HasPrefix(host, tf) || strings.Contains(host, "."+tf) {
 			return false
 		}
 	}
