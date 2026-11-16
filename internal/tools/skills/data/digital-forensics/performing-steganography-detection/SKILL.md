@@ -55,7 +55,6 @@ Steganalysis is asymmetric: a null result rarely means "clean," and a statistica
 ```bash
 # Install steganography detection tools
 sudo apt-get install steghide stegsnow
-pip install zsteg
 pip install stegoveritas
 gem install zsteg  # Ruby-based tool for PNG/BMP
 

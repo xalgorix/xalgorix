@@ -1108,7 +1108,7 @@ var packageMap = map[string]string{
 	"unfurl":     "unfurl",
 	"gron":       "gron",
 	"httprobe":   "httprobe",
-	// Python tools — routed to pipx/pip via pipxTools.
+	// Python tools — routed to pipx/pip via pipxInstallSpecs.
 	"semgrep":    "semgrep",
 	"bandit":     "bandit",
 	"git-dumper": "git-dumper",
@@ -1117,6 +1117,20 @@ var packageMap = map[string]string{
 	// Distro packages (apt). gh needs GitHub's apt repo (added in the Dockerfile).
 	"dirsearch": "dirsearch",
 	"gh":        "gh",
+}
+
+// pipxInstallSpecs maps a command to what the opt-in auto-installer hands to
+// `pipx install` / `pip3 install`. A bare name is resolved on PyPI, so it must be
+// a name that project actually publishes there; tools that are not published
+// under their command name install from the upstream repository instead.
+var pipxInstallSpecs = map[string]string{
+	"arjun":       "arjun",
+	"paramspider": "git+https://github.com/devanshbatham/paramspider.git",
+	"scrapling":   "scrapling",
+	"uro":         "uro",
+	"semgrep":     "semgrep",
+	"bandit":      "bandit",
+	"git-dumper":  "git-dumper",
 }
 
 // decode decodes a base64 string
@@ -1861,17 +1875,6 @@ func installPackage(pkg string) string {
 		)
 	}
 
-	// Special handling for pipx-installed tools
-	pipxTools := map[string]string{
-		"arjun":       "arjun",
-		"paramspider": "paramspider",
-		"scrapling":   "scrapling",
-		"uro":         "uro",
-		"semgrep":     "semgrep",
-		"bandit":      "bandit",
-		"git-dumper":  "git-dumper",
-	}
-
 	// Special handling for Cargo (Rust) tools
 	cargoTools := map[string]string{
 		"feroxbuster": "feroxbuster",
@@ -1925,7 +1928,7 @@ func installPackage(pkg string) string {
 	}
 
 	// pipx-installed tools (Python)
-	if pipxPkg, ok := pipxTools[pkg]; ok {
+	if pipxPkg, ok := pipxInstallSpecs[pkg]; ok {
 		installCmd := fmt.Sprintf("pipx install %s 2>&1 || pip3 install %s 2>&1", pipxPkg, pipxPkg)
 		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 		defer cancel()

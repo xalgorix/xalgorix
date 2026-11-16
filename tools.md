@@ -16,7 +16,7 @@ Complete list of **70+ security tools** included in Xalgorix - the most powerful
 | 8 | **hakrawler** | Web crawling | `go install github.com/hakluke/hakrawler@latest` |
 | 9 | **gau** | Get All URLs | `go install github.com/lc/gau/v2/cmd/gau@latest` |
 | 10 | **waybackurls** | Wayback Machine URLs | `go install github.com/tomnomnom/waybackurls@latest` |
-| 11 | **paramspider** | Parameter discovery | `pipx install paramspider` |
+| 11 | **paramspider** | Parameter discovery | `pipx install git+https://github.com/devanshbatham/paramspider.git` |
 | 12 | **crt.sh** | Certificate transparency | `curl -s "https://crt.sh/?q=target.com"` |
 | 13 | **bufferover** | DNS enumeration | `curl -s "https://dns.bufferover.run/dns?q=target.com"` |
 | 14 | **webarchive** | Historical URLs | `curl -s "https://web.archive.org/cdx/search/cdx?url=*.target.com/*"` |
@@ -55,21 +55,21 @@ Complete list of **70+ security tools** included in Xalgorix - the most powerful
 | 7 | **responder** | LLMNR/NBTNS spoofing | `git clone https://github.com/SpiderLabs/Responder` |
 | 8 | **impacket** | Windows exploitation | `pip install impacket` |
 | 9 | **secretdump** | SAM database dump | `pip install impacket` |
-| 10 | **evilwinrm** | Windows remoting | `gem install evilwinrm` |
+| 10 | **evilwinrm** | Windows remoting | `gem install evil-winrm` |
 | 11 | **hydra** | Password cracking | `apt install hydra` |
 | 12 | **medusa** | Password cracking | `apt install medusa` |
 | 13 | **john** | Password cracking | `apt install john` |
 | 14 | **hashcat** | GPU password cracking | `apt install hashcat` |
-| 15 | **crackmapexec** | Network exploitation | `pip install crackmapexec` |
+| 15 | **crackmapexec** | Network exploitation | `apt install crackmapexec` |
 
 ## 🕵️ Information Gathering (10 tools)
 
 | # | Tool | Purpose | Install |
 |---|------|---------|---------|
 | 1 | **theHarvester** | Email gathering | `git clone https://github.com/laramies/theHarvester` |
-| 2 | **metagoofil** | Metadata extraction | `pip install metagoofil` |
-| 3 | **spiderfoot** | OSINT automation | `pip install spiderfoot` |
-| 4 | **recon-ng** | Web reconnaissance | `pip install recon-ng` |
+| 2 | **metagoofil** | Metadata extraction | `apt install metagoofil` |
+| 3 | **spiderfoot** | OSINT automation | `apt install spiderfoot` |
+| 4 | **recon-ng** | Web reconnaissance | `apt install recon-ng` |
 | 5 | **maltego** | Graphical OSINT | `apt install maltego` |
 | 6 | **gh** | GitHub reconnaissance | `apt install gh` |
 | 7 | **git-dumper** | Git repository dump | `pip install git-dumper` |
@@ -92,15 +92,14 @@ Complete list of **70+ security tools** included in Xalgorix - the most powerful
 | 9 | **mitmproxy** | HTTP proxy | `apt install mitmproxy` |
 | 10 | **sslyze** | TLS analysis | `pip install sslyze` |
 
-## 🛡️ WAF & Protection (5 tools)
+## 🛡️ WAF & Protection (4 tools)
 
 | # | Tool | Purpose | Install |
 |---|------|---------|---------|
 | 1 | **wafw00f** | WAF detection | `pip install wafw00f` |
-| 2 | **whatwaf** | WAF identification | `pip install whatwaf` |
-| 3 | **bountycheck** | Bug bounty tools | `pip install bountycheck` |
-| 4 | **subjack** | Subdomain takeover | `go install github.com/haccer/subjack@latest` |
-| 5 | **nuclei-templates** | Vuln templates | `git clone https://github.com/projectdiscovery/nuclei-templates` |
+| 2 | **whatwaf** | WAF identification | `git clone https://github.com/Ekultek/WhatWaf` |
+| 3 | **subjack** | Subdomain takeover | `go install github.com/haccer/subjack@latest` |
+| 4 | **nuclei-templates** | Vuln templates | `git clone https://github.com/projectdiscovery/nuclei-templates` |
 
 ## 🔧 Utilities (15 tools)
 
@@ -156,7 +155,7 @@ Xalgorix **automatically installs** any missing tools when needed! Just run a co
 | Exploitation | 15 |
 | Information Gathering | 10 |
 | Security Scanning | 10 |
-| WAF & Protection | 5 |
+| WAF & Protection | 4 |
 | Utilities | 15 |
 | **TOTAL** | **85+** |
 

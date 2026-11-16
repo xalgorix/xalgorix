@@ -49,7 +49,7 @@ nist_csf:
 
 - kubectl configured with cluster-admin or equivalent read permissions to the target cluster
 - rbac-tool installed (`kubectl krew install rbac-tool` or binary from GitHub)
-- KubiScan installed (`pip install kubiscan`)
+- KubiScan installed (`git clone https://github.com/cyberark/KubiScan.git && pip install -r KubiScan/requirements.txt`)
 - Kubeaudit installed (`brew install kubeaudit` or from GitHub releases)
 - Access to the cluster's audit logs for correlating RBAC findings with actual API access
 
@@ -178,22 +178,22 @@ Use KubiScan to automatically identify risky service accounts, pods, and RBAC co
 
 ```bash
 # Run KubiScan to find risky roles
-python3 -m kubiscan -rroles   # List risky Roles
-python3 -m kubiscan -rcr      # List risky ClusterRoles
-python3 -m kubiscan -rrb      # List risky RoleBindings
-python3 -m kubiscan -rcrb     # List risky ClusterRoleBindings
+python3 KubiScan/KubiScan.py -rr    # List risky Roles
+python3 KubiScan/KubiScan.py -rcr   # List risky ClusterRoles
+python3 KubiScan/KubiScan.py -rb    # List risky RoleBindings
+python3 KubiScan/KubiScan.py -rcb   # List risky ClusterRoleBindings
 
 # Find risky service accounts
-python3 -m kubiscan -rs       # Risky service accounts
+python3 KubiScan/KubiScan.py -rs    # Risky subjects (users, groups, service accounts)
 
 # Find pods running with risky service accounts
-python3 -m kubiscan -rp       # Risky pods
+python3 KubiScan/KubiScan.py -rp    # Risky pods
 
-# Check for privilege escalation paths
-python3 -m kubiscan -pe       # Privilege escalation vectors
+# Check for privileged pods/containers
+python3 KubiScan/KubiScan.py -pp    # Privileged pods
 
 # Generate full report
-python3 -m kubiscan -a        # All checks
+python3 KubiScan/KubiScan.py -a     # All checks
 ```
 
 ### Step 5: Audit Service Account Token Mounting and Usage

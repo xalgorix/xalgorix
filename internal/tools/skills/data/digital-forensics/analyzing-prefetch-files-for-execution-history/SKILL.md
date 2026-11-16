@@ -96,8 +96,6 @@ PECmd.exe -d "C:\cases\prefetch\" --json "C:\cases\analysis\" --jsonf prefetch_r
 ### Step 3: Parse with Python for Linux-Based Analysis
 
 ```bash
-pip install prefetch
-
 python3 << 'PYEOF'
 import os
 import json
