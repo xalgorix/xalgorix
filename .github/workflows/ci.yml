@@ -137,6 +137,11 @@ jobs:
 
   macos-smoke:
     name: macOS ARM64 smoke test
+    # Runs on pull requests and manual dispatch, not on pushes to main/master.
+    # Changes reach main only through a PR, which already ran this job. Hosted
+    # macOS arm64 runners are often at capacity: a queued job that is never
+    # picked up gets cancelled and turned main red without any code problem.
+    if: github.event_name != 'push'
     runs-on: macos-15
     timeout-minutes: 20
     steps:
