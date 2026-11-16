@@ -1178,6 +1178,13 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 		default:
 			continue
 		}
+		// The coordinator's own announcements (the auto-resume banner names
+		// the parent target and carries the parent's scan id) never describe
+		// a child host. Replaying one bound the parent to the pending child
+		// for the same host and reported it as a running sub-scan.
+		if rec.ID != "" && evt.AgentID == rec.ID {
+			continue
+		}
 		if existing := children[normalizeScanTarget(target)]; existing != nil && existing.ID != "" {
 			continue // Durable identity/lifecycle outrank replayed descriptors.
 		}
