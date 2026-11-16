@@ -298,3 +298,34 @@ func TestWildcardAssessmentResumeCannotReportUnknownChildrenFull(t *testing.T) {
 		t.Fatal("resuming a completed inventory inferred assessment completeness from legacy lifecycle metadata")
 	}
 }
+
+// The auto-resume banner names the parent target with the parent's own scan id.
+// It must not turn the pending child for the same host into a running sub-scan.
+func TestWildcardResumeBannerIsNotAChildSubScan(t *testing.T) {
+	s := newTestServer(t, nil)
+	parent := &ScanRecord{
+		ID: "example.invalid_parent", InstanceID: "wildcard-resume-banner", Target: "example.invalid", ScanMode: "wildcard", Status: "running",
+		SubScanTotal: 2, SubScans: []SubScanSummary{
+			{ID: "child-a", Target: "a.example.invalid", Status: "running", StartedAt: "2026-01-01T00:00:00Z"},
+			{Target: "example.invalid", Status: "pending"},
+		},
+		Events: []WSEvent{
+			{Type: "target_started", Target: "example.invalid", ParentTarget: "example.invalid", SubTargetTotal: 2,
+				AgentID: "example.invalid_parent", Timestamp: "2026-01-02T00:00:00Z", Content: "[AUTO-RESUME] Resuming wildcard scan for example.invalid at subdomain 1/2"},
+			{Type: "target_started", Target: "a.example.invalid", ParentTarget: "example.invalid", SubTargetTotal: 2,
+				AgentID: "child-a", Timestamp: "2026-01-02T00:00:05Z"},
+		},
+	}
+	s.attachWildcardSubScansFrom(parent, nil)
+	for _, child := range parent.SubScans {
+		if child.ID == parent.ID {
+			t.Fatalf("parent bound to its own inventory child: %+v", child)
+		}
+		if child.Target == "example.invalid" && (child.Status != "pending" || child.StartedAt != "") {
+			t.Fatalf("resume banner changed the pending child: %+v", child)
+		}
+	}
+	if parent.SubScanRunning != 1 || parent.SubScanRemaining != 1 {
+		t.Fatalf("resume banner inflated running children: running=%d remaining=%d", parent.SubScanRunning, parent.SubScanRemaining)
+	}
+}
