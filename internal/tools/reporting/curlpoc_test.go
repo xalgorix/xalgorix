@@ -25,6 +25,18 @@ func TestEnsureCurlPoC_NonGetGetsMethodAndBody(t *testing.T) {
 	}
 }
 
+func TestEnsureCurlPoC_HeadUsesHeadFlag(t *testing.T) {
+	for _, method := range []string{"HEAD", "head"} {
+		args := map[string]string{"method": method}
+		ensureCurlPoC(args, "https://app.example.com", "https://app.example.com/x")
+		lines := strings.Split(args["poc_script_code"], "\n")
+		const want = "curl -sk -I 'https://app.example.com/x'"
+		if len(lines) < 2 || lines[1] != want {
+			t.Errorf("method %q: want curl line\n%s\ngot:\n%s", method, want, args["poc_script_code"])
+		}
+	}
+}
+
 func TestEnsureCurlPoC_KeepsAgentCurlUnchanged(t *testing.T) {
 	const existing = "curl -sk 'https://x.example.com/y' -H 'X: 1'"
 	args := map[string]string{"method": "GET", "poc_script_code": existing}
