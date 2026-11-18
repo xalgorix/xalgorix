@@ -50,7 +50,13 @@ func ensureCurlPoC(args map[string]string, target, endpoint string) {
 
 	method := strings.ToUpper(curlFirstToken(args["method"]))
 	curl := "curl -sk"
-	if method != "" && method != "GET" {
+	switch {
+	case method == "HEAD":
+		// -X HEAD only renames the method: curl still waits for the body the
+		// response's Content-Length announces, so the replay fails with exit 18
+		// or hangs on a keep-alive connection. -I sends a real HEAD request.
+		curl += " -I"
+	case method != "" && method != "GET":
 		if curlBareMethodRE.MatchString(method) {
 			curl += " -X " + method
 		} else {
