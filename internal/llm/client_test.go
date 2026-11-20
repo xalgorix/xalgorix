@@ -398,7 +398,10 @@ func TestResolveEndpoint_ProviderDefaultsAndCustomBases(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := NewClient(&tc.cfg)
-			gotURL, gotModel := c.resolveEndpoint()
+			gotURL, gotModel, err := c.resolveEndpoint()
+			if err != nil {
+				t.Fatalf("resolveEndpoint: %v", err)
+			}
 			if gotURL != tc.wantURL {
 				t.Fatalf("endpoint = %q, want %q", gotURL, tc.wantURL)
 			}
@@ -472,7 +475,10 @@ func TestResolveEndpoint_PreservesModelWithSlash(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := NewClient(&tc.cfg)
-			gotURL, gotModel := c.resolveEndpoint()
+			gotURL, gotModel, err := c.resolveEndpoint()
+			if err != nil {
+				t.Fatalf("resolveEndpoint: %v", err)
+			}
 			if gotURL != tc.wantURL {
 				t.Fatalf("endpoint = %q, want %q", gotURL, tc.wantURL)
 			}
