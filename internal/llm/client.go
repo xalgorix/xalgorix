@@ -381,7 +381,8 @@ func speaksChatCompletions(provider string) bool {
 // XALGORIX_LLM_PROVIDER or as the model's prefix with no provider set. A
 // prefix that outranked a different explicit provider gets no catalog
 // default, so the key never reaches a catalog host the operator did not
-// select. "" means no default, which the composite resolver refuses.
+// select. "" means no default; defaultBaseWithoutAPIBase decides whether the
+// request may still use genericDefaultBase.
 func providerDefaultBase(provider, explicitProvider string) string {
 	if base, ok := legacyProviderBases[provider]; ok {
 		return base
@@ -393,6 +394,41 @@ func providerDefaultBase(provider, explicitProvider string) string {
 		return strings.TrimSpace(entry.BaseURL)
 	}
 	return ""
+}
+
+// genericDefaultBase is the base URL of a request with no XALGORIX_API_BASE
+// that no known provider routes: a bare model with no provider set, a
+// provider name the catalog does not know, or a selected same-vendor
+// provider (see sameVendorAsGenericDefault).
+const genericDefaultBase = "https://api.openai.com/v1"
+
+// sameVendorAsGenericDefault lists the known providers without a usable
+// default base whose vendor also runs genericDefaultBase. Only when one of
+// them is the provider the operator selected, as XALGORIX_LLM_PROVIDER or as
+// the model's prefix with no provider set, does the request fall back to that
+// host; under a different explicit provider the key is that provider's.
+var sameVendorAsGenericDefault = map[string]bool{"codex": true}
+
+// defaultBaseWithoutAPIBase returns the base URL a request uses when
+// XALGORIX_API_BASE is unset. A known provider with no default base usable
+// here (a gateway or a Custom Provider without one, a provider of another
+// protocol, or a catalog vendor whose prefix outranked a different explicit
+// provider) gets a *ConfigError rather than genericDefaultBase, so its key is
+// never sent to a host it does not belong to. The composite resolver refuses
+// these configurations too.
+func defaultBaseWithoutAPIBase(provider, explicitProvider string) (string, error) {
+	if base := providerDefaultBase(provider, explicitProvider); base != "" {
+		return base, nil
+	}
+	explicit := strings.ToLower(strings.TrimSpace(explicitProvider))
+	selected := explicit == "" || explicit == provider
+	if !isKnownProvider(provider) || (selected && sameVendorAsGenericDefault[provider]) {
+		return genericDefaultBase, nil
+	}
+	if selected {
+		return "", &ConfigError{Msg: fmt.Sprintf("no API base URL for provider %q: set XALGORIX_API_BASE to the endpoint its API key belongs to", provider)}
+	}
+	return "", &ConfigError{Msg: fmt.Sprintf("no API base URL for model prefix %q under XALGORIX_LLM_PROVIDER=%q: set XALGORIX_API_BASE to the endpoint its API key belongs to", provider, explicit)}
 }
 
 // baseServesProvider reports whether apiBase is the provider's own API
@@ -805,7 +841,10 @@ func (c *Client) resolveRequestEndpoint(ctx context.Context) (Endpoint, error) {
 		ep.Model = normalizeEndpointModel(c.cfg.LLMProvider, ep.URL, ep.Model)
 		return c.applyKeyRotation(ep), nil
 	}
-	url, model := c.resolveEndpoint()
+	url, model, err := c.resolveEndpoint()
+	if err != nil {
+		return Endpoint{}, err
+	}
 	providerID := strings.TrimSpace(c.cfg.LLMProvider)
 	if providerID == "" {
 		providerID = c.provider
@@ -986,8 +1025,10 @@ func applyAuthHeaders(req *http.Request, ep Endpoint) {
 //
 // This is the legacy single-call resolver kept on the Client so
 // the no-resolver fallback path in resolveRequestEndpoint can
-// reuse it (Requirement 2.3 — preserved endpoint shape).
-func (c *Client) resolveEndpoint() (string, string) {
+// reuse it (Requirement 2.3 — preserved endpoint shape). It returns
+// defaultBaseWithoutAPIBase's *ConfigError when there is no base URL to send
+// the request to.
+func (c *Client) resolveEndpoint() (string, string, error) {
 	apiBase := ""
 	explicitProvider := ""
 	if c.cfg != nil {
@@ -1006,12 +1047,12 @@ func (c *Client) resolveEndpoint() (string, string) {
 	}
 
 	if apiBase == "" {
-		// No explicit API base set — use provider default
-		apiBase = providerDefaultBase(provider, explicitProvider)
-		if apiBase == "" {
-			// Unknown/no provider — default to OpenAI
-			apiBase = "https://api.openai.com/v1"
+		// No explicit API base set — use the provider default.
+		base, err := defaultBaseWithoutAPIBase(provider, explicitProvider)
+		if err != nil {
+			return "", "", err
 		}
+		apiBase = base
 	}
 
 	apiBase = strings.TrimRight(apiBase, "/")
@@ -1036,7 +1077,7 @@ func (c *Client) resolveEndpoint() (string, string) {
 		url = providers.OpenAICompatibleURL(apiBase, "chat/completions")
 	}
 
-	return url, model
+	return url, model, nil
 }
 
 func isGeminiProvider(provider string) bool {

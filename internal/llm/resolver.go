@@ -309,10 +309,11 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 	apiBase := l.cfg.APIBase
 	provider, model := routingProvider(l.cfg.LLM, l.cfg.LLMProvider, apiBase)
 	if apiBase == "" {
-		apiBase = providerDefaultBase(provider, l.cfg.LLMProvider)
-		if apiBase == "" {
-			apiBase = "https://api.openai.com/v1"
+		base, err := defaultBaseWithoutAPIBase(provider, l.cfg.LLMProvider)
+		if err != nil {
+			return Endpoint{}, err
 		}
+		apiBase = base
 	}
 	apiBase = strings.TrimRight(apiBase, "/")
 
