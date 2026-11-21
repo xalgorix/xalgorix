@@ -305,11 +305,13 @@ type Config struct {
 
 	// ScanHeaders are operator-supplied custom HTTP headers ("Name: value")
 	// injected into all TARGET-facing scan traffic to identify an authorized
-	// Xalgorix run: the agent's HTTP client and, via their -H flag, bundled
-	// tools (httpx, nuclei). Built-in equivalent of Nuclei's -H/-header. Bug-
-	// bounty programs often require such a header (e.g. "X-Bug-Bounty: user");
-	// it also lets a target's WAF/SOC allow-list the scan. Never attached to
-	// non-target destinations (LLM APIs, notifications, the dashboard).
+	// Xalgorix run: the agent's HTTP client and, in each tool's own header
+	// syntax, the httpx, nuclei, curl and wget commands it runs. Built-in
+	// equivalent of Nuclei's -H/-header. Bug-bounty programs often require
+	// such a header (e.g. "X-Bug-Bounty: user"); it also lets a target's
+	// WAF/SOC allow-list the scan. The engine never attaches them to its own
+	// destinations (LLM APIs, notifications, the dashboard); a curl or wget
+	// command the agent runs carries them to whatever host it requests.
 	// XALGORIX_SCAN_HEADERS (';'/newline-separated) and/or
 	// XALGORIX_SCAN_HEADERS_FILE (one per line); repeatable -H on the CLI.
 	ScanHeaders []string
