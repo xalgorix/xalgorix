@@ -558,6 +558,6 @@ func (a *Agent) targetBoundaryPromptSection(targets []string) string {
 		b.WriteString("- This is a single-host scan. Do not enumerate subdomains (no subdomain discovery tools or certificate-transparency lookups); subdomains belong to wildcard scans. This narrows the generic scope rules above, which mention subdomains.\n")
 		b.WriteString("- Hosts on other organizations' domains that you find in the target's responses, redirects, or JavaScript (third-party APIs, CDNs, partner backends) are outside this scan: record them as notes if useful, but do not fetch, probe, or report them. The target's own subdomains that the application itself calls (such as its API or login host) may be tested. Hosts named only as payloads (SSRF, open-redirect, OOB callbacks) are fine; they test the target.\n")
 	}
-	b.WriteString("These boundaries are enforced: tool calls that cross them are refused.")
+	b.WriteString("The runtime refuses crossings it can recognize (OUTSIDE SCAN BOUNDARY error), but not all of them, so a call that goes through is not proof that it stays inside these boundaries. A refused call means that host or port is outside this scan: do not retry it in another form or through another tool.")
 	return b.String()
 }
