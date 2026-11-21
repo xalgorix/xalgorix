@@ -886,6 +886,10 @@ type Server struct {
 	// scanSummaryWalkHook, when set, runs at the end of every summary walk,
 	// before its results are shared. Tests use it to count and pace walks.
 	scanSummaryWalkHook func()
+	// runResumedQueueFn runs a queue that the startup auto-resume registered.
+	// nil in production (runRegisteredMultiScan runs it); tests set it to
+	// observe the registered run without starting real scan work.
+	runResumedQueueFn func(*multiScanRun, *config.Config)
 	// admissionWake is a buffered (len=1) channel used by runMultiScan's
 	// admission loop to wait fairly for a freed slot. A scan instance ending
 	// signals this channel non-blockingly in its defer cleanup, waking
@@ -1413,35 +1417,7 @@ func (s *Server) Start() error {
 	// on the same cancelScan field.
 	go func() {
 		time.Sleep(3 * time.Second) // let HTTP server fully initialize
-		s.queueResumeMu.Lock()
-		defer s.queueResumeMu.Unlock()
-		if s.running.Load() || s.hasQueueResumeLaunchingLocked() {
-			log.Printf("[AUTO-RESUME] Skipping — a scan execution is already active.")
-			return
-		}
-		entries := autoResumeQueueEntries(s.validQueueStateEntries(true))
-		if len(entries) == 0 {
-			return
-		}
-		log.Printf("[AUTO-RESUME] Resuming %d interrupted scan queue(s)", len(entries))
-		for _, entry := range entries {
-			if s.stopReq.Load() {
-				break
-			}
-			req := scanRequestFromQueueState(entry.state, entry.path)
-			if len(req.Targets) == 0 {
-				continue
-			}
-			instanceID := entry.state.InstanceID
-			log.Printf("[AUTO-RESUME] Resuming interrupted scan queue %s: %d targets from index %d", instanceID, len(req.Targets), entry.state.CurrentIdx)
-			scanCfg := *s.cfg
-			resumeKey := queueResumeEntryKey(entry)
-			s.markQueueResumeLaunchingLocked(resumeKey)
-			go func(e queueStateEntry, r ScanRequest, cfg config.Config, id string, key string) {
-				defer s.clearQueueResumeLaunching(key)
-				s.runMultiScan(r, &cfg, id)
-			}(entry, req, scanCfg, instanceID, resumeKey)
-		}
+		s.autoResumeInterruptedQueues()
 	}()
 
 	// ── Graceful shutdown on SIGTERM/SIGINT ──

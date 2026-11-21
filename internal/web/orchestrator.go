@@ -38,7 +38,7 @@ func isReplaceableResumePlaceholder(inst *ScanInstance) bool {
 	}
 	inst.mu.RLock()
 	defer inst.mu.RUnlock()
-	return inst.Status == "pending" && inst.agent == nil && inst.cancel == nil && inst.StopReason == "server_restart_resuming"
+	return inst.Status == "pending" && inst.agent == nil && inst.cancel == nil && inst.StopReason == stopReasonRestartResuming
 }
 
 // multiScanRun is a scan queue whose instance registerMultiScan installed in
@@ -49,6 +49,9 @@ type multiScanRun struct {
 	instanceID string
 	instance   *ScanInstance
 	ownership  *queueOwnership
+	// placeholderDir is the scan dir of the restart-recovery placeholder
+	// this run replaced, if any.
+	placeholderDir string
 }
 
 var (
@@ -153,6 +156,7 @@ func (s *Server) registerMultiScan(req ScanRequest, instanceIDs ...string) (*mul
 	}()
 	resumeReplaces := req.resumeReplaces
 	req.resumeReplaces = nil
+	placeholderDir := ""
 
 	// Register instance as pending initially
 	instance := &ScanInstance{
@@ -244,6 +248,7 @@ func (s *Server) registerMultiScan(req ScanRequest, instanceIDs ...string) (*mul
 			return nil, errInstanceIDInUse
 		}
 		existing.mu.RLock()
+		placeholderDir = existing.scanDir
 		if existing.Iterations > instance.Iterations {
 			instance.Iterations = existing.Iterations
 		}
@@ -293,7 +298,7 @@ func (s *Server) registerMultiScan(req ScanRequest, instanceIDs ...string) (*mul
 	s.instancesMu.Unlock()
 	s.dispatchMu.Unlock()
 	registered = true
-	return &multiScanRun{req: req, instanceID: instanceID, instance: instance, ownership: ownership}, nil
+	return &multiScanRun{req: req, instanceID: instanceID, instance: instance, ownership: ownership, placeholderDir: placeholderDir}, nil
 }
 
 // runRegisteredMultiScan runs a scan queue that registerMultiScan registered,
@@ -579,6 +584,9 @@ func (s *Server) runRegisteredMultiScan(run *multiScanRun, scanCfg *config.Confi
 
 	// Instance got a slot — mark that the scan ran for full cleanup
 	ranScan = true
+	// A resumed scan is running again: take its durable records out of the
+	// restart-recovery pending state now, not when a session next saves.
+	s.recordRestartResumeStarted(run)
 
 	s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
 
@@ -623,11 +631,17 @@ func (s *Server) runRegisteredMultiScan(run *multiScanRun, scanCfg *config.Confi
 		CurrentPhase: firstSelectedPhase(req.Phases),
 	})
 
-	// Discord: scan started
-	s.sendDiscordTo(scanDiscordWebhook, 0x00ff88, "🚀 Scan Started", fmt.Sprintf("**Targets:** %s\n**Mode:** %s\n**Total:** %d target(s)", strings.Join(req.Targets, ", "), req.ScanMode, totalTargets))
-	// Telegram: scan started
+	// Discord/Telegram: scan started. A resumed queue (after a restart or a
+	// pause) continues an existing scan, so say so rather than announcing a
+	// second start.
+	startTitle := "🚀 Scan Started"
+	if req.IsResume {
+		startTitle = "🔁 Scan Resumed"
+	}
+	startDesc := fmt.Sprintf("**Targets:** %s\n**Mode:** %s\n**Total:** %d target(s)", strings.Join(req.Targets, ", "), req.ScanMode, totalTargets)
+	s.sendDiscordTo(scanDiscordWebhook, 0x00ff88, startTitle, startDesc)
 	if s.telegramConfigured() {
-		s.sendTelegram(0x00ff88, "🚀 Scan Started", fmt.Sprintf("**Targets:** %s\n**Mode:** %s\n**Total:** %d target(s)", strings.Join(req.Targets, ", "), req.ScanMode, totalTargets))
+		s.sendTelegram(0x00ff88, startTitle, startDesc)
 	}
 
 	interruptedQueue := false

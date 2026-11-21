@@ -851,7 +851,7 @@ func isInterruptedRecoverableRecord(status, stopReason string) bool {
 		reason := strings.ToLower(strings.TrimSpace(stopReason))
 		return strings.HasPrefix(reason, "signal_") ||
 			reason == "panic_recovered" ||
-			reason == "server_restart_resuming" ||
+			reason == stopReasonRestartResuming ||
 			reason == "server_shutdown"
 	default:
 		return false
@@ -1264,7 +1264,10 @@ func (s *Server) attachWildcardSubScansFrom(rec *ScanRecord, entries []scanEntry
 	}
 	if isCompletedScanStatus(rec.Status) && (danglingActive || running > 0 || remaining > 0) {
 		rec.Status = "stopped"
-		if rec.StopReason == "" {
+		// A completed parent can still carry the restart-recovery marker from
+		// before its resume; on a stopped record it would read as "stopped,
+		// but about to resume".
+		if rec.StopReason == "" || rec.StopReason == stopReasonRestartResuming {
 			rec.StopReason = "incomplete_wildcard_subscans"
 		}
 		if rec.FinishedAt == "" {
@@ -1389,22 +1392,31 @@ func (s *Server) rebuildInstancesFromDisk() {
 	for i := range entries {
 		entry := &entries[i]
 		s.reconcileSavedFindingUpgrades(&entry.rec, entry.dir)
-		_, resumable := instanceIdentity(entry)
+		instID, resumable := instanceIdentity(entry)
 		if !isInterruptedRecoverableRecord(entry.rec.Status, entry.rec.StopReason) {
 			continue
 		}
 		if resumable {
+			// Queued for auto-resume: pending, never stopped, so pollers that
+			// treat "stopped" as final keep waiting for the resumed run.
 			entry.rec.Status = "pending"
-			entry.rec.StopReason = "server_restart_resuming"
+			entry.rec.StopReason = stopReasonRestartResuming
 			entry.rec.FinishedAt = ""
-		} else if entry.rec.Status != "stopped" {
+			if entry.rec.ParentTarget == "" {
+				s.markDispatchSnapshotResuming(instID)
+			}
+		} else if entry.rec.Status != "stopped" || entry.rec.StopReason == stopReasonRestartResuming {
 			// Only terminalize records that were mid-flight (running/pending)
 			// and have no resume state. A signal-stopped record with no valid
 			// queue_state is already correctly "stopped"; leave its reason
-			// intact rather than rewriting it every boot.
+			// intact rather than rewriting it every boot. A stopped record
+			// that still says it is resuming (written by older versions)
+			// contradicts itself, so give it the final reason.
 			entry.rec.Status = "stopped"
-			entry.rec.StopReason = "server_restart_no_resume_state"
-			entry.rec.FinishedAt = time.Now().Format(time.RFC3339)
+			entry.rec.StopReason = stopReasonRestartNoResumeState
+			if entry.rec.FinishedAt == "" {
+				entry.rec.FinishedAt = time.Now().Format(time.RFC3339)
+			}
 		}
 		normalizeTerminalWildcardProgress(&entry.rec)
 		s.saveScanRecordTo(&entry.rec, entry.dir)
