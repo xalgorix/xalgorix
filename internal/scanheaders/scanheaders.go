@@ -4,9 +4,10 @@
 // The headers mark every target-facing request as an authorized run, so the
 // traffic is attributable in the target's access logs and can be allow-listed
 // by its WAF/SOC. They are applied to the agent's HTTP client and passed
-// through to bundled tools that accept the same -H "Name: value" flag (httpx,
-// nuclei). They are NEVER attached to non-target destinations — LLM/provider
-// APIs, AgentMail, Discord/Telegram, or the dashboard.
+// through, in each tool's own header syntax, to the httpx, nuclei, curl and
+// wget commands the agent runs. The engine NEVER attaches them to its own
+// destinations — LLM/provider APIs, AgentMail, Discord/Telegram, or the
+// dashboard. A curl or wget command carries them to whatever host it requests.
 package scanheaders
 
 import (
