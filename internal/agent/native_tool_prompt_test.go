@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// TestNativeToolPromptRewrite verifies the two XML blocks are actually replaced.
+// TestNativeToolPromptRewrite verifies the XML blocks are actually replaced.
 //
 // This is a canary: if the upstream prompt text drifts, the constants stop
 // matching and the native channel silently keeps teaching the XML dialect. The
 // assertion on the composed input fails loudly in that case.
 func TestNativeToolPromptRewrite(t *testing.T) {
-	in := "prefix\n" + xmlCallRule + "\n\n" + xmlFormatBlock + "\nsuffix"
+	in := "prefix\n" + xmlCallRule + "\n\n" + xmlFormatBlock + "\n\n" + xmlReportRule + "\nsuffix"
 
 	out := nativeToolPromptRewrite(in)
 
@@ -26,6 +26,9 @@ func TestNativeToolPromptRewrite(t *testing.T) {
 	}
 	if !strings.Contains(out, "never reproduce them") {
 		t.Fatal("the legacy-examples warning is missing")
+	}
+	if strings.Contains(out, "EXECUTE THE XML TOOL CALL") || !strings.Contains(out, nativeReportRule) {
+		t.Fatal("the XML report rule (17b) was not replaced")
 	}
 	// The surrounding prompt must be untouched.
 	if !strings.HasPrefix(out, "prefix\n") || !strings.HasSuffix(out, "\nsuffix") {

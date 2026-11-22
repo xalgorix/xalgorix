@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -1616,6 +1617,14 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (r
 			}
 		}()
 		res, err := a.registry.Execute(toolName, toolArgs)
+		if a.nativeToolCalling {
+			// The registry words a missing-parameter error with the XML call
+			// syntax; a native model gets the JSON-arguments wording instead.
+			var missing *tools.MissingParamsError
+			if errors.As(err, &missing) {
+				missing.Native = true
+			}
+		}
 		resultCh <- toolExecResult{Result: res, Err: err}
 	}()
 
@@ -1823,6 +1832,8 @@ func (a *Agent) Run(targets []string, instruction string) {
 		a.state.MinIterations = a.cfg.MinIterations
 	}
 	a.state.ScanContextID = a.scanCtx.ID
+	// Recovery nudges word their call instructions for the active channel.
+	a.state.NativeToolCalls = a.nativeToolCalling
 	a.state.DelegatedAgent = a.delegatedAgentID != ""
 	a.state.DelegatedAgentID = a.delegatedAgentID
 	a.state.LaneScoped = a.laneScoped
