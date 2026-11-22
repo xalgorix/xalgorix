@@ -307,3 +307,216 @@ func TestWildcardStoppedParentDropsRestartMarker(t *testing.T) {
 		t.Fatalf("parent = %q/%q, want stopped without the restart marker", parent.Status, parent.StopReason)
 	}
 }
+
+// waitResumeLaunched waits until the startup auto-resume has finished
+// launching every queue it picked.
+func waitResumeLaunched(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s.queueResumeMu.Lock()
+		launching := s.hasQueueResumeLaunchingLocked()
+		s.queueResumeMu.Unlock()
+		if !launching {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the resume never finished launching")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func hasQueueState(s *Server, id string) bool {
+	for _, entry := range s.validQueueStateEntries(false) {
+		if entry.state != nil && entry.state.InstanceID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRestartResumeTemporaryErrorKeepsQueue verifies that a resume refused
+// for a reason that can clear on its own (here, a lock directory that can't be
+// created, or an exact snapshot that can't be read) leaves the scan pending
+// with its queue state, and that the next start resumes it. Finalizing these
+// as failed deleted the queue state, which for a wildcard scan is the only
+// copy of its subdomain list. The resume goes through the real
+// registerMultiScan path, lock included.
+func TestRestartResumeTemporaryErrorKeepsQueue(t *testing.T) {
+	cases := []struct {
+		name    string
+		breakIt func(t *testing.T, s *Server, id string) (restore func())
+	}{
+		{"lock directory cannot be created", func(t *testing.T, s *Server, id string) func() {
+			dir := filepath.Join(s.dataDir, ".queue-locks")
+			if err := os.RemoveAll(dir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return func() {
+				if err := os.Remove(dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{"exact snapshot cannot be read", func(t *testing.T, s *Server, id string) func() {
+			path := s.dispatchSnapshotPath(id)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o700); err != nil { // read fails with EISDIR
+				t.Fatal(err)
+			}
+			return func() {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, nil)
+			id := "550e8400-e29b-41d4-a716-44665544140" + string(rune('0'+i))
+			q := writeInterruptedQueue(t, s, id, "wildcard")
+			restarted := restartedServer(t, s)
+			restore := tc.breakIt(t, restarted, id)
+
+			restarted.runResumedQueueFn = func(*multiScanRun, *config.Config) {
+				t.Error("a refused resume must not run")
+			}
+			restarted.autoResumeInterruptedQueues()
+			waitResumeLaunched(t, restarted)
+
+			inst := restarted.instances[id]
+			inst.mu.RLock()
+			status, why := inst.Status, inst.StopReason
+			inst.mu.RUnlock()
+			if status != "pending" || why != stopReasonRestartResuming {
+				t.Fatalf("instance = %q/%q, want pending/%s", status, why, stopReasonRestartResuming)
+			}
+			if status, why := readScanStatus(t, q.dir); status != "pending" || why != stopReasonRestartResuming {
+				t.Fatalf("scan.json = %q/%q, want pending/%s", status, why, stopReasonRestartResuming)
+			}
+			if !hasQueueState(restarted, id) {
+				t.Fatal("a temporary error deleted the queue state")
+			}
+
+			restore()
+			again := restartedServer(t, restarted)
+			if run := resumeOnce(t, again); run == nil || run.instanceID != id {
+				t.Fatalf("the next start did not resume %s", id)
+			}
+		})
+	}
+}
+
+// TestRestartResumeKeepsQueueWhenFinalStatusIsNotDurable verifies that a
+// permanently refused resume keeps its queue state when its failed status
+// can't be written to the exact snapshot, so the scan never loses its queue
+// state without a durable final status.
+func TestRestartResumeKeepsQueueWhenFinalStatusIsNotDurable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only directory this test relies on")
+	}
+	s := newTestServer(t, nil)
+	const id = "550e8400-e29b-41d4-a716-446655441500"
+	writeInterruptedQueue(t, s, id, "quick")
+	restarted := restartedServer(t, s)
+	path := restarted.dispatchSnapshotPath(id)
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	restarted.runResumedQueueFn = func(*multiScanRun, *config.Config) {
+		t.Error("a refused resume must not run")
+	}
+	restarted.autoResumeInterruptedQueues()
+	waitResumeLaunched(t, restarted)
+
+	if inst := restarted.instances[id]; inst == nil || inst.Status != "failed" {
+		t.Fatalf("instance = %#v, want failed", inst)
+	}
+	if !hasQueueState(restarted, id) {
+		t.Fatal("queue state was cleared although the failed status never reached the exact snapshot")
+	}
+}
+
+// TestPlainStopOfRestartPlaceholderSettlesSnapshot verifies that stopping a
+// restart-recovery placeholder without the exact header also finalizes its
+// exact snapshot. Before, only scan.json was written, so the snapshot stayed
+// pending for good and /snapshot answered 404 once no instance was live.
+func TestPlainStopOfRestartPlaceholderSettlesSnapshot(t *testing.T) {
+	s := newTestServer(t, nil)
+	const id = "550e8400-e29b-41d4-a716-446655441600"
+	writeInterruptedQueue(t, s, id, "quick")
+	restarted := restartedServer(t, s)
+	if status, why, _ := readDispatchStatus(t, restarted, id); status != "pending" || why != stopReasonRestartResuming {
+		t.Fatalf("exact snapshot after restart = %q/%q, want pending/%s", status, why, stopReasonRestartResuming)
+	}
+
+	rr := httptest.NewRecorder()
+	restarted.handleInstanceAction(rr, httptest.NewRequest(http.MethodPost, "/api/instances/"+id+"/stop", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("plain stop: %d %s", rr.Code, rr.Body.String())
+	}
+	inst := restarted.instances[id]
+	inst.mu.RLock()
+	want, wantWhy := inst.Status, inst.StopReason
+	inst.mu.RUnlock()
+	if want != "stopped" {
+		t.Fatalf("instance after stop = %q/%q, want stopped", want, wantWhy)
+	}
+	if status, why, finished := readDispatchStatus(t, restarted, id); status != want || why != wantWhy || finished == "" {
+		t.Fatalf("exact snapshot after plain stop = %q/%q (finished_at %q), want %q/%q", status, why, finished, want, wantWhy)
+	}
+
+	// With no live instance the coordinator snapshot is served from disk.
+	again := restartedServer(t, restarted)
+	again.instancesMu.Lock()
+	delete(again.instances, id)
+	again.instancesMu.Unlock()
+	if status, _, code := apiStatus(t, again, "/api/instances/"+id+"/snapshot"); code != http.StatusOK || status != "stopped" {
+		t.Fatalf("GET /snapshot = %d %q, want 200 stopped", code, status)
+	}
+}
+
+// TestRebuildWithoutResumeStateSettlesResumingSnapshot verifies that when an
+// earlier start marked the exact snapshot as resuming and the queue state is
+// gone by the next start, the snapshot gets the same final status as
+// scan.json instead of staying pending for good.
+func TestRebuildWithoutResumeStateSettlesResumingSnapshot(t *testing.T) {
+	s := newTestServer(t, nil)
+	const id = "550e8400-e29b-41d4-a716-446655441700"
+	q := writeInterruptedQueue(t, s, id, "quick")
+	restarted := restartedServer(t, s)
+	if status, why, _ := readDispatchStatus(t, restarted, id); status != "pending" || why != stopReasonRestartResuming {
+		t.Fatalf("exact snapshot after restart = %q/%q, want pending/%s", status, why, stopReasonRestartResuming)
+	}
+	if err := restarted.clearQueueStateDurable(id); err != nil {
+		t.Fatal(err)
+	}
+
+	again := restartedServer(t, restarted)
+	if status, why := readScanStatus(t, q.dir); status != "stopped" || why != stopReasonRestartNoResumeState {
+		t.Fatalf("scan.json = %q/%q, want stopped/%s", status, why, stopReasonRestartNoResumeState)
+	}
+	if status, why, finished := readDispatchStatus(t, again, id); status != "stopped" || why != stopReasonRestartNoResumeState || finished == "" {
+		t.Fatalf("exact snapshot = %q/%q (finished_at %q), want stopped/%s", status, why, finished, stopReasonRestartNoResumeState)
+	}
+}

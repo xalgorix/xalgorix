@@ -31,13 +31,21 @@ func (s *Server) loadExactDispatchSnapshot(instanceID string) (*ScanRecord, erro
 	}
 	var rec ScanRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, err
+		return nil, &corruptDispatchSnapshotError{err: err}
 	}
 	if rec.InstanceID != instanceID || rec.ID != instanceID {
-		return nil, fmt.Errorf("dispatch snapshot identity mismatch for %q", instanceID)
+		return nil, &corruptDispatchSnapshotError{err: fmt.Errorf("dispatch snapshot identity mismatch for %q", instanceID)}
 	}
 	return &rec, nil
 }
+
+// corruptDispatchSnapshotError means an exact snapshot file was read but can
+// never be used: it does not decode, or it names another instance. Unlike an
+// I/O error, reading it again gives the same result.
+type corruptDispatchSnapshotError struct{ err error }
+
+func (e *corruptDispatchSnapshotError) Error() string { return e.err.Error() }
+func (e *corruptDispatchSnapshotError) Unwrap() error { return e.err }
 
 func (s *Server) saveExactDispatchSnapshot(rec *ScanRecord) error {
 	if rec == nil || !validDispatchID(strings.TrimSpace(rec.InstanceID)) || rec.ID != rec.InstanceID {

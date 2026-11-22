@@ -109,6 +109,9 @@ func (s *Server) persistIdleInstanceStop(inst *ScanInstance) {
 	s.instancesMu.RUnlock()
 	if registered {
 		s.persistStopToScanDir(dir, status, stopReason, finishedAt)
+		// A plain stop of a restart-recovery placeholder writes no exact
+		// snapshot, which would otherwise stay pending for good.
+		s.settleResumingDispatchSnapshot(id, inst, status, stopReason, finishedAt)
 	}
 }
 

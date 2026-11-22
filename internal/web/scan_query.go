@@ -1417,6 +1417,11 @@ func (s *Server) rebuildInstancesFromDisk() {
 			if entry.rec.FinishedAt == "" {
 				entry.rec.FinishedAt = time.Now().Format(time.RFC3339)
 			}
+			if entry.rec.ParentTarget == "" {
+				// An earlier start may have marked the exact snapshot as
+				// resuming; nothing will resume it now.
+				s.settleResumingDispatchSnapshot(instID, nil, entry.rec.Status, entry.rec.StopReason, entry.rec.FinishedAt)
+			}
 		}
 		normalizeTerminalWildcardProgress(&entry.rec)
 		s.saveScanRecordTo(&entry.rec, entry.dir)

@@ -23,6 +23,10 @@ const (
 	stopReasonRestartResumeFailed = "server_restart_resume_failed"
 )
 
+// errRestartResumeNoTargets refuses the resume of a saved queue with no
+// targets left. Every later start would refuse it the same way.
+var errRestartResumeNoTargets = errors.New("the saved queue has no targets left")
+
 // markDispatchSnapshotResuming gives the durable exact snapshot of an
 // instance that restart recovery queued for resume the same pending status as
 // its scan.json. A graceful shutdown leaves the snapshot "stopped" with a
@@ -67,7 +71,8 @@ func (s *Server) markDispatchSnapshotResuming(instanceID string) {
 // whole resumed run, and a parent that later finished with unresolved
 // children was saved as stopped with that marker.
 func (s *Server) recordRestartResumeStarted(run *multiScanRun) {
-	if run == nil || !run.req.IsResume {
+	if run == nil || !run.req.IsResume || !instanceIsRunning(run.instance) {
+		// A stop that landed between admission and here owns the records.
 		return
 	}
 	seen := make(map[string]bool, 2)
@@ -91,15 +96,21 @@ func (s *Server) recordRestartResumeStarted(run *multiScanRun) {
 		// replaced. A tombstone must never be overwritten from here.
 		return
 	}
-	run.instance.mu.RLock()
-	running := run.instance.Status == "running"
-	run.instance.mu.RUnlock()
-	if !running {
+	if !instanceIsRunning(run.instance) {
 		return
 	}
 	if err := s.persistExactInstanceSnapshotLocked(run.instance); err != nil {
 		log.Printf("[AUTO-RESUME] could not record running exact snapshot for %s: %v", run.instanceID, err)
 	}
+}
+
+func instanceIsRunning(inst *ScanInstance) bool {
+	if inst == nil {
+		return false
+	}
+	inst.mu.RLock()
+	defer inst.mu.RUnlock()
+	return inst.Status == "running"
 }
 
 // markScanDirResumeRunning rewrites the scan.json at dir from the restart
@@ -140,7 +151,7 @@ func (s *Server) autoResumeInterruptedQueues() {
 		req := scanRequestFromQueueState(entry.state, entry.path)
 		instanceID := entry.state.InstanceID
 		if len(req.Targets) == 0 {
-			s.failRestartResume(instanceID, errors.New("the saved queue has no targets left"))
+			s.failRestartResume(instanceID, errRestartResumeNoTargets)
 			continue
 		}
 		log.Printf("[AUTO-RESUME] Resuming interrupted scan queue %s: %d targets from index %d", instanceID, len(req.Targets), entry.state.CurrentIdx)
@@ -163,12 +174,28 @@ func (s *Server) autoResumeInterruptedQueues() {
 	}
 }
 
+// restartResumeRefusedForGood reports whether a refused resume would be
+// refused the same way on every later start: the durable exact snapshot is a
+// tombstone or cannot be used, or the saved queue has no targets left. Any
+// other refusal, such as a lock directory that can't be created, a file
+// descriptor limit, or an I/O error reading the snapshot, can clear on its
+// own, so the scan keeps its queue state and the next start retries it.
+func restartResumeRefusedForGood(cause error) bool {
+	var tombstoned *tombstonedDispatchError
+	var corrupt *corruptDispatchSnapshotError
+	return errors.As(cause, &tombstoned) || errors.As(cause, &corrupt) || errors.Is(cause, errRestartResumeNoTargets)
+}
+
 // failRestartResume settles the restart-recovery placeholder of a queue whose
 // automatic resume could not start. A queue that another run or process
-// drives is left alone. A durable exact stop gives the placeholder that stop;
-// any other refusal marks it failed. Either way the stop is recorded in the
-// scan.json and the exact snapshot, and the queue state is cleared so the
-// next start does not retry a resume that is known to be refused.
+// drives is left alone, and so is one whose refusal may clear on its own (see
+// restartResumeRefusedForGood): it stays pending with its queue state, and the
+// next start retries it. A durable exact stop gives the placeholder that stop;
+// any other permanent refusal marks it failed. The stop is recorded in the
+// scan.json and the exact snapshot. The queue state is cleared only once the
+// final status is durable, so the next start does not retry a resume that is
+// known to be refused, and a scan never loses its queue state (for a wildcard
+// scan, its only copy of the subdomain list) without a final status.
 //
 // No completion notification is sent: the scan did not finish.
 func (s *Server) failRestartResume(instanceID string, cause error) {
@@ -176,7 +203,11 @@ func (s *Server) failRestartResume(instanceID string, cause error) {
 		log.Printf("[AUTO-RESUME] Not resuming %s here: %v", instanceID, cause)
 		return
 	}
-	log.Printf("[AUTO-RESUME] Resume of %s could not start: %v", instanceID, cause)
+	if !restartResumeRefusedForGood(cause) {
+		log.Printf("[AUTO-RESUME] Resume of %s could not start; it stays pending with its queue state and the next start retries it: %v", instanceID, cause)
+		return
+	}
+	log.Printf("[AUTO-RESUME] Resume of %s was refused: %v", instanceID, cause)
 	s.instancesMu.RLock()
 	inst := s.instances[instanceID]
 	s.instancesMu.RUnlock()
@@ -205,17 +236,54 @@ func (s *Server) failRestartResume(instanceID string, cause error) {
 	dir := inst.scanDir
 	inst.mu.Unlock()
 
+	snapshotDurable := true // a tombstone already is
 	if tombstoned == nil {
 		// Buffer the event before the snapshot is written so it is part of it.
 		s.broadcastToInstance(instanceID, WSEvent{Type: "error", Content: "The automatic resume after a server restart could not start; the scan is marked failed."})
 		if err := s.persistExactInstanceSnapshot(inst); err != nil && validDispatchID(instanceID) {
+			snapshotDurable = false
 			log.Printf("[AUTO-RESUME] could not record failed resume in the exact snapshot for %s: %v", instanceID, err)
 		}
 	}
 	s.persistStopToScanDir(dir, status, stopReason, finishedAt)
-	if err := s.clearQueueStateDurable(instanceID); err != nil {
-		log.Printf("[AUTO-RESUME] could not clear queue state for %s: %v", instanceID, err)
+	if snapshotDurable {
+		if err := s.clearQueueStateDurable(instanceID); err != nil {
+			log.Printf("[AUTO-RESUME] could not clear queue state for %s: %v", instanceID, err)
+		}
+	} else {
+		log.Printf("[AUTO-RESUME] keeping the queue state of %s: its final status is not in the exact snapshot", instanceID)
 	}
 	s.invalidateScanListCache()
 	s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
+}
+
+// settleResumingDispatchSnapshot writes a final status into instanceID's
+// exact snapshot when restart recovery left it pending with the resuming
+// marker and no run will replace it. Without this the snapshot stayed pending
+// for good, so /snapshot answered 404 and a re-dispatch was told the scan was
+// pending. Any other snapshot, such as a tombstone or one a run or an exact
+// stop already wrote, is left as it is. When inst is set its whole state is
+// written; otherwise only the status fields change.
+func (s *Server) settleResumingDispatchSnapshot(instanceID string, inst *ScanInstance, status, stopReason, finishedAt string) {
+	instanceID = strings.TrimSpace(instanceID)
+	if !validDispatchID(instanceID) {
+		return
+	}
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	snapshot, err := s.loadExactDispatchSnapshot(instanceID)
+	if err != nil || !strings.EqualFold(snapshot.Status, "pending") || snapshot.StopReason != stopReasonRestartResuming {
+		return
+	}
+	if inst != nil {
+		err = s.persistExactInstanceSnapshotLocked(inst)
+	} else {
+		snapshot.Status = status
+		snapshot.StopReason = stopReason
+		snapshot.FinishedAt = finishedAt
+		err = s.saveExactDispatchSnapshot(snapshot)
+	}
+	if err != nil {
+		log.Printf("[AUTO-RESUME] could not record %s/%s in the exact snapshot for %s: %v", status, stopReason, instanceID, err)
+	}
 }
