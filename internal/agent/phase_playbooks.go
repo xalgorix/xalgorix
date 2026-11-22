@@ -11,8 +11,9 @@ package agent
 // every phase heading, the checklist preamble, and every small or untriggered
 // phase verbatim. The body of each large phase that plan tasks can trigger is
 // replaced by a one-line note. Before each model call the engine appends the
-// exact original text of every deferred phase that an active or next-ready
-// plan task belongs to (phase 1 while there is no plan yet). The agent sees
+// exact original text of every deferred phase in use (see phasesInUse): the
+// phases of active tasks, the phases the agent is working, and the lowest
+// phases with ready tasks (phase 1 while there is no plan yet). The agent sees
 // the same words as before for the work in front of it, not all 22 phases on
 // every call.
 //
@@ -40,9 +41,10 @@ const (
 	// 20-22 (verification, novel discovery, report) have no task of their own,
 	// so they always stay in the system prompt.
 	maxDeferredPhase = 19
-	// nextTasksForPlaybooks matches the lane-skill gate: the next three ready
-	// tasks are the work the planner brief points the agent at.
-	nextTasksForPlaybooks = 3
+	// readyPhasesForPlaybooks is how many of the lowest phases with ready
+	// tasks get their playbook ahead of time. It counts phases, not tasks, so
+	// a phase with many open tasks (recon) cannot crowd out the next one.
+	readyPhasesForPlaybooks = 2
 )
 
 var phaseHeadingRE = regexp.MustCompile(`(?m)^### PHASE (\d+)\b[^\n]*`)
@@ -102,7 +104,7 @@ func deferPhasePlaybooks(checklist string) (string, map[int]phasePlaybook) {
 }
 
 func phasePlaybookNote(phase int) string {
-	return fmt.Sprintf("\n[The full Phase %d playbook is added to the conversation, marked %s, whenever Phase %d tasks are active or next in your plan. Follow it exactly as if it were written here.]\n\n", phase, phasePlaybookMarker(phase), phase)
+	return fmt.Sprintf("\n[The full Phase %d playbook is added to the conversation, marked %s, whenever you work on Phase %d or its tasks are active or next in your plan. Follow it exactly as if it were written here.]\n\n", phase, phasePlaybookMarker(phase), phase)
 }
 
 // phasePlaybooksForPrompt applies deferral when the operator enabled it and
@@ -115,28 +117,93 @@ func (a *Agent) phasePlaybooksForPrompt(checklist string) (string, map[int]phase
 	return deferPhasePlaybooks(checklist)
 }
 
-// phasesInUse returns the phases whose playbooks the agent needs now: those
-// of active tasks and of the next ready tasks, or phase 1 before a plan
-// exists.
+// phasesInUse returns the phases whose playbooks the agent needs now:
+//
+//   - phases of active plan tasks;
+//   - phases the agent is working: a vulnerability class the engine has seen
+//     it test (VulnClassesTested, set by the deterministic coverage hooks, not
+//     by the model's prose) maps to a phase, which stays in use until every
+//     plan task of that phase is finished;
+//   - the lowest phases with ready plan tasks, counted by phase, so the work
+//     the planner points at next has its playbook before it starts;
+//   - phase 1 while there is no plan yet.
+//
+// The first version used only active tasks and the next three ready tasks.
+// Those are sorted by phase, so open recon tasks filled every slot and the
+// agent tested injection, SSRF and access control without their playbooks.
 func phasesInUse(state *ScanState) []int {
-	seen := map[int]bool{}
-	if state == nil || state.Plan == nil || len(state.Plan.Tasks) == 0 {
+	if state == nil {
 		return []int{1}
 	}
-	for _, t := range state.Plan.Tasks {
-		if t.Status == TaskActive {
-			seen[t.Phase] = true
+	seen := map[int]bool{}
+	plan := state.Plan
+	if plan == nil || len(plan.Tasks) == 0 {
+		seen[1] = true
+	} else {
+		for _, t := range plan.Tasks {
+			if t.Status == TaskActive {
+				seen[t.Phase] = true
+			}
+		}
+		for _, p := range lowestReadyPhases(plan, readyPhasesForPlaybooks) {
+			seen[p] = true
 		}
 	}
-	for _, t := range state.Plan.NextTasks(nextTasksForPlaybooks) {
-		seen[t.Phase] = true
+	for class, tested := range state.VulnClassesTested {
+		if !tested {
+			continue
+		}
+		if p := classPhase(class); p > 0 && !phaseSettled(plan, p) {
+			seen[p] = true
+		}
 	}
 	out := make([]int, 0, len(seen))
 	for p := range seen {
-		out = append(out, p)
+		if p > 0 {
+			out = append(out, p)
+		}
 	}
 	sort.Ints(out)
 	return out
+}
+
+// lowestReadyPhases returns the first n distinct phases among the plan's ready
+// tasks, lowest first.
+func lowestReadyPhases(plan *Plan, n int) []int {
+	if plan == nil || n <= 0 {
+		return nil
+	}
+	var out []int
+	for _, t := range plan.NextTasks(len(plan.Tasks)) {
+		if len(out) > 0 && out[len(out)-1] == t.Phase {
+			continue
+		}
+		out = append(out, t.Phase)
+		if len(out) == n {
+			break
+		}
+	}
+	return out
+}
+
+// phaseSettled reports whether the plan has tasks in phase and every one of
+// them is finished (completed or skipped). A phase with no plan tasks is not
+// settled: work the agent does there still needs its playbook.
+func phaseSettled(plan *Plan, phase int) bool {
+	if plan == nil {
+		return false
+	}
+	found := false
+	for _, t := range plan.Tasks {
+		if t.Phase != phase {
+			continue
+		}
+		found = true
+		if t.Status == TaskPending || t.Status == TaskActive {
+			return false
+		}
+	}
+	return found
 }
 
 // injectPhasePlaybooks appends the playbook of every deferred phase now in use

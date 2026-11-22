@@ -305,3 +305,102 @@ func TestRunSendsPhaseOnePlaybookOnTheFirstCall(t *testing.T) {
 		t.Fatal("the first request does not carry the Phase 1 playbook")
 	}
 }
+
+// requireClassPhase pins the class-to-phase mapping these tests rely on, so a
+// registry change fails loudly here instead of silently weakening the tests.
+func requireClassPhase(t *testing.T, class string, phase int) {
+	t.Helper()
+	if got := classPhase(class); got != phase {
+		t.Fatalf("class %q maps to phase %d, these tests assume %d", class, got, phase)
+	}
+}
+
+func hasPhase(phases []int, want int) bool {
+	for _, p := range phases {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPhasesInUseFollowsWorkWhileReconIsOpen reproduces the A/B run that found
+// the first trigger lacking: recon tasks stay open, so the next ready tasks
+// (sorted by phase) were all recon, and the agent tested injection without the
+// injection playbook. A class the engine has seen tested must bring its phase
+// in regardless of plan order.
+func TestPhasesInUseFollowsWorkWhileReconIsOpen(t *testing.T) {
+	requireClassPhase(t, "sqli", 6)
+	plan := NewPlan()
+	for _, id := range []string{"recon-a", "recon-b", "recon-c", "recon-d"} {
+		plan.add(&Task{ID: id, Phase: 1, Status: TaskPending})
+	}
+	plan.add(&Task{ID: "test-sqli", Phase: 6, VulnClass: "sqli", Status: TaskPending, DependsOn: []string{"recon-a"}})
+	state := &ScanState{Plan: plan, VulnClassesTested: map[string]bool{"sqli": true}}
+
+	phases := phasesInUse(state)
+	if !hasPhase(phases, 6) {
+		t.Fatalf("phasesInUse = %v: the agent is testing SQL injection but Phase 6 is not in use", phases)
+	}
+	if !hasPhase(phases, 1) {
+		t.Fatalf("phasesInUse = %v: open recon tasks must keep Phase 1 in use", phases)
+	}
+
+	// End to end: the Phase 6 playbook is delivered in that state.
+	a := startPlaybookAgent(t, &config.Config{RateLimitRPS: 2, Checklist: "full", PhasePlaybooks: true})
+	a.state = state
+	added := a.injectPhasePlaybooks()
+	if !hasPhase(added, 6) {
+		t.Fatalf("injectPhasePlaybooks added %v, want Phase 6 among them", added)
+	}
+}
+
+// TestPhasesInUseCountsReadyPhasesNotTasks verifies that many ready tasks in
+// one phase cannot crowd out the next phase with ready work.
+func TestPhasesInUseCountsReadyPhasesNotTasks(t *testing.T) {
+	plan := NewPlan()
+	for _, id := range []string{"r1", "r2", "r3", "r4", "r5"} {
+		plan.add(&Task{ID: id, Phase: 1, Status: TaskPending})
+	}
+	plan.add(&Task{ID: "cors", Phase: 4, VulnClass: "cors", Status: TaskPending})
+	plan.add(&Task{ID: "idor", Phase: 8, VulnClass: "idor", Status: TaskPending})
+	phases := phasesInUse(&ScanState{Plan: plan})
+	if !hasPhase(phases, 1) || !hasPhase(phases, 4) {
+		t.Fatalf("phasesInUse = %v, want Phases 1 and 4 (the two lowest phases with ready work)", phases)
+	}
+	if hasPhase(phases, 8) {
+		t.Fatalf("phasesInUse = %v: Phase 8 is neither active, worked, nor among the two lowest ready phases", phases)
+	}
+}
+
+// TestPhasesInUseWorkedPhaseLifetime verifies how long a worked phase stays in
+// use: while it has unfinished tasks, or when the plan has no tasks for it at
+// all, and not once all its tasks are finished.
+func TestPhasesInUseWorkedPhaseLifetime(t *testing.T) {
+	requireClassPhase(t, "dirbusting", 3)
+	requireClassPhase(t, "ssrf", 7)
+
+	plan := NewPlan()
+	plan.add(&Task{ID: "recon", Phase: 1, Status: TaskCompleted})
+	plan.add(&Task{ID: "dirs", Phase: 3, VulnClass: "dirbusting", Status: TaskPending, DependsOn: []string{"recon"}})
+	plan.add(&Task{ID: "report", Phase: 22, Status: TaskPending, DependsOn: []string{"dirs"}})
+	state := &ScanState{Plan: plan, VulnClassesTested: map[string]bool{"dirbusting": true, "ssrf": true}}
+
+	if phases := phasesInUse(state); !hasPhase(phases, 3) || !hasPhase(phases, 7) {
+		t.Fatalf("phasesInUse = %v, want Phase 3 (worked, unfinished) and Phase 7 (worked, no plan tasks)", phases)
+	}
+	plan.SetStatus("dirs", TaskCompleted)
+	if phases := phasesInUse(state); hasPhase(phases, 3) {
+		t.Fatalf("phasesInUse = %v: Phase 3 is finished and must drop out", phases)
+	}
+}
+
+// TestPhasesInUseBeforeAPlanIncludesWorkedPhases verifies that work done
+// before the plan exists still gets its playbook, alongside recon.
+func TestPhasesInUseBeforeAPlanIncludesWorkedPhases(t *testing.T) {
+	requireClassPhase(t, "sqli", 6)
+	phases := phasesInUse(&ScanState{VulnClassesTested: map[string]bool{"sqli": true}})
+	if !hasPhase(phases, 1) || !hasPhase(phases, 6) {
+		t.Fatalf("phasesInUse = %v, want Phases 1 and 6", phases)
+	}
+}
