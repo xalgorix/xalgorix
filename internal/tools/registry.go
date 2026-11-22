@@ -291,6 +291,40 @@ func (r *Registry) MatchByParams(paramNames []string) (string, bool) {
 	return bestName, true
 }
 
+// MissingParamsError reports required parameters that a tool call left out.
+// Its message shows the XML call syntax; with Native set it describes the
+// native tool channel instead, where arguments are a JSON object. Every form
+// keeps the "missing required parameter" prefix that callers match on.
+type MissingParamsError struct {
+	Tool    string
+	Missing []string
+	// Native selects the wording for a model that calls tools on the native
+	// tool channel. The registry cannot know the channel; the caller sets it.
+	Native bool
+}
+
+func (e *MissingParamsError) Error() string {
+	missing := strings.Join(e.Missing, ", ")
+	if e.Native {
+		switch {
+		case e.Tool == "report_vulnerability":
+			return fmt.Sprintf("missing required parameter for tool '%s': %s — 'title' is the only hard-required field; include it (with severity + description + exploitation_proof for a complete report) in the JSON arguments of a single report_vulnerability call. severity/description are salvaged if omitted, but proof is still enforced by the reporting policy for actionable severities", e.Tool, missing)
+		case len(e.Missing) == 1:
+			return fmt.Sprintf("missing required parameter '%s' for tool '%s' — you MUST include %q in the call's JSON arguments", e.Missing[0], e.Tool, e.Missing[0])
+		default:
+			return fmt.Sprintf("missing required parameters for tool '%s': %s — provide ALL of them in a single call (one JSON argument per field)", e.Tool, missing)
+		}
+	}
+	switch {
+	case e.Tool == "report_vulnerability":
+		return fmt.Sprintf("missing required parameter for tool '%s': %s — 'title' is the only hard-required field; include it (with severity + description + exploitation_proof for a complete report) inside a single <function=report_vulnerability>...</function> block. severity/description are salvaged if omitted, but proof is still enforced by the reporting policy for actionable severities", e.Tool, missing)
+	case len(e.Missing) == 1:
+		return fmt.Sprintf("missing required parameter '%s' for tool '%s' — you MUST include <parameter=%s>value</parameter> inside <function=%s>...</function>", e.Missing[0], e.Tool, e.Missing[0], e.Tool)
+	default:
+		return fmt.Sprintf("missing required parameters for tool '%s': %s — provide ALL of them in a single call (one <parameter=NAME>…</parameter> per field)", e.Tool, missing)
+	}
+}
+
 // Execute runs a tool by name with the given arguments.
 // Note: the caller's args map is never mutated — Execute works on a copy.
 func (r *Registry) Execute(name string, args map[string]string) (Result, error) {
@@ -341,19 +375,7 @@ func (r *Registry) Execute(name string, args map[string]string) (Result, error) 
 		}
 	}
 	if len(missing) > 0 {
-		if name == "report_vulnerability" {
-			return Result{}, fmt.Errorf(
-				"missing required parameter for tool '%s': %s — 'title' is the only hard-required field; include it (with severity + description + exploitation_proof for a complete report) inside a single <function=report_vulnerability>...</function> block. severity/description are salvaged if omitted, but proof is still enforced by the reporting policy for actionable severities",
-				name, strings.Join(missing, ", "),
-			)
-		}
-		if len(missing) == 1 {
-			return Result{}, fmt.Errorf("missing required parameter '%s' for tool '%s' — you MUST include <parameter=%s>value</parameter> inside <function=%s>...</function>", missing[0], name, missing[0], name)
-		}
-		return Result{}, fmt.Errorf(
-			"missing required parameters for tool '%s': %s — provide ALL of them in a single call (one <parameter=NAME>…</parameter> per field)",
-			name, strings.Join(missing, ", "),
-		)
+		return Result{}, &MissingParamsError{Tool: name, Missing: missing}
 	}
 
 	result, err := tool.Execute(localArgs)
