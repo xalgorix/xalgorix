@@ -175,8 +175,12 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 	a.state.Plan = plan
 	a.state.PlanBuilt = true
 	// Ground the new plan in the discovered endpoints so coverage-gap detection
-	// works against it immediately.
-	a.state.DiscoveredEndpoints = extractEndpointsFromNotes(a.state)
+	// works against it immediately. The notes inventory is MERGED into the
+	// runtime surface, exactly as hookPlanner does: replacing it would drop
+	// endpoints promoted from observed traffic, forms, and JS/API extraction
+	// (or wipe the surface when no inventory note exists), shrinking the
+	// coverage denominator and the applicability lanes derived from it.
+	a.state.DiscoveredEndpoints = mergeDiscoveredEndpoints(a.state, extractEndpointsFromNotes(a.state))
 	// Keep settled progress from the plan being replaced. This runs after the
 	// surface update so every carried status is checked against the same state
 	// the engine's own reconcile and surface refresh will see next iteration.
