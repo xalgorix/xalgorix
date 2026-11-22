@@ -194,7 +194,7 @@ func TestResolveAlias(t *testing.T) {
 		{"XSS", "testing-for-xss-vulnerabilities"},
 		{"sqli", "exploiting-sql-injection-vulnerabilities"},
 		{"sql-injection", "exploiting-sql-injection-vulnerabilities"},
-		{"ssrf", "performing-ssrf-vulnerability-exploitation"},
+		{"ssrf", "exploiting-server-side-request-forgery"},
 		{"csrf", "performing-csrf-attack-simulation"},
 		{"xxe", "testing-for-xxe-injection-vulnerabilities"},
 		{"idor", "exploiting-idor-vulnerabilities"},
@@ -204,7 +204,6 @@ func TestResolveAlias(t *testing.T) {
 		{"oauth", "exploiting-oauth-misconfiguration"},
 		{"nmap", "scanning-network-with-nmap-advanced"},
 		{"recon", "conducting-external-reconnaissance-with-osint"},
-		{"privesc", "detecting-privilege-escalation-attempts"},
 		{"bloodhound", "exploiting-active-directory-with-bloodhound"},
 		// Non-alias passthrough
 		{"some-random-name", "some-random-name"},
@@ -620,43 +619,6 @@ func TestSearchSkills_CloudOffensiveRanksAboveDefensive(t *testing.T) {
 	}
 }
 
-// TestSearchSkills_CloudDefensiveSearchableWhenRequested verifies defensive
-// cloud skills (moved to their proper categories) remain reachable for
-// explicitly defensive queries and rank above offensive skills there.
-func TestSearchSkills_CloudDefensiveSearchableWhenRequested(t *testing.T) {
-	subFS, _ := fs.Sub(embeddedSkills, "data")
-	search := makeSearchSkills(subFS)
-
-	res, err := search(map[string]string{"query": "implement cloud security posture management"})
-	if err != nil {
-		t.Fatalf("search error: %v", err)
-	}
-	defPos := strings.Index(res.Output, "implementing-cloud-security-posture-management")
-	if defPos < 0 {
-		t.Fatalf("defensive cloud skill should remain searchable when explicitly requested, got:\n%s", res.Output)
-	}
-	offPos := strings.Index(res.Output, "aws-cloud-pentesting")
-	if offPos >= 0 && offPos < defPos {
-		t.Errorf("offensive skill should not outrank explicit defensive request, got:\n%s", res.Output)
-	}
-}
-
-// TestSearchSkills_CloudDetectionSkillsFindable verifies detection-oriented
-// cloud skills still surface for detection-context queries in their new
-// category (threat-hunting).
-func TestSearchSkills_CloudDetectionSkillsFindable(t *testing.T) {
-	subFS, _ := fs.Sub(embeddedSkills, "data")
-	search := makeSearchSkills(subFS)
-
-	res, err := search(map[string]string{"query": "detect aws cloudtrail anomalies"})
-	if err != nil {
-		t.Fatalf("search error: %v", err)
-	}
-	if !strings.Contains(res.Output, "detecting-aws-cloudtrail-anomalies") {
-		t.Fatalf("expected moved detection skill to remain findable, got:\n%s", res.Output)
-	}
-}
-
 // TestSearchSkills_ForsetiNotPromoted verifies the retired (upstream-archived)
 // Forseti methodology no longer exists as a first-class skill and that its
 // historical alias resolves to the modern GCP assessment methodology.
@@ -843,7 +805,6 @@ func TestSearchSkills_MovedSkillsInNewCategories(t *testing.T) {
 	}{
 		{"devsecops pipeline sast dast security gate", "devsecops", "implementing-devsecops-security-scanning"},
 		{"rasp runtime protection block mode", "devsecops", "implementing-runtime-application-self-protection"},
-		{"coverage guided binary fuzzing crash triage afl", "binary-exploitation", "performing-fuzzing-with-aflplusplus"},
 		{"dependency confusion typosquat simulation pip-audit", "supply-chain-security", "performing-supply-chain-attack-simulation"},
 	}
 	for _, c := range cases {
@@ -924,7 +885,6 @@ func TestResolveAlias_ApplicationSecurity(t *testing.T) {
 		{"over-fetching", "application-data-exposure-testing"},
 		{"whitebox", "source-assisted-analysis"},
 		{"source-assisted", "source-assisted-analysis"},
-		{"fuzzing-with-aflplusplus", "performing-fuzzing-with-aflplusplus"},
 		{"runtime-application-self-protection", "implementing-runtime-application-self-protection"},
 		{"devsecops-security-scanning", "implementing-devsecops-security-scanning"},
 		{"supply-chain-attack-simulation", "performing-supply-chain-attack-simulation"},
@@ -1011,20 +971,6 @@ func TestSearchSkills_CloudRetrievalPrecision(t *testing.T) {
 		t.Run(c.query, func(t *testing.T) {
 			if got := first(c.query); !strings.HasPrefix(got, c.wantFirst) {
 				t.Fatalf("query %q: first result %q, want prefix %q", c.query, got, c.wantFirst)
-			}
-		})
-	}
-	for _, c := range []struct{ query, want string }{
-		{"cloudtrail anomaly detection", "detecting-aws-cloudtrail-anomalies"},
-		{"AWS Security Hub setup", "implementing-aws-security-hub"},
-	} {
-		t.Run(c.query, func(t *testing.T) {
-			res, err := search(map[string]string{"query": c.query})
-			if err != nil {
-				t.Fatalf("search %q: %v", c.query, err)
-			}
-			if !strings.Contains(res.Output, c.want) {
-				t.Fatalf("query %q: expected %q in results, got:\n%s", c.query, c.want, res.Output)
 			}
 		})
 	}

@@ -13,8 +13,8 @@ func createMockSkillsFS() fstest.MapFS {
 		"web-application-security/testing-for-xss-vulnerabilities/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: testing-for-xss-vulnerabilities\ndescription: Complete XSS testing methodology\n---\n# XSS Methodology\nDetailed payloads and verification steps."),
 		},
-		"web-application-security/performing-ssrf-vulnerability-exploitation/SKILL.md": &fstest.MapFile{
-			Data: []byte("---\nname: performing-ssrf-vulnerability-exploitation\ndescription: Complete SSRF testing methodology\n---\n# SSRF Methodology\nDetailed SSRF payloads."),
+		"web-application-security/exploiting-server-side-request-forgery/SKILL.md": &fstest.MapFile{
+			Data: []byte("---\nname: exploiting-server-side-request-forgery\ndescription: Complete SSRF testing methodology\n---\n# SSRF Methodology\nDetailed SSRF payloads."),
 		},
 		"network-security/pentesting-ssh/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: pentesting-ssh\ndescription: SSH pentesting methodology\n---\n# SSH Methodology\nAudit configurations and weak ciphers."),

@@ -27,8 +27,26 @@ The skills are dynamically injected into the agent's system prompt, allowing it 
 
 ## 📁 Skill Categories
 
+The bundled catalog is focused on web application and API security testing.
+
 | Category | Purpose |
 |----------|---------|
+| **`web-application-security`** | Exploitation methodology for web vulnerability classes (injection, XSS, SSRF, access control, request smuggling, cache attacks, and more) |
+| **`api-security`** | REST, GraphQL, RPC and WebSocket API testing |
+| **`application-security`** | Application-level flaws and secure-design weaknesses |
+| **`identity-access-management`** | OAuth, OIDC, SAML, JWT and session testing |
+| **`reconnaissance`** | Subdomain, endpoint, JavaScript and port reconnaissance |
+| **`penetration-testing`** / **`offensive-security`** | General engagement methodology |
+| **`network-services-pentesting`** | Exposed non-HTTP services on the target host |
+| **`cloud-security`** | Cloud metadata, storage and identity exposure reachable from a web app |
+| **`cryptography`** | Weak cryptography in web protocols and tokens |
+| **`ai-security`** | Attacks on LLM features inside web applications |
+| **`devsecops`** / **`supply-chain-security`** | Source and dependency review for scans with attached code |
+| **`red-teaming`** / **`vulnerability-management`** | Supporting methodology |
+| **`scan_modes`** / **`coordination`** | Engine scan modes and multi-agent coordination |
+| **`custom`** | Your own skills |
+
+----------|---------|
 | **`/vulnerabilities`** | Advanced testing techniques for core vulnerability classes like authentication bypasses, business logic flaws, and race conditions |
 | **`/frameworks`** | Specific testing methods for popular frameworks e.g. Django, Express, FastAPI, and Next.js |
 | **`/technologies`** | Specialized techniques for third-party services such as Supabase, Firebase, Auth0, and payment gateways |

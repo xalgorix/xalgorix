@@ -263,7 +263,7 @@ func installCommandSources(t *testing.T) []installSource {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sources) < 800 {
+	if len(sources) < 300 {
 		t.Fatalf("walked only %d skill files; the embedded catalog did not load", len(sources))
 	}
 	toolsDoc := filepath.Join("..", "..", "..", "tools.md")
