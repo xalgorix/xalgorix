@@ -199,6 +199,7 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_BROWSER_PATH", Label: "Browser path", Category: "Runtime", Description: "Custom Chrome/Chromium executable path.", InputType: "path"},
 		{Key: "XALGORIX_ALLOW_AUTO_INSTALL", Label: "Allow auto-install", Category: "Runtime", Description: "Permit the agent to auto-install missing packages.", DefaultValue: autoInstallDefault, InputType: "boolean"},
 		{Key: "XALGORIX_AUTO_INSTALL_SUDO", Label: "Allow sudo auto-install", Category: "Runtime", Description: "Permit sudo-prefixed auto-installs.", DefaultValue: "false", InputType: "boolean"},
+		{Key: "XALGORIX_PROCESS_ISOLATION", Label: "Process isolation", Category: "Runtime", Description: "Run each scan's commands in their own PID namespace, so they can only see and signal that scan's processes (Linux, needs root).", DefaultValue: "true", InputType: "boolean"},
 		{Key: "XALGORIX_ALLOW_ABSOLUTE_FILEEDIT", Label: "Allow absolute file edits", Category: "Runtime", Description: "Allow file-edit tooling to write absolute paths.", DefaultValue: "false", InputType: "boolean"},
 
 		{Key: "XALGORIX_USERNAME", Label: "Dashboard username", Category: "Security", Description: "Dashboard login username.", InputType: "text", RequiresRestart: true},
@@ -911,6 +912,8 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.AllowAutoInstall = parseBoolSetting(value, os.Getuid() == 0)
 		case "XALGORIX_AUTO_INSTALL_SUDO":
 			s.cfg.AllowAutoInstallSudo = parseBoolSetting(value, false)
+		case "XALGORIX_PROCESS_ISOLATION":
+			s.cfg.ProcessIsolation = parseBoolSetting(value, true)
 		case "XALGORIX_USE_PROXY":
 			s.cfg.UseProxy = parseBoolSetting(value, false)
 		case "XALGORIX_PROXY_REQUIRED":
@@ -1052,6 +1055,8 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.FormatBool(s.cfg.AllowAutoInstall)
 	case "XALGORIX_AUTO_INSTALL_SUDO":
 		return strconv.FormatBool(s.cfg.AllowAutoInstallSudo)
+	case "XALGORIX_PROCESS_ISOLATION":
+		return strconv.FormatBool(s.cfg.ProcessIsolation)
 	case "XALGORIX_USE_PROXY":
 		return strconv.FormatBool(s.cfg.UseProxy)
 	case "XALGORIX_PROXY_REQUIRED":

@@ -417,6 +417,13 @@ type Config struct {
 	AllowAutoInstall     bool // XALGORIX_ALLOW_AUTO_INSTALL - permit package auto-install (default false unless root)
 	AllowAutoInstallSudo bool // XALGORIX_AUTO_INSTALL_SUDO  - permit sudo-prefixed installs (default false)
 
+	// ProcessIsolation runs each scan's terminal and python commands in a PID
+	// namespace of their own, so ps/kill/pkill inside a scan see and reach only
+	// that scan's processes, never the host's services, the engine or another
+	// scan. Linux only, and it needs root (CAP_SYS_ADMIN); elsewhere commands
+	// run as before. XALGORIX_PROCESS_ISOLATION (default true).
+	ProcessIsolation bool
+
 	// Proxy settings
 	UseProxy      bool   // XALGORIX_USE_PROXY — enable proxy support
 	ProxyRequired bool   // XALGORIX_PROXY_REQUIRED — require one configured proxy for target-facing HTTP/browser traffic
@@ -630,6 +637,8 @@ func load() *Config {
 		// historical behavior so existing systemd deployments keep working.
 		AllowAutoInstall:     envOrBool("XALGORIX_ALLOW_AUTO_INSTALL", os.Getuid() == 0),
 		AllowAutoInstallSudo: envOrBool("XALGORIX_AUTO_INSTALL_SUDO", false),
+
+		ProcessIsolation: envOrBool("XALGORIX_PROCESS_ISOLATION", true),
 
 		// Proxy
 		UseProxy:      envOrBool("XALGORIX_USE_PROXY", false),
