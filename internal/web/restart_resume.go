@@ -129,17 +129,28 @@ func (s *Server) markScanDirResumeRunning(dir string) {
 }
 
 // autoResumeInterruptedQueues resumes every scan queue that a restart
-// interrupted. It runs once, shortly after startup. A queue whose resume
-// cannot start is given a final status instead of being left pending with no
-// run behind it.
+// interrupted. It runs once, shortly after startup. A queue whose resume is
+// refused for good is given a final status instead of being left pending with
+// no run behind it (see failRestartResume).
+//
+// A scan already running or queued does not block it. Each resumed queue
+// registers its own instance and waits for a slot in the admission loop, so
+// it can run beside a scheduled scan or an API dispatch that started first.
+// It used to skip every queue in that case, which left the pending
+// placeholders that restart recovery installed with no run behind them. Only
+// a queue that something else already runs or resumes is left alone; see
+// queueResumeSkipReasonLocked.
 func (s *Server) autoResumeInterruptedQueues() {
 	s.queueResumeMu.Lock()
 	defer s.queueResumeMu.Unlock()
-	if s.running.Load() || s.hasQueueResumeLaunchingLocked() {
-		log.Printf("[AUTO-RESUME] Skipping — a scan execution is already active.")
-		return
+	var entries []queueStateEntry
+	for _, entry := range autoResumeQueueEntries(s.validQueueStateEntries(true)) {
+		if reason := s.queueResumeSkipReasonLocked(entry); reason != "" {
+			log.Printf("[AUTO-RESUME] Leaving scan queue %s alone: %s", queueResumeEntryKey(entry), reason)
+			continue
+		}
+		entries = append(entries, entry)
 	}
-	entries := autoResumeQueueEntries(s.validQueueStateEntries(true))
 	if len(entries) == 0 {
 		return
 	}

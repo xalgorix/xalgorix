@@ -1139,6 +1139,47 @@ func queueResumeEntryKey(entry queueStateEntry) string {
 	return "legacy"
 }
 
+// queueResumeSkipReasonLocked returns why the startup auto-resume must leave a
+// saved queue alone, or "" when it may resume it. The caller holds
+// queueResumeMu.
+//
+// A queue is left alone only when something already runs or resumes it: a
+// resume launch still holding its key (from /api/queue/resume, for example),
+// a dispatch that reserved the instance ID and has not registered it yet, or
+// a registered instance under that ID other than the placeholder restart
+// recovery installed. A launch marks its key before its goroutine registers
+// the run, so in that window registerMultiScan would let a second launch of
+// the same queue through. In the other cases registerMultiScan refuses, but
+// the refused launch would still clear a launching key it shares.
+func (s *Server) queueResumeSkipReasonLocked(entry queueStateEntry) string {
+	if s.queueResumeLaunching[queueResumeEntryKey(entry)] {
+		return "a resume of this queue is already launching"
+	}
+	if entry.state == nil {
+		return ""
+	}
+	id := strings.TrimSpace(entry.state.InstanceID)
+	if id == "" {
+		return ""
+	}
+	s.dispatchMu.Lock()
+	reserved := s.dispatchReservations[id]
+	s.dispatchMu.Unlock()
+	if reserved {
+		return "a dispatch under this instance id is still starting"
+	}
+	s.instancesMu.RLock()
+	inst := s.instances[id]
+	s.instancesMu.RUnlock()
+	if inst == nil || isReplaceableResumePlaceholder(inst) {
+		return ""
+	}
+	inst.mu.RLock()
+	status := inst.Status
+	inst.mu.RUnlock()
+	return "instance is already registered as " + status
+}
+
 // Start launches the web server.
 func (s *Server) Start() error {
 	s.initDataDir()
@@ -1411,10 +1452,9 @@ func (s *Server) Start() error {
 	}
 
 	// ── Auto-resume interrupted scan queue after short startup delay ──
-	// Gate the resume on no scan having started in the meantime — without
-	// this, a user request arriving in the first 5 seconds would race with
-	// the auto-resume goroutine and both runMultiScan calls would stomp
-	// on the same cancelScan field.
+	// A scan that starts in the meantime does not stop the resume: each
+	// resumed queue waits for its own admission slot (see
+	// autoResumeInterruptedQueues).
 	go func() {
 		time.Sleep(3 * time.Second) // let HTTP server fully initialize
 		s.autoResumeInterruptedQueues()
