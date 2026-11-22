@@ -57,10 +57,10 @@ func Register(r *tools.Registry, _ string) {
 	state := newAgentSkillState()
 	r.Register(&tools.Tool{
 		Name:        "read_skill",
-		Description: "Load a structured cybersecurity skill to get deep testing/defense methodology, tooling commands, and verification steps. Use this BEFORE attempting work in a specific domain (e.g., read_skill name=analyzing-active-directory-acl-abuse). The skill catalog is sourced from the agentskills.io standard and covers offensive testing, threat hunting, DFIR, cloud, mobile, OT/ICS, AI security, and more. Don't know the exact name? Use search_skills query='<concept>' to find the right skill, or list_skills to browse categories.",
+		Description: "Load a structured security-testing skill to get deep methodology, tooling commands, and verification steps. Use this BEFORE testing a specific vulnerability class or technology (e.g., read_skill name=exploiting-server-side-request-forgery). The skill catalog follows the agentskills.io standard and covers web applications, APIs, identity (OAuth, SAML, JWT), reconnaissance, cloud exposure, exposed network services, AI features, and more. Don't know the exact name? Use search_skills query='<concept>' to find the right skill, or list_skills to browse categories.",
 		Parameters: []tools.Parameter{
-			{Name: "name", Description: "Kebab-case skill name without extension (e.g., performing-memory-forensics-with-volatility3, analyzing-active-directory-acl-abuse). Use list_skills to discover names.", Required: true},
-			{Name: "category", Description: "Optional category to disambiguate (e.g., web-application-security, threat-hunting, reconnaissance). If omitted, all categories are searched.", Required: false},
+			{Name: "name", Description: "Kebab-case skill name without extension (e.g., exploiting-oauth-misconfiguration, testing-jwt-token-security). Use list_skills to discover names.", Required: true},
+			{Name: "category", Description: "Optional category to disambiguate (e.g., web-application-security, api-security, reconnaissance). If omitted, all categories are searched.", Required: false},
 		},
 		Execute: makeReadSkillWithState(embeddedSkillsDataFS, r, state),
 	})
@@ -69,7 +69,7 @@ func Register(r *tools.Registry, _ string) {
 		Name:        "list_skills",
 		Description: "List all available skills organized by category. Call this to see what deep knowledge is available before deciding which skills to load for your current engagement.",
 		Parameters: []tools.Parameter{
-			{Name: "category", Description: "Optional category filter (e.g., web-application-security, malware-analysis, reconnaissance). Omit to list all.", Required: false},
+			{Name: "category", Description: "Optional category filter (e.g., web-application-security, api-security, reconnaissance). Omit to list all.", Required: false},
 		},
 		Execute: makeListSkillsWithState(embeddedSkillsDataFS, r, state),
 	})
@@ -78,7 +78,7 @@ func Register(r *tools.Registry, _ string) {
 		Name:        "search_skills",
 		Description: "Search the skill catalog by keywords/concept and get the most relevant skills ranked, each with its category, name, and description. Use this when you don't know a skill's exact name — e.g. search_skills query='oauth token theft' or query='payment price tampering'. Then load the best match with read_skill. Far faster than scanning list_skills category by category.",
 		Parameters: []tools.Parameter{
-			{Name: "query", Description: "Keywords or a short phrase describing what you want (e.g. 'graphql batching', 'reset password poisoning', 'kubernetes pod escape').", Required: true},
+			{Name: "query", Description: "Keywords or a short phrase describing what you want (e.g. 'graphql batching', 'reset password poisoning', 'jwt algorithm confusion').", Required: true},
 			{Name: "category", Description: "Optional category filter (e.g., web-application-security, cloud-security).", Required: false},
 			{Name: "max", Description: "Max results to return (default 10, hard cap 25).", Required: false},
 		},
