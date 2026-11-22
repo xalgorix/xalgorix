@@ -531,7 +531,7 @@ func load() *Config {
 		KeyPoolStrategy:          envOr("XALGORIX_KEY_POOL_STRATEGY", "roundrobin"),
 		DisableAutoDelegate:      envOrBool("XALGORIX_DISABLE_AUTO_DELEGATE", false),
 		DisabledSpecialists:      envOrStringSlice("XALGORIX_DISABLED_SPECIALISTS"),
-		Checklist:                envOrChecklist(envOr("XALGORIX_CHECKLIST", "full")),
+		Checklist:                NormalizeChecklist(envOr("XALGORIX_CHECKLIST", "full")),
 		LLMProfile:               envOr("XALGORIX_LLM_PROFILE", ""),
 		ReasoningEffort:          envOr("XALGORIX_REASONING_EFFORT", "high"),
 		Language:                 NormalizeLanguage(envOr("XALGORIX_LANGUAGE", DefaultLanguage)),
@@ -1139,8 +1139,11 @@ func ParseAPIKeyList(raw string) []string {
 	return out
 }
 
-// envOrChecklist validates the XALGORIX_CHECKLIST value.
-func envOrChecklist(raw string) string {
+// NormalizeChecklist validates an XALGORIX_CHECKLIST value: "professional"
+// selects the compact workflow and anything else the full checklist. The
+// dashboard settings page shares it so a value saved there reaches new scans
+// exactly as it would after a restart.
+func NormalizeChecklist(raw string) string {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	if v == "professional" {
 		return "professional"

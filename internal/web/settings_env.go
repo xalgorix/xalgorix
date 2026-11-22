@@ -915,6 +915,10 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.AllowAutoInstallSudo = parseBoolSetting(value, false)
 		case "XALGORIX_PHASE_PLAYBOOKS":
 			s.cfg.PhasePlaybooks = parseBoolSetting(value, false)
+		case "XALGORIX_DISABLE_AUTO_DELEGATE":
+			s.cfg.DisableAutoDelegate = parseBoolSetting(value, false)
+		case "XALGORIX_CHECKLIST":
+			s.cfg.Checklist = config.NormalizeChecklist(value)
 		case "XALGORIX_PROCESS_ISOLATION":
 			s.cfg.ProcessIsolation = parseBoolSetting(value, true)
 		case "XALGORIX_USE_PROXY":
