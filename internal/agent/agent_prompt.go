@@ -77,6 +77,13 @@ func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePoli
 		baseChecklist = professionalChecklist
 	}
 	checklist := rateLimitedChecklist(baseChecklist, ratePolicy)
+	// Phase playbooks (XALGORIX_PHASE_PLAYBOOKS) apply only where the full root
+	// checklist stays in the prompt; discovery and delegated agents replace it
+	// below, and the compact checklist has no large phases to defer.
+	a.phasePlaybooks = nil
+	if baseChecklist == defaultChecklist && !a.discoveryMode && a.delegatedAgentID == "" {
+		checklist, a.phasePlaybooks = a.phasePlaybooksForPrompt(checklist)
+	}
 	if instruction != "" {
 		if a.discoveryMode {
 			// Discovery mode: use ONLY the discovery instruction.

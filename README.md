@@ -763,6 +763,7 @@ Some settings require a restart because they affect process startup or server bi
 | `XALGORIX_ALLOW_AUTO_INSTALL`  | root only    | Permit automatic package installation.             |
 | `XALGORIX_AUTO_INSTALL_SUDO`   | `false`      | Permit sudo-prefixed auto-installs.                |
 | `XALGORIX_PROCESS_ISOLATION`   | `true`       | Run each scan's commands in their own PID namespace (Linux, root). |
+| `XALGORIX_PHASE_PLAYBOOKS`     | `false`      | Send each large methodology phase only while it is in use (shorter prompt per call). |
 
 ## 🔤 Provider Prefixes
 

@@ -207,6 +207,7 @@ type Agent struct {
 	// flag plus the resolved endpoint, so it is stable for the whole scan.
 	nativeToolCalling          bool
 	nativeToolDefs             []llm.ToolDefinition
+	phasePlaybooks             map[int]phasePlaybook // checklist phases deferred from the system prompt (XALGORIX_PHASE_PLAYBOOKS)
 	registry                   *tools.Registry
 	scanCtx                    *scanctx.ScanContext // per-session state (vulns, notes, terminal, browser)
 	messages                   []llm.Message
@@ -1967,6 +1968,12 @@ func (a *Agent) Run(targets []string, instruction string) {
 			a.msgMu.Lock()
 			a.messages = append(a.messages, llm.Message{Role: "user", Content: iterResult.Nudge})
 			a.msgMu.Unlock()
+		}
+		// Deferred methodology phases go in now, after this iteration's tool
+		// results and nudges, so the playbook for the work in front of the
+		// agent is in the request it is about to make.
+		if added := a.injectPhasePlaybooks(); len(added) > 0 {
+			log.Printf("[PLAYBOOK] agent %s: added phase playbook(s) %v", a.ID, added)
 		}
 		if iterResult.EmitMessage != "" {
 			a.emit(Event{Type: "message", Content: iterResult.EmitMessage, TotalTokens: tokenCount()})
