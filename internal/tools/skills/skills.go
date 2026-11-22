@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/xalgord/xalgorix/v4/internal/tools"
+	"github.com/xalgord/xalgorix/v4/internal/tools/codesearch"
 )
 
 //go:embed data/*/*/*
@@ -82,8 +83,32 @@ func Register(r *tools.Registry, _ string) {
 			{Name: "category", Description: "Optional category filter (e.g., web-application-security, cloud-security).", Required: false},
 			{Name: "max", Description: "Max results to return (default 10, hard cap 25).", Required: false},
 		},
-		Execute: makeSearchSkills(embeddedSkillsDataFS),
+		Execute: makeSearchSkillsFor(embeddedSkillsDataFS, r),
 	})
+}
+
+// whiteboxCategories hold source-review skills: static analysis, secret and
+// dependency scanning, CI/CD and supply-chain review. They are only useful
+// when the scan has source code attached, so search_skills, list_skills and
+// read_skill hide them from black-box scans instead of offering methodology
+// the agent has no code to apply to.
+var whiteboxCategories = map[string]bool{
+	"devsecops":             true,
+	"supply-chain-security": true,
+}
+
+// whiteboxHidden reports whether skills in category are hidden from the scan
+// that r belongs to: the category is source review and no source code is
+// attached. A nil registry (direct calls in tests) hides nothing.
+func whiteboxHidden(r *tools.Registry, category string) bool {
+	if r == nil || !whiteboxCategories[category] {
+		return false
+	}
+	return codesearch.GetSourceRoot(r.GetScanContextID()) == ""
+}
+
+func whiteboxHiddenMessage(what string) string {
+	return fmt.Sprintf("%s reviews source code and is available only when the scan has source code attached; this scan is black-box. Test the running application instead.", what)
 }
 
 // skillMeta is one indexed skill: its category, canonical name, a
@@ -234,12 +259,21 @@ func queryWantsDefensive(query string) bool {
 }
 
 func makeSearchSkills(fsys fs.FS) func(args map[string]string) (tools.Result, error) {
+	return makeSearchSkillsFor(fsys, nil)
+}
+
+// makeSearchSkillsFor is search_skills for the scan that reg belongs to:
+// source-review skills are left out unless that scan has source code attached.
+func makeSearchSkillsFor(fsys fs.FS, reg *tools.Registry) func(args map[string]string) (tools.Result, error) {
 	return func(args map[string]string) (tools.Result, error) {
 		query := strings.ToLower(strings.TrimSpace(args["query"]))
 		if query == "" {
 			return tools.Result{Output: "❌ Provide a 'query' (keywords or a short phrase), e.g. query='oauth token theft'."}, nil
 		}
 		filterCat := strings.TrimSpace(args["category"])
+		if whiteboxHidden(reg, filterCat) {
+			return tools.Result{Output: whiteboxHiddenMessage("The " + filterCat + " category")}, nil
+		}
 		max := 10
 		if s := strings.TrimSpace(args["max"]); s != "" {
 			if n, err := parseIntSafe(s); err == nil && n > 0 {
@@ -271,6 +305,9 @@ func makeSearchSkills(fsys fs.FS) func(args map[string]string) (tools.Result, er
 		var results []scored
 		for _, m := range buildSkillIndex(fsys) {
 			if filterCat != "" && m.category != filterCat {
+				continue
+			}
+			if whiteboxHidden(reg, m.category) {
 				continue
 			}
 			score := 0
@@ -1050,6 +1087,10 @@ func makeReadSkillWithState(fsys fs.FS, r *tools.Registry, state *agentSkillStat
 			return tools.Result{Error: errMsg}, nil
 		}
 
+		if whiteboxHidden(r, foundCategory) {
+			return tools.Result{Error: whiteboxHiddenMessage("Skill " + canonicalName)}, nil
+		}
+
 		fullOutput := noteIfCrossCategory(category, foundCategory, rawContent)
 
 		// If state or registry is nil, return full content (graceful fallback).
@@ -1257,9 +1298,16 @@ func makeListSkillsWithState(fsys fs.FS, r *tools.Registry, state *agentSkillSta
 
 		var categories []string
 		if filterCat != "" {
+			if whiteboxHidden(r, filterCat) {
+				return tools.Result{Output: whiteboxHiddenMessage("The " + filterCat + " category")}, nil
+			}
 			categories = []string{filterCat}
 		} else {
-			categories = listCategories(fsys)
+			for _, cat := range listCategories(fsys) {
+				if !whiteboxHidden(r, cat) {
+					categories = append(categories, cat)
+				}
+			}
 		}
 
 		var b strings.Builder
