@@ -127,7 +127,7 @@ func aggregateWildcardAssessment(rec *ScanRecord) {
 	// snapshot. It no longer describes an interruption once work has finished.
 	// Keep the marker on recoverable stopped/pending records and preserve
 	// explicit coordinator cancellation/failure reasons.
-	staleResume := isCompletedScanStatus(rec.Status) && rec.StopReason == "server_restart_resuming"
+	staleResume := isCompletedScanStatus(rec.Status) && rec.StopReason == stopReasonRestartResuming
 	if rec.StopReason == "" || isWildcardAssessmentReason(rec.StopReason) || staleResume {
 		rec.StopReason = reason
 	}
