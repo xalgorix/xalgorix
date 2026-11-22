@@ -12,13 +12,15 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/codesearch"
 )
 
-// nativeToolPromptRewrite swaps the two blocks of the system prompt that teach
-// the XML dialect for their native-channel equivalents. Only those blocks are
-// touched: the rest of the prompt (methodology, rate policy, tool reference) is
-// channel-agnostic and stays byte-identical.
+// nativeToolPromptRewrite swaps the blocks of the system prompt that tell the
+// model to write XML tool calls for their native-channel equivalents: the call
+// rule, the format block, and the report-submission rule (17b). Only those
+// blocks are touched: the rest of the prompt (methodology, rate policy, tool
+// reference) is channel-agnostic and stays byte-identical.
 func nativeToolPromptRewrite(prompt string) string {
 	prompt = strings.Replace(prompt, xmlCallRule, nativeCallRule, 1)
 	prompt = strings.Replace(prompt, xmlFormatBlock, nativeFormatBlock, 1)
+	prompt = strings.Replace(prompt, xmlReportRule, nativeReportRule, 1)
 	return prompt
 }
 
@@ -37,6 +39,10 @@ const (
 	nativeFormatBlock = `## Tool Call Format
 Use the native tool interface. Arguments are passed as a JSON object, not as XML tags.
 The XML examples elsewhere in this document are legacy documentation — never reproduce them.`
+
+	xmlReportRule = `17b. **EXECUTE THE XML TOOL CALL**: Writing text messages like "I have reported this" or "The tool didn't return confirmation" without emitting an actual <function=report_vulnerability> block does NOT save the vulnerability! You MUST emit the explicit <function=report_vulnerability> XML block to submit the finding.`
+
+	nativeReportRule = `17b. **EXECUTE THE TOOL CALL**: Writing text messages like "I have reported this" or "The tool didn't return confirmation" without actually calling report_vulnerability does NOT save the vulnerability! You MUST make the report_vulnerability tool call through the native tool interface to submit the finding.`
 )
 
 func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePolicy scanctx.RequestRatePolicy) string {

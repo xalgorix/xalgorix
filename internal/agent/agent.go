@@ -1823,6 +1823,8 @@ func (a *Agent) Run(targets []string, instruction string) {
 		a.state.MinIterations = a.cfg.MinIterations
 	}
 	a.state.ScanContextID = a.scanCtx.ID
+	// Recovery nudges word their call instructions for the active channel.
+	a.state.NativeToolCalls = a.nativeToolCalling
 	a.state.DelegatedAgent = a.delegatedAgentID != ""
 	a.state.DelegatedAgentID = a.delegatedAgentID
 	a.state.LaneScoped = a.laneScoped
