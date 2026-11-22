@@ -10,7 +10,8 @@
 //
 // Why both tools exist:
 //   - build_plan: replace the whole plan (used once after recon, or when the
-//     model realizes the auto-plan missed a class/endpoint).
+//     model realizes the auto-plan missed a class/endpoint). A rebuild keeps
+//     the completed/skipped status of unchanged tasks (plan_carryover.go).
 //   - update_plan: transition one task's status (pending→active→completed/
 //     skipped) as the model works it, so the plan reflects progress without a
 //     full rebuild.
@@ -45,12 +46,14 @@ type planTaskInput struct {
 func (a *Agent) registerPlanTools(reg *tools.Registry) {
 	reg.Register(&tools.Tool{
 		Name: "build_plan",
-		Description: "Build or replace the structured scan plan as an ordered task graph. " +
-			"Call this after recon once you know the real endpoint surface, OR when you realize the " +
-			"current plan missed a vuln class / endpoint. Each task is coarse-grained (e.g. " +
-			"'test /api/users for injection'), maps to a methodology phase (1-22), and may depend on " +
-			"other task IDs. The engine tracks completion and will NOT let you finish until the plan " +
-			"is complete (or the surface is exhausted). Pass tasks as a JSON array.",
+		Description: "Build the structured scan plan as an ordered task graph, once after recon " +
+			"when you know the real endpoint surface. Record progress with update_plan, not by " +
+			"rebuilding. Rebuild only if the plan missed a vuln class / endpoint: tasks whose id, " +
+			"vuln_class and endpoint are unchanged keep their completed/skipped status, so reuse " +
+			"existing ids. Each task is coarse-grained (e.g. 'test /api/users for injection'), maps " +
+			"to a methodology phase (1-22), and may depend on other task IDs. The engine will NOT " +
+			"let you finish until the plan is complete (or the surface is exhausted). Pass tasks as " +
+			"a JSON array.",
 		Parameters: []tools.Parameter{
 			{Name: "tasks", Description: "JSON array of tasks: [{\"id\",\"title\",\"phase\",\"vuln_class\",\"endpoint\",\"depends_on\":[ids],\"notes\"}]. Use stable ids like 'test-sqli'. phase is 1-22.", Required: true},
 		},
@@ -168,19 +171,31 @@ func (a *Agent) buildPlanTool(args map[string]string) (tools.Result, error) {
 		}
 	}
 
+	prev := a.state.Plan
 	a.state.Plan = plan
 	a.state.PlanBuilt = true
 	// Ground the new plan in the discovered endpoints so coverage-gap detection
 	// works against it immediately.
 	a.state.DiscoveredEndpoints = extractEndpointsFromNotes(a.state)
+	// Keep settled progress from the plan being replaced. This runs after the
+	// surface update so every carried status is checked against the same state
+	// the engine's own reconcile and surface refresh will see next iteration.
+	carry := carryOverPlanProgress(a.state, prev, plan)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Plan built: %d tasks.\n", len(plan.Tasks)))
 	for _, t := range plan.Tasks {
-		sb.WriteString(fmt.Sprintf("  • [%s] phase %d — %s\n", t.ID, t.Phase, t.Title))
+		kept := ""
+		if t.Status != TaskPending {
+			kept = " (" + planTaskStatusLabel(t) + ", kept from the previous plan)"
+		}
+		sb.WriteString(fmt.Sprintf("  • [%s] phase %d — %s%s\n", t.ID, t.Phase, t.Title, kept))
 	}
 	if len(floorClasses) > 0 {
 		sb.WriteString(fmt.Sprintf("\nCoverage floor: appended %d required-class tasks (%s). Every vulnerability class is tested before finish; these tasks close only on engine-verified endpoint x class coverage.\n", len(floorClasses), strings.Join(floorClasses, ", ")))
+	}
+	if carry.hadSettled() {
+		sb.WriteString("\n" + carry.summary())
 	}
 	if len(warnings) > 0 {
 		sb.WriteString("\nWarnings:\n")
@@ -263,68 +278,14 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 	default:
 		return tools.Result{Error: "status must be one of: active, completed, skipped, or a typed disposition (not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded) — got " + args["status"]}, nil
 	}
-	if st == TaskCompleted && isReDoSTask(t) && !a.state.VulnClassesTested["redos"] {
-		return tools.Result{Error: "ReDoS testing requires a completed bounded probe against an input before this task can be marked done. A plan update alone is not test evidence."}, nil
-	}
-	if st == TaskSkipped && isReDoSTask(t) && !a.state.VulnClassesTested["redos"] {
-		inputs := observedReDoSInputs(a.state)
-		if len(inputs) > 0 && (disposition == DispositionNotApplicable || disposition == DispositionExhausted || disposition == DispositionSuperseded || disposition == DispositionBlockedMissingSecondID) {
-			return tools.Result{Error: fmt.Sprintf(
-				"ReDoS remains testable on %d observed endpoint(s) (%s). Run a bounded probe in the final stage; only a concrete access, reachability, or policy blocker can disposition this task without a probe.",
-				len(inputs), truncList(inputs, 3))}, nil
+	if st == TaskCompleted {
+		if reason := planCompletionRejection(a.state, t, notes); reason != "" {
+			return tools.Result{Error: reason}, nil
 		}
 	}
-	// Engine coverage-floor tasks (Origin "auto" with a vulnerability class)
-	// cannot be hand-completed: a single update_plan call must not substitute
-	// for actually testing the discovered surface. reconcilePlan closes them
-	// automatically once the endpoint x class coverage matrix is complete, so
-	// a rejection here always means the class is not yet covered.
-	// The auth-session task completes on its dimension contract, not on the
-	// endpoint x class matrix (auth dimensions are tracked separately).
-	authLaneSettled := t.VulnClass == "auth" && authTaskComplete(a.state)
-	// Exploratory whole-target lanes (novel discovery, content spoofing,
-	// broken-link verification): the engine cannot mechanically verify the
-	// exploration itself, so a CONCRETE, non-vague note describing what was
-	// exercised is accepted as completion evidence.
-	exploratorySettled := t.WholeTarget && VulnClassExploratory(t.VulnClass) &&
-		!isVagueDispositionReason(notes) && len(notes) >= 40
-	if st == TaskCompleted && t.Origin == "auto" && t.VulnClass != "" && !authLaneSettled && !exploratorySettled && a.state != nil &&
-		!taskCoverageComplete(a.state, t) {
-		return tools.Result{Error: fmt.Sprintf(
-			"task %q (%s) needs coverage evidence before completion. %s Continue testing those inputs, or use status 'not_applicable' with a concrete absent-surface reason if the class does not apply. Notes alone cannot mark untested work completed.",
-			id, t.VulnClass, taskCoverageRequirement(a.state, t))}, nil
-	}
-	// ── Typed disposition validation for engine-owned coverage work ──
-	// A coverage-floor task may only be skipped with a TYPED, concrete
-	// justification. A bare no-note skip is the cheapest end-run around the
-	// coverage contract (a scan was observed issuing ten simultaneous no-note
-	// skips to satisfy the finish gate), and vague prose ("probably not
-	// applicable") launders exactly the same shortcut, so both are rejected
-	// at the transition itself. The engine independently verifies
-	// not_applicable claims against the observed surface when it can.
-	if st == TaskSkipped && t.Origin == "auto" && t.VulnClass != "" {
-		if notes == "" {
-			return tools.Result{Error: fmt.Sprintf(
-				"task %q (%s) cannot be skipped without a justification note. Use a typed status (not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded) and state the concrete surface fact (for example: 'no XML input surface exists'); otherwise test it.",
-				id, t.VulnClass)}, nil
-		}
-		if isVagueDispositionReason(notes) {
-			return tools.Result{Error: fmt.Sprintf(
-				"task %q (%s): %q is a shortcut rationale, not a disposition. State the concrete surface fact (what input/protocol/auth surface is absent or blocked), or use a typed blocked_* status with the specific blocker.",
-				id, t.VulnClass, notes)}, nil
-		}
-		if disposition == DispositionNotApplicable {
-			// Engine-verifiable N/A: when the observed surface carries no
-			// applicable endpoint for the class, the N/A is confirmed. When
-			// applicable endpoints DO exist, the note must at least name the
-			// blocking/absent surface element explicitly, and the
-			// applicability disagreement is recorded for the audit trail.
-			applicable := ApplicableEndpointsForClass(a.state, t.VulnClass)
-			if len(applicable) > 0 && len(notes) < 25 {
-				return tools.Result{Error: fmt.Sprintf(
-					"task %q (%s): the observed surface has %d endpoint(s) where %s applies (%s). not_applicable needs a concrete reason naming the absent surface element, or test the class.",
-					id, t.VulnClass, len(applicable), t.VulnClass, truncList(applicable, 3))}, nil
-			}
+	if st == TaskSkipped {
+		if reason := planSkipRejection(a.state, t, disposition, notes); reason != "" {
+			return tools.Result{Error: reason}, nil
 		}
 	}
 	// Auth-task notes carry per-dimension typed dispositions
@@ -362,6 +323,93 @@ func (a *Agent) updatePlanTool(args map[string]string) (tools.Result, error) {
 		label += " (" + disposition + ")"
 	}
 	return tools.Result{Output: fmt.Sprintf("Task %q → %s. Plan: %d pending, %d active, %d completed, %d skipped (%d%% executed; skips are not executed coverage).", id, label, pending, active, completed, skipped, plan.ProgressPct())}, nil
+}
+
+// planCompletionRejection returns why task t cannot be marked completed right
+// now, or "" when it can. update_plan applies it to every completion, and
+// build_plan applies it again to completions carried over from a replaced
+// plan, so a rebuild can never close a task the engine would refuse to close.
+func planCompletionRejection(state *ScanState, t *Task, notes string) string {
+	if state == nil || t == nil {
+		return "no scan state is available to validate the completion"
+	}
+	if isReDoSTask(t) && !state.VulnClassesTested["redos"] {
+		return "ReDoS testing requires a completed bounded probe against an input before this task can be marked done. A plan update alone is not test evidence."
+	}
+	// Engine coverage-floor tasks (Origin "auto" with a vulnerability class)
+	// cannot be hand-completed: a single update_plan call must not substitute
+	// for actually testing the discovered surface. reconcilePlan closes them
+	// automatically once the endpoint x class coverage matrix is complete, so
+	// a rejection here always means the class is not yet covered.
+	// The auth-session task completes on its dimension contract, not on the
+	// endpoint x class matrix (auth dimensions are tracked separately).
+	authLaneSettled := t.VulnClass == "auth" && authTaskComplete(state)
+	// Exploratory whole-target lanes (novel discovery, content spoofing,
+	// broken-link verification): the engine cannot mechanically verify the
+	// exploration itself, so a CONCRETE, non-vague note describing what was
+	// exercised is accepted as completion evidence.
+	exploratorySettled := t.WholeTarget && VulnClassExploratory(t.VulnClass) &&
+		!isVagueDispositionReason(notes) && len(notes) >= 40
+	if t.Origin == "auto" && t.VulnClass != "" && !authLaneSettled && !exploratorySettled &&
+		!taskCoverageComplete(state, t) {
+		return fmt.Sprintf(
+			"task %q (%s) needs coverage evidence before completion. %s Continue testing those inputs, or use status 'not_applicable' with a concrete absent-surface reason if the class does not apply. Notes alone cannot mark untested work completed.",
+			t.ID, t.VulnClass, taskCoverageRequirement(state, t))
+	}
+	return ""
+}
+
+// planSkipRejection returns why task t cannot be skipped with the given typed
+// disposition and notes right now, or "" when it can. Like
+// planCompletionRejection it is shared by update_plan and build_plan's
+// carry-over.
+func planSkipRejection(state *ScanState, t *Task, disposition, notes string) string {
+	if state == nil || t == nil {
+		return "no scan state is available to validate the disposition"
+	}
+	if isReDoSTask(t) && !state.VulnClassesTested["redos"] {
+		inputs := observedReDoSInputs(state)
+		if len(inputs) > 0 && (disposition == DispositionNotApplicable || disposition == DispositionExhausted || disposition == DispositionSuperseded || disposition == DispositionBlockedMissingSecondID) {
+			return fmt.Sprintf(
+				"ReDoS remains testable on %d observed endpoint(s) (%s). Run a bounded probe in the final stage; only a concrete access, reachability, or policy blocker can disposition this task without a probe.",
+				len(inputs), truncList(inputs, 3))
+		}
+	}
+	// ── Typed disposition validation for engine-owned coverage work ──
+	// A coverage-floor task may only be skipped with a TYPED, concrete
+	// justification. A bare no-note skip is the cheapest end-run around the
+	// coverage contract (a scan was observed issuing ten simultaneous no-note
+	// skips to satisfy the finish gate), and vague prose ("probably not
+	// applicable") launders exactly the same shortcut, so both are rejected
+	// at the transition itself. The engine independently verifies
+	// not_applicable claims against the observed surface when it can.
+	if t.Origin != "auto" || t.VulnClass == "" {
+		return ""
+	}
+	if notes == "" {
+		return fmt.Sprintf(
+			"task %q (%s) cannot be skipped without a justification note. Use a typed status (not_applicable, blocked_missing_auth, blocked_missing_second_identity, blocked_unreachable, blocked_policy, exhausted, superseded) and state the concrete surface fact (for example: 'no XML input surface exists'); otherwise test it.",
+			t.ID, t.VulnClass)
+	}
+	if isVagueDispositionReason(notes) {
+		return fmt.Sprintf(
+			"task %q (%s): %q is a shortcut rationale, not a disposition. State the concrete surface fact (what input/protocol/auth surface is absent or blocked), or use a typed blocked_* status with the specific blocker.",
+			t.ID, t.VulnClass, notes)
+	}
+	if disposition == DispositionNotApplicable {
+		// Engine-verifiable N/A: when the observed surface carries no
+		// applicable endpoint for the class, the N/A is confirmed. When
+		// applicable endpoints DO exist, the note must at least name the
+		// blocking/absent surface element explicitly, and the
+		// applicability disagreement is recorded for the audit trail.
+		applicable := ApplicableEndpointsForClass(state, t.VulnClass)
+		if len(applicable) > 0 && len(notes) < 25 {
+			return fmt.Sprintf(
+				"task %q (%s): the observed surface has %d endpoint(s) where %s applies (%s). not_applicable needs a concrete reason naming the absent surface element, or test the class.",
+				t.ID, t.VulnClass, len(applicable), t.VulnClass, truncList(applicable, 3))
+		}
+	}
+	return ""
 }
 
 func taskCoverageRequirement(state *ScanState, task *Task) string {
