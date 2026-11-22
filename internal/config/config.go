@@ -85,9 +85,11 @@ type Config struct {
 	// PhasePlaybooks sends each large methodology phase only while it is in
 	// use. The root agent's system prompt keeps every phase heading and the
 	// small phases; the bodies of large phases that plan tasks can trigger are
-	// added to the conversation, word for word, while a task in that phase is
-	// active or next. Cuts the per-call prompt; meant to be A/B-tested on
-	// findings before it is turned on. XALGORIX_PHASE_PLAYBOOKS, default false.
+	// added to the conversation, word for word, while the phase has an active
+	// task, the agent is testing one of its classes, or it is among the
+	// lowest phases with ready tasks. Cuts the per-call prompt; meant to be
+	// A/B-tested on findings before it is turned on.
+	// XALGORIX_PHASE_PLAYBOOKS, default false.
 	PhasePlaybooks bool
 
 	// AdvancePastStuckTasks changes the stall response: when a scan makes no new
