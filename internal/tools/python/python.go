@@ -143,6 +143,9 @@ func executePythonForContext(contextID string, args map[string]string) (tools.Re
 	}
 	cmd.Env = cmdEnv
 	configureProcessGroupKill(cmd)
+	// Same per-scan PID namespace as terminal commands: os.kill / pkill from a
+	// script reach only this scan's processes.
+	terminal.IsolateCommand(contextID, cmd, lease.MemoryLimitBytes())
 
 	stdout := iolimit.New(1 << 20)
 	stderr := iolimit.New(1 << 19)

@@ -780,6 +780,15 @@ func ApplyProcessLimitsWithLimit(cmd *exec.Cmd, memoryLimited bool, memLimitByte
 	setProcessLimits(cmd, memoryLimited, memLimitBytes)
 }
 
+// IsolateCommand makes cmd run inside the scan's own PID namespace, as terminal
+// commands do; python_action uses it. Call it after cmd.Path, cmd.Args and
+// cmd.Dir are final and before Start. memLimitBytes is the address-space limit
+// the command should apply to itself (0 = none). It returns false and leaves
+// cmd untouched when isolation is off or unavailable.
+func IsolateCommand(contextID string, cmd *exec.Cmd, memLimitBytes int64) bool {
+	return isolateCommand(contextID, cmd, memLimitBytes)
+}
+
 // ApplyProcessLimitsToPID is the PID-based companion to
 // ApplyProcessLimitsWithLimit. It is intended for tools that spawn their
 // child process outside of os/exec (e.g. go-rod's Launcher, which manages
@@ -1010,9 +1019,12 @@ func GetWorkDirForContext(contextID string) string {
 	return s.workDir
 }
 
-// CleanupContext removes the terminal store for a deactivated context.
+// CleanupContext removes the terminal store for a deactivated context and ends
+// the scan's process namespace, which kills anything the scan left running in
+// the background.
 func CleanupContext(contextID string) {
 	KillAllProcessesForContext(contextID)
+	releaseScanNamespace(contextID)
 	termStoresMu.Lock()
 	defer termStoresMu.Unlock()
 	delete(termStores, contextID)
@@ -1218,6 +1230,10 @@ func executeCommandWithContextID(contextID string, args map[string]string) (tool
 	// Block destructive commands
 	if reason := isBlockedCommand(command); reason != "" {
 		return tools.Result{Output: fmt.Sprintf("[BLOCKED] Destructive command rejected: %s. Xalgorix is read-only — it tests for vulnerabilities without causing damage.", reason)}, nil
+	}
+	// Block commands aimed at processes or services outside this scan.
+	if reason := processGuardReason(command, processIsolationAvailable()); reason != "" {
+		return tools.Result{Output: fmt.Sprintf("[BLOCKED] Command rejected: %s. Scan commands may only act on processes this scan started. To stop one of your own background processes, kill it by PID or with pkill -f <its command line>.", reason)}, nil
 	}
 
 	// Pre-check: install missing tools BEFORE running the command.
@@ -1625,6 +1641,10 @@ func runShellInternal(contextID string, command string) (string, int) {
 		}
 		return os.ErrProcessDone
 	}
+
+	// Run inside the scan's own PID namespace, so ps and kill reach only this
+	// scan's processes. A no-op when isolation is unavailable.
+	isolateCommand(contextID, cmd, memLimitBytes)
 
 	// Use pipes for real-time output streaming
 	stdoutPipe, err := cmd.StdoutPipe()

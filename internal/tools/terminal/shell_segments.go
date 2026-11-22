@@ -294,7 +294,15 @@ var (
 // keywords and leading redirections. "timeout 300 arjun -u x" yields
 // [timeout arjun]; "which arjun" yields [which].
 func invokedCommandChain(simple string) []string {
-	var chain []string
+	chain, _, _ := parseInvokedCommand(simple)
+	return chain
+}
+
+// parseInvokedCommand is invokedCommandChain that also returns the invoked
+// command's word as written (word) and the whitespace-separated words after it
+// (args). word and args are empty when the chain ends without a command, as in
+// "command -v x".
+func parseInvokedCommand(simple string) (chain []string, word string, args []string) {
 	fields := strings.Fields(simple)
 	for i := 0; i < len(fields); i++ {
 		tok := strings.TrimLeft(fields[i], "({!")
@@ -343,18 +351,18 @@ func invokedCommandChain(simple string) []string {
 			continue
 		case "command":
 			if i+1 < len(fields) && strings.HasPrefix(fields[i+1], "-") {
-				return append(chain, "command") // command -v/-V is a lookup, not an invocation
+				return append(chain, "command"), "", nil // command -v/-V is a lookup, not an invocation
 			}
 			continue
 		}
 		tok = strings.Trim(tok, `"'`)
 		tok = strings.TrimRight(tok, ")`;&|")
 		if tok == "" {
-			return chain
+			return chain, "", nil
 		}
-		return append(chain, strings.ToLower(path.Base(tok)))
+		return append(chain, strings.ToLower(path.Base(tok))), tok, fields[i+1:]
 	}
-	return chain
+	return chain, "", nil
 }
 
 // skipWrapperOptions advances past a wrapper's dash options (and the separate
