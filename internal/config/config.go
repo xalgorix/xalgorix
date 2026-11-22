@@ -82,6 +82,14 @@ type Config struct {
 	// parameter, and core description. XALGORIX_LEAN_TOOL_SCHEMA, default false.
 	LeanToolSchema bool
 
+	// PhasePlaybooks sends each large methodology phase only while it is in
+	// use. The root agent's system prompt keeps every phase heading and the
+	// small phases; the bodies of large phases that plan tasks can trigger are
+	// added to the conversation, word for word, while a task in that phase is
+	// active or next. Cuts the per-call prompt; meant to be A/B-tested on
+	// findings before it is turned on. XALGORIX_PHASE_PLAYBOOKS, default false.
+	PhasePlaybooks bool
+
 	// AdvancePastStuckTasks changes the stall response: when a scan makes no new
 	// assessment evidence within the idle limit, instead of terminating the
 	// WHOLE scan, the engine marks the current stalled task blocked and steers
@@ -533,6 +541,7 @@ func load() *Config {
 		ContextCompactTokens:     envOrInt("XALGORIX_CONTEXT_COMPACT_TOKENS", -1),
 		RoleScopedTools:          envOrBool("XALGORIX_ROLE_SCOPED_TOOLS", false),
 		LeanToolSchema:           envOrBool("XALGORIX_LEAN_TOOL_SCHEMA", false),
+		PhasePlaybooks:           envOrBool("XALGORIX_PHASE_PLAYBOOKS", false),
 		AdvancePastStuckTasks:    envOrBool("XALGORIX_ADVANCE_PAST_STUCK", false),
 		MaxStuckAdvances:         envOrInt("XALGORIX_MAX_STUCK_ADVANCES", 3),
 		BoundedContext:           envOrBool("XALGORIX_BOUNDED_CONTEXT", true),
