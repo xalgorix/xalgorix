@@ -224,7 +224,7 @@ Xalgorix is free and open source — self-host it forever, no strings attached. 
 
 <div align="center">
 
-[**☁️ Start a Cloud scan →**](https://www.xalgorix.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_signup) &nbsp;·&nbsp; [**💳 See pricing**](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_pricing) &nbsp;·&nbsp; [**⚖️ Full comparison & cost calculator**](https://www.xalgorix.com/hosted-vs-self-hosted?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_compare)
+[**☁️ Start a Cloud scan →**](https://www.xalgorix.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_signup) &nbsp;·&nbsp; [**💳 See pricing**](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_pricing) &nbsp;·&nbsp; [**⚖️ Full comparison & cost calculator**](https://www.xalgorix.com/hosted-vs-self-hosted?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_compare) &nbsp;·&nbsp; [**🔎 See a real sample report**](https://www.xalgorix.com/sample?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=cta_sample)
 
 </div>
 
@@ -911,7 +911,7 @@ Xalgorix is released under the Apache License 2.0. See [LICENSE](LICENSE).
 
 | Resource      | Link                                                                             |
 | ------------- | -------------------------------------------------------------------------------- |
-| ☁️ Xalgorix Cloud | [www.xalgorix.com](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=links_table) · [pricing](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=links_table_pricing) |
+| ☁️ Xalgorix Cloud | [www.xalgorix.com](https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=links_table) · [pricing](https://www.xalgorix.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=links_table_pricing) · [sample report](https://www.xalgorix.com/sample?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=links_table_sample) |
 | 🤖 GitHub App     | [Free security review on every PR](https://github.com/apps/xalgorix)              |
 | 📖 Documentation | [docs.xalgorix.com](https://docs.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_docs&utm_content=links_table)   |
 | 💬 Questions     | [GitHub Discussions](https://github.com/xalgorix/xalgorix/discussions)             |
