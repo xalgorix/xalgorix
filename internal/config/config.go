@@ -1140,13 +1140,16 @@ func ParseAPIKeyList(raw string) []string {
 }
 
 // NormalizeChecklist validates an XALGORIX_CHECKLIST value: "professional"
-// selects the compact workflow and anything else the full checklist. The
-// dashboard settings page shares it so a value saved there reaches new scans
-// exactly as it would after a restart.
+// selects the shortest workflow, "compact" the trimmed 22-phase checklist, and
+// anything else the full checklist. The dashboard settings page shares it so a
+// value saved there reaches new scans exactly as it would after a restart.
 func NormalizeChecklist(raw string) string {
-	v := strings.ToLower(strings.TrimSpace(raw))
-	if v == "professional" {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "professional":
 		return "professional"
+	case "compact":
+		return "compact"
+	default:
+		return "full"
 	}
-	return "full"
 }
