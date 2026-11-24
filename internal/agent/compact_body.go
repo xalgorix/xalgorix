@@ -2,17 +2,31 @@ package agent
 
 import "strings"
 
-// compactReportingBlock replaces the fixed body's reporting run — the eight
-// sub-sections from "Vulnerability Reporting Rules (STRICT)" through the
-// "Reporting" tail (reporting rules, what-NOT-to-report, the severity table,
-// the CVSS vector glossary, when-to-report, proof-integrity, and WAF bypass) —
-// with one consolidated block. Every rule is kept, stated once; only the CVSS
+// isLeanChecklist reports whether the checklist mode is one of the token-lean
+// modes (compact or professional) that also get the consolidated body and lazy
+// skill loading. Full mode (the default) keeps the verbose body.
+func isLeanChecklist(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "compact", "professional":
+		return true
+	}
+	return false
+}
+
+// compactReportingBlock replaces the fixed body's reporting run — the seven
+// sub-sections from "What NOT to Report" through the "Reporting" tail
+// (what-NOT-to-report, the severity table, the CVSS vector glossary,
+// when-to-report, proof-integrity, WAF bypass, and the reporting tail) — with
+// one consolidated block. Every rule is kept, stated once; only the CVSS
 // component glossary (AV/AC/PR/… meanings the model already knows) and nine of
 // the eleven worked example vectors are dropped, since the severity table
-// already carries examples. The core EVIDENCE STANDARD proof bar that precedes
-// this run is left untouched. ~7.8KB -> ~3.4KB.
+// already carries examples.
+//
+// The "Vulnerability Reporting Rules (STRICT)" block BEFORE this run is left in
+// place: it carries the real-time / chain / IDOR rules and, crucially, rule 17b
+// whose exact text the native-tool rewrite swaps (xmlReportRule -> nativeReportRule).
+// The core EVIDENCE STANDARD proof bar before it is also untouched. ~6.5KB -> ~3.2KB.
 const compactReportingBlock = `### Reporting & proof rules
-- REPORT IN REAL-TIME: the moment you confirm a vuln, emit the actual <function=report_vulnerability> XML block that same or next turn — never defer to Phase 22, and never write "I reported this" without emitting the block (prose does not save a finding). Report each distinct proven issue as you find it. Chain findings for impact (info leak -> credential -> account takeover -> RCE), test IDOR on EVERY endpoint, and report an open redirect only when chained (OAuth token theft, SSRF, phishing).
 - NOT vulnerabilities — record as INFO only, never a finding: outdated version numbers (unless you actually EXPLOIT them), missing security headers (Server, X-Powered-By, X-Frame-Options, Content-Security-Policy, HSTS), missing HttpOnly/Secure/SameSite cookie flags, version/info disclosure, TRACE enabled, directory listing with no sensitive data, SPF/DKIM/DMARC config, weak TLS/SSL ciphers, self-XSS.
 - Severity MUST match the CVSS 3.1 score (report_vulnerability enforces label<->score):
   - 9.0-10.0 CRITICAL — RCE, full database dump, mass account takeover, SSRF -> cloud keys / full compromise.
@@ -34,7 +48,7 @@ const compactReportingBlock = `### Reporting & proof rules
 // a tighter body as well as a tighter checklist. The core EVIDENCE STANDARD
 // proof bar and the scope/authorization safety text are left intact.
 func applyCompactBody(prompt string) string {
-	const startMarker = "### Vulnerability Reporting Rules (STRICT)"
+	const startMarker = "### CRITICAL: What NOT to Report as Vulnerability"
 	const endMarker = "## Tool Call Format"
 	if !strings.Contains(prompt, startMarker) || !strings.Contains(prompt, endMarker) {
 		return prompt

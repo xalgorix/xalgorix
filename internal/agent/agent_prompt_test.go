@@ -333,8 +333,12 @@ func TestWhiteboxGuidanceText(t *testing.T) {
 
 func TestSystemPromptIncludesProofIntegrityRule(t *testing.T) {
 	registry := tools.NewRegistry()
+	// Full mode keeps the proof-integrity rule verbatim with its own header. The
+	// lean modes (compact/professional) consolidate it into the "Reporting &
+	// proof rules" block; that the rule's content survives there is covered by
+	// TestCompactBodyKeepsReportingRules.
 	agent := &Agent{
-		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "professional"},
+		cfg:      &config.Config{RateLimitRPS: 2, Checklist: "full"},
 		registry: registry,
 	}
 	prompt := agent.buildSystemPrompt(

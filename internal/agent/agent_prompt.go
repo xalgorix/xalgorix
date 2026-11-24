@@ -490,11 +490,12 @@ You have access to **expert-level vulnerability skills** via the read_skill and 
 	if !isExplicitCTFMission(instruction) {
 		prompt = applyProfessionalAssessmentPrompt(prompt)
 	}
-	// Compact checklist mode also tightens the fixed body: the reporting /
-	// severity / CVSS / proof-integrity / WAF run is consolidated into one block
-	// (same rules, stated once). Runs after the professional/skills rewrites,
-	// whose markers it does not touch. See compact_body.go.
-	if checklistMode == "compact" {
+	// The token-lean checklist modes (compact and professional) also tighten the
+	// fixed body: the reporting / severity / CVSS / proof-integrity / WAF run is
+	// consolidated into one block (same rules, stated once). Runs after the
+	// professional/skills rewrites, whose markers it does not touch. Full mode
+	// keeps the verbose body. See compact_body.go.
+	if isLeanChecklist(checklistMode) {
 		prompt = applyCompactBody(prompt)
 	}
 	if a.delegatedAgentID != "" {
@@ -1833,9 +1834,10 @@ func (a *Agent) buildClosingInstruction(instruction string) string {
 The delegated task is your complete mission. Do not widen into the root's full methodology and do not delegate again. Use the relevant skills and deterministic verifiers for this lane, close every hypothesis you claim, report every distinct proven issue, then return to the coordinator once the assigned lane is exhausted.`
 	}
 	if instruction == "" {
-		if a.cfg != nil && strings.EqualFold(strings.TrimSpace(a.cfg.Checklist), "compact") {
-			// Compact mode: lazy, single-skill loading. Don't preload a batch of
-			// skills after recon; read one only when a live finding needs it.
+		if a.cfg != nil && isLeanChecklist(a.cfg.Checklist) {
+			// Lean modes (compact/professional): lazy, single-skill loading. Don't
+			// preload a batch of skills after recon; read one only when a live
+			// finding needs it.
 			return "START with Phase 1 recon. After each phase, review your notes, identify gaps, and test deeper. Load a skill only when a live observation needs its specific technique — one at a time via read_skill, never a batch up front."
 		}
 		return "START with Phase 1 recon. After each phase, review your notes, identify gaps, and test deeper. After recon, call list_skills and load relevant skills before vulnerability testing!"

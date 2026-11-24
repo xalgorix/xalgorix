@@ -134,3 +134,48 @@ func TestCompactModeLoadsSkillsLazily(t *testing.T) {
 		t.Skip("full checklist no longer has the eager recon-skill batch; lazy test is moot")
 	}
 }
+
+// Professional mode is also a lean mode: it must get the same consolidated body
+// and lazy skill loading, keeping every rule, while full mode keeps the verbose
+// body.
+func TestProfessionalModeAlsoGetsCompactBody(t *testing.T) {
+	if !isLeanChecklist("professional") || !isLeanChecklist("compact") || isLeanChecklist("full") {
+		t.Fatalf("isLeanChecklist wrong: compact/professional lean, full not")
+	}
+	full := compactAgentPrompt(t, "full")
+	pro := compactAgentPrompt(t, "professional")
+
+	// Consolidation happened in professional too.
+	if !strings.Contains(pro, "### Reporting & proof rules") {
+		t.Fatal("professional mode is missing the consolidated reporting block")
+	}
+	for _, gone := range []string{
+		"### HackerOne Severity Classification",
+		"### CVSS Vector String (REQUIRED with every report)",
+		"### WAF Bypass Rules (MANDATORY)",
+	} {
+		if strings.Contains(pro, gone) {
+			t.Errorf("professional mode still has the un-consolidated header %q", gone)
+		}
+	}
+	// Full mode keeps the verbose body (the consolidation is lean-mode only).
+	if strings.Contains(full, "### Reporting & proof rules") {
+		t.Error("full mode unexpectedly got the consolidated body")
+	}
+	if !strings.Contains(full, "### HackerOne Severity Classification") {
+		t.Error("full mode lost its verbose severity section — update this test")
+	}
+	// Every required reporting token survives in professional as well.
+	for _, pat := range []string{
+		`report_vulnerability`, `CVSS:3\.1/AV`, `(?i)byte-for-byte`, `9\.0-10\.0`,
+		`7\.0-8\.9`, `(?i)UNREACHABLE`, `X-Frame-Options`, `(?i)every role|EVERY role`,
+	} {
+		if !regexp.MustCompile(pat).MatchString(pro) {
+			t.Errorf("professional body dropped required token %q", pat)
+		}
+	}
+	// Lean modes are smaller than full.
+	if len(pro) >= len(full) {
+		t.Fatalf("professional prompt (%d) is not smaller than full (%d)", len(pro), len(full))
+	}
+}
