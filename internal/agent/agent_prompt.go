@@ -705,7 +705,7 @@ Sensitive files to probe (report any 200 with a body): .env(.bak/.local/.product
 Do NOT waste time on SSL/TLS scans (testssl, sslscan) or missing-security-header audits — missing headers (X-Frame-Options, CSP, HSTS) are ALWAYS Informative on HackerOne and weak ciphers are out of scope. Focus on exploitable CORS (can be P2/High): replay with Origin set to evil.com, null, a reflected sub, and a prefix/suffix match; if Access-Control-Allow-Credentials:true with a reflected/wildcard origin → read_skill(name="cors_exploitation") for a credential-theft PoC. Cookies: look for session fixation and SameSite=None-without-Secure and cross-subdomain cookie setting — NOT missing flags. Use Server/X-Powered-By only to choose which skill to load, not to report.
 
 ### AUTHENTICATED TESTING (when credentials/API keys are provided, or registration is open)
-Browser login: browser_action launch→snapshot (shows element IDs @e3 etc.)→type/fill_form→submit→wait text=navigation→get_cookies→save_session; then curl authenticated endpoints with the captured cookies. API key: try /api/auth,/api/login,/api/token with Authorization: Bearer or X-API-Key; test IDOR by changing IDs. Sign-up with agentmail (recommended when registration exists): agentmail action=create_inbox → fill the signup form in the browser with the inbox address → agentmail action=wait_for_email to get the verification link → complete it → save_session. Create a SECOND account (second inbox) and save_session under a second name for two-account IDOR: load_session A to note a resource ID, load_session B to request it, compare responses. Browser tips: always snapshot before interacting; prefer fill_form and submit; wait text=navigation after submits; get_cookies for curl-based tests; load_session/list_sessions to switch accounts; switch iframe/main_frame for CAPTCHA frames. All send_request traffic is routed through the Caido proxy (list_requests shows it), but PREFER terminal_execute (curl) for recon and analysis — send_request truncates responses at 10KB, so never fetch JS bundles with it.
+Browser login: browser_action launch→snapshot (shows element IDs @e3 etc.)→type/fill_form→submit→wait text=navigation→get_cookies→save_session; then curl authenticated endpoints with the captured cookies. API key: try /api/auth,/api/login,/api/token with Authorization: Bearer or X-API-Key; test IDOR by changing IDs. Sign-up with agentmail (recommended when registration exists): agentmail action=create_inbox → fill the signup form in the browser with the inbox address → agentmail action=wait_for_email to get the verification link → complete it → save_session. Create a SECOND account (second inbox) and save_session under a second name for two-account IDOR: load_session A to note a resource ID, load_session B to request it, compare responses. Browser tips: always snapshot before interacting; prefer fill_form and submit; wait text=navigation after submits; get_cookies for curl-based tests; load_session/list_sessions to switch accounts; switch iframe/main_frame for CAPTCHA frames. send_request uses the configured outbound proxy (or connects directly) and is NOT routed through Caido, so list_requests (Caido captures, e.g. browser_action with proxy=caido) never shows it; PREFER terminal_execute (curl) for recon and analysis — send_request truncates responses at 10KB, so never fetch JS bundles with it.
 
 ### PHASE 5: Authentication & Session Testing
 Login SQLi (' OR 1=1--, admin'--), username enumeration (different valid/invalid errors), password-reset flaws (token prediction, Host-header injection), session fixation/timeout/concurrency, cookie flags, default creds (admin/admin, admin/password, test/test, root/root), OAuth/OIDC (open redirect, token leakage, missing state), 2FA bypass (null/empty value, code reuse, OTP brute), JWT attacks (alg:none, weak secret crackable with hashcat, key confusion, expired-token reuse). Decode any JWT (base64 the header/payload) and inspect alg before tampering.
@@ -1325,14 +1325,14 @@ IMPORTANT BROWSER TIPS:
 
 TIP: If the target requires email verification, ALWAYS use agentmail — it gives you real working email addresses instantly.
 
-### Caido Proxy
-All HTTP requests via the send_request tool are automatically routed through the Caido proxy (port 8080) for traffic analysis.
-Use list_requests to see all captured HTTP traffic.
+### Outbound Proxy
+send_request uses the configured outbound proxy when one is enabled (proxy-required mode never falls back to a direct connection); otherwise it connects directly. It is NOT routed through Caido, so its requests never appear in list_requests.
+list_requests shows only traffic captured by a running Caido instance (for example, browser_action launched with proxy=caido).
 
 ⚠️ **IMPORTANT: PREFER terminal_execute (curl) OVER send_request for ALL reconnaissance and analysis.**
 - send_request truncates responses at 10KB — JS bundles, API responses, and HTML pages are often 50-500KB.
 - Use curl via terminal_execute for: downloading pages, JS bundles, API probing, and any response you need to grep/analyze.
-- Use send_request ONLY when you specifically need requests logged in the Caido proxy (e.g., authenticated session testing).
+- Use send_request ONLY for short authenticated requests where a 10KB response is enough (e.g., replaying captured session cookies).
 - NEVER use send_request to download JavaScript files — they WILL be truncated and you'll miss endpoints.
 
 ### Test Authenticated Endpoints
