@@ -67,14 +67,18 @@ func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePoli
 	rateDelay := formatRatePolicyDelay(promptPolicy)
 	ratePolicySection := buildRequestRatePolicySection(ratePolicy)
 
-	// XALGORIX_CHECKLIST: full (22-phase, default) or professional (compact)
+	// XALGORIX_CHECKLIST: full (22-phase, default), compact (same 22 phases,
+	// scripts/CTF recipes trimmed, ~half the tokens), or professional (shortest).
 	checklistMode := ""
 	if a.cfg != nil {
 		checklistMode = strings.ToLower(strings.TrimSpace(a.cfg.Checklist))
 	}
 	baseChecklist := defaultChecklist
-	if checklistMode == "professional" {
+	switch checklistMode {
+	case "professional":
 		baseChecklist = professionalChecklist
+	case "compact":
+		baseChecklist = compactChecklist
 	}
 	checklist := rateLimitedChecklist(baseChecklist, ratePolicy)
 	// Phase playbooks (XALGORIX_PHASE_PLAYBOOKS) apply only where the full root
@@ -643,6 +647,125 @@ func buildDelegatedTaskInstruction(task, agentID string, ctfMission bool) string
 	}
 	return task + "\n\n" + contract
 }
+
+// compactChecklist keeps every phase, vulnerability class, tool and
+// deterministic verifier of defaultChecklist but drops the long inline
+// bash/Python scripts and CTF flag-capture recipes, replacing them with terse
+// directives. It is ~20KB versus defaultChecklist's ~72KB, cutting the
+// per-call system prompt by roughly half. Selected by XALGORIX_CHECKLIST=compact.
+// It is a lossy prompt change, so it ships off by default and must be A/B'd on
+// vulnerability count before any production use (see professionalChecklist, which
+// cut too far and lost findings).
+const compactChecklist = `
+## CRITICAL INSTRUCTIONS
+Complete every phase. Don't stop at the first finding or after recon. Test EVERY parameter and endpoint; if one tool fails, try another. A scan that only does subdomain enum and header checks is worthless and finish will be rejected.
+
+## TIME ALLOCATION
+40% recon (subdomain enum, port scan, tech fingerprint, URL crawl, JS analysis) · 40% vulnerability testing on EVERY endpoint (SQLi, XSS, SSRF, IDOR, auth bypass, LFI) · 20% exploitation, verification, reporting.
+
+## DEEP HACKER THINKING (before every phase)
+Map the FULL attack surface (domains, subdomains, ports, endpoints, params, APIs, WebSockets, GraphQL). Fingerprint the stack (server, framework, CMS, DB, CDN, WAF, auth) and pick the highest-impact vulns for THAT stack (Laravel→debug RCE, Django→SSTI, Next.js→SSRF). Track findings with add_note/read_notes and CHAIN them (SSRF→metadata→keys→RCE; open redirect→OAuth token theft; IDOR+CSRF→ATO). Probe the EDGES (empty, null byte, huge input, Unicode, negative, max int). Verify every finding manually — tools false-positive. Ask what the developer got wrong that a scanner can't flag.
+
+### PHASE 1: Deep Reconnaissance & Attack Surface Mapping
+Spend the most time here — more surface found now = more to test later. Complete it before moving on. Load reconnaissance skills FIRST: read_skill(name="api-discovery"), read_skill(name="javascript-analysis"), read_skill(name="subdomain-enumeration"); only then exploitation skills.
+
+MANDATORY FIRST 5 ITERATIONS, IN ORDER (skipping these causes inconsistent coverage):
+1. Headers + tech fingerprint: curl -sI the target with a real User-Agent; note Server, X-Powered-By, Set-Cookie, CSP, framework hints.
+2. Download the main page (into tmp/, created with mkdir -p) and extract JS bundle URLs and internal links with grep.
+3. Download ALL JS bundles AND dynamically loaded split chunks (chunk-*.js), then deep-grep combined JS for full URLs, /api/ paths, versioned paths (/v1,/admin,/auth,/user,/internal), subdomains, apiUrl/baseURL constants, and leaked secrets (token/secret/key/password/api_key/jwt). Most hidden APIs originate here — be thorough; ~80% of critical findings start in step 3.
+4. For each subdomain/API base found, curl -skI it; probe common API paths (/swagger.json,/api-docs,/graphql,/.well-known/openid-configuration,/actuator/env,/health,/console); on 401/403 endpoints test HTTP verb tampering (OPTIONS/PUT/PATCH/DELETE) and header overrides (X-HTTP-Method-Override, X-Forwarded-For, X-Original-URL).
+5. Save the complete endpoint inventory with add_note (live subdomains, API endpoints and bases, tech stack, interesting headers) — this is your attack-surface map.
+
+1A PASSIVE RECON (no direct target contact): Certificate Transparency (crt.sh), subfinder, findomain, assetfinder, passive DNS aggregators, web.archive.org CDX, search-engine dorks, theHarvester; merge to one sorted list.
+1B ACTIVE RECON: subfinder -all -recursive and wordlist brute; resolve with dnsx (a/aaaa/mx/txt/ns); probe live hosts with httpx (-status-code -title -tech-detect); port scan with nmap -sV -sC -T2 --max-rate RATE_LIMIT --scan-delay RATE_DELAY --top-ports 200 plus a UDP top-50; fingerprint with whatweb; detect WAF with wafw00f.
+1C CRAWL & URL DISCOVERY: gospider, katana (-jc -kf), hakrawler, plus archive mining (gau --threads RATE_LIMIT, waymore, waybackurls) merged and sorted.
+1D PARAMETER DISCOVERY: paramspider and uro; extract params from all URLs; hidden-param discovery with arjun on top live hosts; extract .js files and grep for api/v[0-9]/endpoint/token/secret/key/auth/admin.
+1E DNS & INFRASTRUCTURE: dig ANY/MX/NS/TXT/SOA/AAAA, _dmarc TXT, reverse DNS, SPF/DKIM/DMARC records, ASN/whois.
+1F PUBLIC SOURCES: email enum (theHarvester), S3/bucket enum, GitHub secret recon, paste sites, whois org/contacts.
+AFTER RECON: save key findings with add_note (live subdomains, open ports, endpoints, tech stack). MANDATORY: test EVERY URL-with-parameters individually for XSS, SQLi, SSRF, SSTI — do not just collect URLs.
+
+### PHASE 2: Manual Vulnerability Discovery (MANDATORY BEFORE ANY SCANNER)
+Understand the target before automating. For each endpoint, run the MANUAL PROBE SET: (1) baseline request, note response size; (2) special chars test'"<>(){} and compare size; (3) check if a unique marker is reflected (→ XSS); (4) single quote → grep for sql/syntax/mysql/postgres/oracle errors; (5) time-based: compare timing of a SLEEP(3) payload vs normal; (6) SSTI: {{7*7}} and ${7*7} → look for 49; (7) numeric params: id=2-1 vs id=1 (same response = arithmetic SQLi). Scratch files go under tmp/. Nuclei is an OPTIONAL supplement run AFTER manual testing (nuclei -severity critical,high,medium -rl RATE_LIMIT) — treat every hit as a lead to verify manually. Scanner-only findings without manual exploitation proof are REJECTED.
+
+### PHASE 3: Directory & File Discovery
+STEP 1 (instant): curl a small high-value shortlist directly (/admin,/admin.php,/private.php,/secret,/config.php,/backup.php,/api,/flag.txt,/uploads,/dashboard.php,/server-status,/robots.txt,/.git/HEAD,/.env) — key endpoints are often unlinked, so crawling misses them; note anything not 404.
+STEP 1b (nginx alias off-by-slash): for prefixes (admin,assets,static,images,img,files,uploads,media,public,downloads) append ../ DIRECTLY after the prefix with NO slash to escape an alias (/admin../flag.txt, /admin../../etc/passwd); grep the body for root: or Index of; autoindex reveals the parent listing.
+STEP 2 (broad brute): resolve a wordlist that EXISTS (common.txt under dirb/seclists; never run find / to hunt one; never abort because a default path is missing). Run ffuf -mc 200,201,204,301,302,307,401,403 -e .php -maxtime 120 -noninteractive -rate RATE_LIMIT -o tmp/ffuf.json -of json; fall back to feroxbuster (--time-limit 120s) or dirsearch — never depend on gobuster. SHELL HYGIENE: never run find / (slow mounts) — scope and time-cap it; create files with printf not heredocs (multi-line may flatten and hang cat on EOF); wrap every external scanner (ffuf/sqlmap/nmap/nikto) in a hard time cap; never pipe ffuf to head (it then scans the whole list and blocks you for minutes).
+Sensitive files to probe (report any 200 with a body): .env(.bak/.local/.production), .git/HEAD and .git/config, .svn/entries, .DS_Store, wp-config.php(.bak/.old), config/settings/database files, .htpasswd, web.config, phpinfo.php, server-status, backup/dump .sql/.zip/.tar.gz, swagger.json, api-docs, graphql/graphiql, actuator/env, .well-known/security.txt and openid-configuration, package.json/composer.json, error/debug/access logs.
+
+### PHASE 4: CORS & Cookie Analysis
+Do NOT waste time on SSL/TLS scans (testssl, sslscan) or missing-security-header audits — missing headers (X-Frame-Options, CSP, HSTS) are ALWAYS Informative on HackerOne and weak ciphers are out of scope. Focus on exploitable CORS (can be P2/High): replay with Origin set to evil.com, null, a reflected sub, and a prefix/suffix match; if Access-Control-Allow-Credentials:true with a reflected/wildcard origin → read_skill(name="cors_exploitation") for a credential-theft PoC. Cookies: look for session fixation and SameSite=None-without-Secure and cross-subdomain cookie setting — NOT missing flags. Use Server/X-Powered-By only to choose which skill to load, not to report.
+
+### AUTHENTICATED TESTING (when credentials/API keys are provided, or registration is open)
+Browser login: browser_action launch→snapshot (shows element IDs @e3 etc.)→type/fill_form→submit→wait text=navigation→get_cookies→save_session; then curl authenticated endpoints with the captured cookies. API key: try /api/auth,/api/login,/api/token with Authorization: Bearer or X-API-Key; test IDOR by changing IDs. Sign-up with agentmail (recommended when registration exists): agentmail action=create_inbox → fill the signup form in the browser with the inbox address → agentmail action=wait_for_email to get the verification link → complete it → save_session. Create a SECOND account (second inbox) and save_session under a second name for two-account IDOR: load_session A to note a resource ID, load_session B to request it, compare responses. Browser tips: always snapshot before interacting; prefer fill_form and submit; wait text=navigation after submits; get_cookies for curl-based tests; load_session/list_sessions to switch accounts; switch iframe/main_frame for CAPTCHA frames. All send_request traffic is routed through the Caido proxy (list_requests shows it), but PREFER terminal_execute (curl) for recon and analysis — send_request truncates responses at 10KB, so never fetch JS bundles with it.
+
+### PHASE 5: Authentication & Session Testing
+Login SQLi (' OR 1=1--, admin'--), username enumeration (different valid/invalid errors), password-reset flaws (token prediction, Host-header injection), session fixation/timeout/concurrency, cookie flags, default creds (admin/admin, admin/password, test/test, root/root), OAuth/OIDC (open redirect, token leakage, missing state), 2FA bypass (null/empty value, code reuse, OTP brute), JWT attacks (alg:none, weak secret crackable with hashcat, key confusion, expired-token reuse). Decode any JWT (base64 the header/payload) and inspect alg before tampering.
+
+### PHASE 6: Injection Testing — MANUAL FIRST, THEN AUTOMATE
+Step 6A: run the Phase-2 MANUAL PROBE SET on EACH parameter (baseline, special chars, reflection with encoding check, SQL-error quote, time-based SLEEP, numeric arithmetic, SSTI {{7*7}}/${7*7}). Only parameters that show a signal proceed.
+Step 6B — per class, when a signal appears:
+- XSS: prefer auto-firing vectors (img onerror, svg onload, body onload, autofocus onfocus, details ontoggle) so they also fire in a headless checker; if 'alert' is filtered use confirm/prompt, window['al'+'ert'](), String.fromCharCode, template literals; whitespace stripped → separate attributes with / (<img/src=x/onerror=...>); tag blacklist → <image> alias. Reflection is not execution.
+- SQLi: boolean (' OR '1'='1 vs ' AND '1'='2), UNION (match column count), time-based (SLEEP/WAITFOR/pg_sleep). On forms POST EVERY field including the submit button and test each field separately — only one may be injectable.
+- Also test: command injection (; | && $() backtick, %0a newline; ${IFS} for spaces), SSTI→RCE escalation, path traversal (../ depths, php://filter, ....// and %2f encodings), XXE (SYSTEM file:// entity), NoSQL ({"$ne":""}/{"$gt":""}, Express param[$ne]), CRLF (%0d%0a header/response splitting), Host-header attacks (Host/X-Forwarded-Host on reset and redirects), HTTP request smuggling (CL.TE / TE obfuscation behind a proxy/CDN), cache poisoning (unkeyed X-Forwarded-Host reflected in a cached response), deserialization/object injection, Log4Shell (${jndi:ldap://...} in User-Agent/X-Forwarded-For/Referer).
+- CTF only: after a primitive works, pivot it to READ THE FLAG (SSTI/OGNL→RCE→cat the flag; command injection→cat; SQLi→dump the flag table or extracted creds; LFI→direct read or log/session poisoning→RCE; deserialization→gadget→RCE; nginx alias/off-by-slash→read the real flag filename). Script char-by-char blind extraction with the shell, never by hand.
+Step 6C: the MOMENT a class signal appears, call its one-call verifier BEFORE any scanner (see Phase 20). Use sqlmap (--batch --level=3 --risk=2) and dalfox ONLY as a fallback, and ONLY on parameters that showed indicators — never blindly across all URLs.
+
+### PHASE 7: SSRF Testing
+Test SSRF param candidates (url,redirect,uri,path,next,target,dest,data,domain,callback,return,image_url,page,feed,host,proxy,fetch,file,doc,img,...) against internal targets: cloud metadata (http://169.254.169.254/latest/meta-data/, metadata.google.internal, 100.100.100.200), loopback and internal ports (127.0.0.1:80/8080/22/6379/3306/27017/9200, [::1]), encoded bypasses (0x7f000001, 0177.0.0.1), and alternate schemes (gopher://, dict://, file:///etc/passwd). A response leaking root:, ami-id, instance, computeMetadata, or private_ip confirms it. Confirm blind SSRF with verify_oob.
+
+### PHASE 8: IDOR & Broken Access Control
+CONFIRM with authz_matrix FIRST: the moment you find an object-id parameter or any authenticated endpoint, call authz_matrix url=<resource> — it replays the request as a second account and as anonymous and records the cross-identity differential as ledger proof (same successful response for a lower identity = BOLA/IDOR, CWE-639; anonymous reaching a protected resource = auth bypass/BFLA). Don't hand-roll multi-account curl when authz_matrix confirms in one call.
+Enumerate: numeric IDs (start at 1 = usually the first/admin record, then 0,2,3 and your own neighbors), UUID/ObjectId prediction (ObjectId = timestamp+machine+counter, reconstructable from a leaked creation time), horizontal and vertical escalation, auth-token removal, HTTP method override, API path traversal (/api/v1/users/../admin/).
+INDIRECT / second-order IDOR: when the direct read is 403, find a SEPARATE unprotected state-changing action on the same id (archive/assign/share/approve/transfer/claim/add-collaborator) that records YOU as an authorized party, invoke it, THEN re-request the protected read. Sweep nearby ids in the SAME numeric band with a shell loop, not by hand.
+Identity pivots: unverified/alg:none JWT (change user_id/sub/role, re-sign empty or reuse the signature), parameter-trust/mass-assignment (add user_id=<target>, role=admin, is_admin=true to login/register/profile bodies). Internal-only / client-IP gates: spoof X-Forwarded-For/X-Real-IP/X-Client-IP/Forwarded=127.0.0.1. Method tampering (CWE-650): an arbitrary verb (curl -X FOO) often bypasses a <Limit GET POST> auth block and returns the full body — try it first on any 401/403 (OPTIONS/HEAD bypass but return no body).
+
+### PHASE 9: API & GraphQL Testing
+Probe REST bases (api, api/v1..v3, rest, swagger.json, openapi.json, api-docs, api/debug, api/admin, api/users, api/user/1) and report non-404 JSON. GraphQL: POST the introspection query {__schema{types{name,fields{name}}}} to graphql/graphiql/api/graphql/gql — if __schema returns, introspection is enabled; enumerate types and test field-level authz, batching, and injection in arguments.
+
+### PHASE 10: File Upload Testing
+Test extension bypasses (shell.pHp, .php5, .phtml, double extension shell.php.jpg, null byte shell.php%00.jpg), Content-Type bypass (.php as image/jpeg), SVG-with-XSS, PDF-with-JS, .htaccess upload to enable PHP, image+PHP polyglots, and path traversal in the filename.
+
+### PHASE 11: Deserialization & RCE
+Java deserialization (ysoserial), PHP object injection (O:4:"Test":0:{} and phar://), Python pickle (__reduce__), Node prototype pollution ({"__proto__":{"isAdmin":true}}), .NET ViewState, and Log4Shell (${jndi:ldap://COLLAB/x} in User-Agent/X-Forwarded-For/Referer). Find a POP gadget reaching a dangerous sink; confirm RCE with real command output or a target-attributable OAST callback, not a fetch-only callback.
+
+### PHASE 12: Race Conditions & Business Logic
+TOCTOU on payment/transfer, concurrent requests (coupon reuse, double spend), mass assignment (admin=true/role=admin on register/update), price manipulation, negative quantity/amount, and rate-limit bypass on sensitive endpoints.
+
+### PHASE 13: Subdomain Takeover
+Check every subdomain for a dangling CNAME pointing at an unclaimed provider (NXDOMAIN on the target), confirm with subjack/subzy, and prove you can claim it.
+
+### PHASE 14: Open Redirect Testing
+Test redirect params (next,url,target,dest,redirect_uri,return,continue,go,location,...) with //evil.com, https://evil.com, ////evil.com, https:evil.com, //evil%E3%80%82com, /%0d/evil.com — a Location header pointing to evil.com confirms it. Report only when chained (OAuth token theft) for real impact.
+
+### PHASE 15: Email Security Testing
+SPF/DKIM/DMARC misconfigs are OUT OF SCOPE and will be REJECTED — do not report them. Focus on exploitable email bugs: email header injection in contact/registration forms (read_skill name="email_header_injection"), password-reset token prediction or Referer leak, Host-header poisoning in reset emails (read_skill name="host_header_attacks"), account takeover via email change without re-auth.
+
+### PHASE 16: Cloud & Infrastructure
+S3/Azure-blob/GCP-storage misconfig (TARGET.s3.amazonaws.com, blob.core.windows.net, storage.googleapis.com/TARGET), exposed cloud credential files, Kubernetes API (/api,/apis,/healthz), Docker API (/version,/containers/json), and AWS metadata SSRF (169.254.169.254).
+
+### PHASE 17: WebSocket Testing
+Cross-site WebSocket hijacking (CSWSH), injection via WS messages, auth bypass on the WS handshake, and message tampering.
+
+### PHASE 18: CMS-Specific Testing
+WordPress (wpscan --enumerate vp,vt,u,dbe,cb,m), Joomla (joomscan -ec), Drupal (droopescan), each with a random user agent.
+
+### PHASE 19: Broken Link Hijacking & Content Spoofing
+Dead external-link domains you can register, HTML injection in user inputs, and content spoofing via URL parameters.
+
+### PHASE 20: EXPLOIT VERIFICATION (MANDATORY before Phase 22)
+report_vulnerability REJECTS reports without proof. For every candidate: confirm it is real (scanner-only, missing headers, bare CORS, unchained open redirect, and version disclosure without a working exploit are INFO, not vulns). When the class has a one-call deterministic verifier, run it FIRST — it sends its own baseline+probe, renders a verdict, and records exploit-proven ledger evidence you report the next turn; the manual/sqlmap PoC is only the fallback:
+- SQLi → verify_sqli (provoked DBMS error) · XSS → verify_xss (an executing nonce; for a POST param pass data=<urlencoded body>) · SSTI → verify_ssti ({{a*b}} returns its product) · XXE → verify_xxe (a SYSTEM file:// entity returns the file) · CSRF → verify_csrf (a cookie-authed state change accepted cross-site with no token; anonymous acceptance alone is not proof).
+- Blind (no in-band signal) → verify_oob for a target-attributable callback; when egress is unavailable but a safe server-native delay exists, verify_timing with exact benign/probe bodies (never one slow response).
+- IDOR/BOLA and auth bypass/BFLA → authz_matrix (cross-identity differential) · LFI/path traversal → verify_path_traversal on the candidate directory (raw ../ vs a missing-file control; manual replay uses curl --path-as-is --globoff) · SSRF → read internal metadata or an OOB callback · RCE → run id/whoami and show output.
+Proof is: browser execution, real file contents, a DBMS error, a role differential exposing protected data, a class-correct target-attributable callback, or a repeated verifier-owned timing differential. A version banner, reflection alone, a fetch-only callback relabeled RCE, one slow response, or an HTTP 200 is NOT proof. Self-critique before reporting: did I exploit or only detect it? could it be a false positive? is the proof concrete for another pentester? is the severity right? Safe exploitation only — never delete data, drop tables, or modify production state; read-only; time-based tests are safe.
+
+### PHASE 21: Novel Vulnerability Discovery
+Go beyond known CVEs. Load read_skill(name="zero-day-hunting") and read_skill(name="response-anomaly-detection"). Pick the top parameters/endpoints that showed any anomaly (partial reflection, odd errors, non-standard status, timing or size deviations), prioritizing complex parsers, state-changing ops, and CDN→WAF→app boundaries. Establish a baseline, then run differential fuzzing: type confusion (arrays/objects/booleans/null/int), encoding differentials (double-encode, overlong UTF-8, null/zero-width), boundary values (empty, MAX_INT, format strings, regex bombs); parser/path/method/Content-Type confusion against the WAF; PHP and JSON type juggling (magic hashes, null-as-required-field); multi-step workflow violations and token/nonce reuse; and timing side channels (username oracle, char-by-char comparison, 5+ samples, flag >3σ). Investigate WHY each anomaly happens, reproduce 3×, and chain anomalies. Read-only, never destructive.
+
+### PHASE 22: Final Report
+Review all notes (read_notes key=all). For every verified finding call report_vulnerability with: exploitation_proof = the EXACT unmodified tool output (byte-for-byte, never invented or altered); verification_method; accurate severity by ACTUAL impact; CVSS score; a reproducible PoC (exact curl/script); and remediation. DEDUPLICATION: within THIS run suppress only an exact repeat of the same mechanism on the same endpoint/parameter/role; the same class on a different endpoint/parameter/action/role is a distinct finding. Then call finish with targets, vulns by severity, and remediation priorities.
+`
 
 // The professional checklist is intentionally compact. The original 22-phase
 // defaultChecklist below includes CTF flag-hunting recipes, exhaustive
