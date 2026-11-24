@@ -490,6 +490,13 @@ You have access to **expert-level vulnerability skills** via the read_skill and 
 	if !isExplicitCTFMission(instruction) {
 		prompt = applyProfessionalAssessmentPrompt(prompt)
 	}
+	// Compact checklist mode also tightens the fixed body: the reporting /
+	// severity / CVSS / proof-integrity / WAF run is consolidated into one block
+	// (same rules, stated once). Runs after the professional/skills rewrites,
+	// whose markers it does not touch. See compact_body.go.
+	if checklistMode == "compact" {
+		prompt = applyCompactBody(prompt)
+	}
 	if a.delegatedAgentID != "" {
 		prompt = applyDelegatedSpecialistPrompt(prompt, a.delegatedAgentID)
 	}
@@ -667,7 +674,7 @@ Complete every phase. Don't stop at the first finding or after recon. Test EVERY
 Map the FULL attack surface (domains, subdomains, ports, endpoints, params, APIs, WebSockets, GraphQL). Fingerprint the stack (server, framework, CMS, DB, CDN, WAF, auth) and pick the highest-impact vulns for THAT stack (Laravel→debug RCE, Django→SSTI, Next.js→SSRF). Track findings with add_note/read_notes and CHAIN them (SSRF→metadata→keys→RCE; open redirect→OAuth token theft; IDOR+CSRF→ATO). Probe the EDGES (empty, null byte, huge input, Unicode, negative, max int). Verify every finding manually — tools false-positive. Ask what the developer got wrong that a scanner can't flag.
 
 ### PHASE 1: Deep Reconnaissance & Attack Surface Mapping
-Spend the most time here — more surface found now = more to test later. Complete it before moving on. Load reconnaissance skills FIRST: read_skill(name="api-discovery"), read_skill(name="javascript-analysis"), read_skill(name="subdomain-enumeration"); only then exploitation skills.
+Spend the most time here — more surface found now = more to test later. Complete it before moving on. Load a skill only when a live observation needs its specific technique, and load ONE at a time — never preload a batch. A recon skill (api-discovery, javascript-analysis, subdomain-enumeration) is worth read_skill only once you actually reach that surface; exploitation skills likewise, one per confirmed signal.
 
 MANDATORY FIRST 5 ITERATIONS, IN ORDER (skipping these causes inconsistent coverage):
 1. Headers + tech fingerprint: curl -sI the target with a real User-Agent; note Server, X-Powered-By, Set-Cookie, CSP, framework hints.
@@ -1826,6 +1833,11 @@ func (a *Agent) buildClosingInstruction(instruction string) string {
 The delegated task is your complete mission. Do not widen into the root's full methodology and do not delegate again. Use the relevant skills and deterministic verifiers for this lane, close every hypothesis you claim, report every distinct proven issue, then return to the coordinator once the assigned lane is exhausted.`
 	}
 	if instruction == "" {
+		if a.cfg != nil && strings.EqualFold(strings.TrimSpace(a.cfg.Checklist), "compact") {
+			// Compact mode: lazy, single-skill loading. Don't preload a batch of
+			// skills after recon; read one only when a live finding needs it.
+			return "START with Phase 1 recon. After each phase, review your notes, identify gaps, and test deeper. Load a skill only when a live observation needs its specific technique — one at a time via read_skill, never a batch up front."
+		}
 		return "START with Phase 1 recon. After each phase, review your notes, identify gaps, and test deeper. After recon, call list_skills and load relevant skills before vulnerability testing!"
 	}
 
