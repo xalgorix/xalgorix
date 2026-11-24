@@ -2003,7 +2003,7 @@ Switch to curl now — it's faster and gives you full response bodies.`,
 				Nudge: fmt.Sprintf(`💡 TIP: Prefer curl over send_request for %s requests.
 send_request truncates responses at 10KB — JS bundles, API responses, and HTML pages are often 50-500KB.
 Use instead: curl -sk -X %s <URL> -H "header: value"
-Reserve send_request ONLY for authenticated requests that need Caido proxy logging.`, method, method),
+Reserve send_request for short authenticated requests (session cookies or auth headers).`, method, method),
 			}
 		}
 
@@ -2017,7 +2017,6 @@ Switch to curl immediately:
 
 send_request is ONLY for:
 ✅ Requests with session cookies after browser login (authenticated testing)
-✅ Requests that must appear in the Caido proxy log
 ❌ Everything else → use curl`, state.SendRequestCalls, method),
 			}
 		}
