@@ -51,14 +51,16 @@ func TestSendRequestDoesNotRouteThroughCaido(t *testing.T) {
 	}
 
 	res, err := sendRequest(map[string]string{"method": "GET", "url": target.URL})
+	// The fake listener counts a connection before closing it, so a request
+	// routed through the Caido port is reported here rather than as an EOF.
+	if n := caidoConns.Load(); n != 0 {
+		t.Fatalf("send_request opened %d connection(s) to the Caido port; update the agent prompts (#917)", n)
+	}
 	if err != nil {
 		t.Fatalf("send_request failed: %v", err)
 	}
 	if !strings.Contains(res.Output, "target-ok") || targetHits.Load() != 1 {
 		t.Fatalf("send_request did not reach the target directly (hits=%d): %q", targetHits.Load(), res.Output)
-	}
-	if n := caidoConns.Load(); n != 0 {
-		t.Fatalf("send_request opened %d connection(s) to the Caido port; update the agent prompts (#917)", n)
 	}
 }
 

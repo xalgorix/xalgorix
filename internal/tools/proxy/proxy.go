@@ -59,7 +59,7 @@ func Register(r *tools.Registry) {
 
 	r.Register(&tools.Tool{
 		Name:        "list_requests",
-		Description: "List HTTP requests captured by a running Caido proxy (for example, browser_action launched with proxy=caido). send_request traffic does not go through Caido.",
+		Description: "List HTTP requests captured by a running Caido proxy (for example, a browser first launched with proxy=caido). Requires CAIDO_API_TOKEN. send_request traffic appears here only when the outbound proxy is the Caido listener.",
 		Parameters: []tools.Parameter{
 			{Name: "count", Description: "Number of requests to list (default: 20)", Required: false},
 			{Name: "filter", Description: "Filter by URL substring", Required: false},
