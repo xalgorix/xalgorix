@@ -547,9 +547,106 @@ const (
 	archiveStubPrefix = "[ARCHIVED as "
 	// archiveHeadBytes is the byte length of the head snippet kept in a stub.
 	archiveHeadBytes = 300
+	// archiveSmartStubBytes is the byte budget for the security-relevant
+	// excerpt kept in a smart stub (ToolArchiveSmartStub). Larger than
+	// archiveHeadBytes so the aged-out signal survives in context.
+	archiveSmartStubBytes = 1200
 )
 
 var archiveIDRe = regexp.MustCompile(`to_[0-9]{6,12}`)
+
+// securitySignalSubstrings are lowercased markers that make a tool-result line
+// worth keeping when a smart stub (ToolArchiveSmartStub) is built. The list is
+// deliberately broad: the aim is never to drop evidence the model would act on,
+// and the byte budget — not selectivity — bounds the excerpt.
+var securitySignalSubstrings = []string{
+	// SQL / database errors
+	"sql syntax", "mysql", "sqlstate", "postgresql", "psql", "sqlite",
+	"syntax error", "unterminated", "pg_query", "odbc", "quoted string",
+	// injection / reflected XSS / template / command execution
+	"<script", "onerror=", "onload=", "javascript:", "alert(", "<svg",
+	"{{", "system(", "eval(", "sleep(",
+	// secrets / authentication
+	"api_key", "apikey", "api-key", "secret", "token", "password", "passwd",
+	"authorization:", "bearer ", "aws_access", "aws_secret", "access_key",
+	"private key", "begin rsa", "begin private", "db_password", ".env",
+	// file read / ssrf / rce proof
+	"root:x:0:0", "/etc/passwd", "/etc/shadow", "file://", "gopher://",
+	"uid=", "gid=",
+	// status line / notable headers
+	"set-cookie:", "location:", "www-authenticate:",
+	"access-control-allow-origin", "x-powered-by:", "server:",
+	"content-security-policy", "strict-transport-security",
+	// errors / stack traces
+	"error", "exception", "traceback", "stack trace", "fatal", "panic:",
+	"warning:", "internal server error", "stacktrace",
+	// endpoints
+	"http://", "https://",
+}
+
+var (
+	oraErrRe     = regexp.MustCompile(`(?i)\bORA-\d{3,5}\b`)
+	httpStatusRe = regexp.MustCompile(`HTTP/\d(?:\.\d)?\s+\d{3}`)
+	jwtRe        = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}`)
+)
+
+// lineHasSecuritySignal reports whether a single line is security-relevant
+// enough to keep in a smart stub.
+func lineHasSecuritySignal(line string) bool {
+	lower := strings.ToLower(line)
+	for _, s := range securitySignalSubstrings {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return oraErrRe.MatchString(line) || httpStatusRe.MatchString(line) || jwtRe.MatchString(line)
+}
+
+// extractSecuritySignal builds a smart-stub body: a short head for context plus
+// the security-relevant lines of content, in order, deduped, and bounded to
+// budget bytes. When nothing matches it falls back to a plain head of up to
+// budget bytes — still larger than the 300-byte head-only stub, so a smart stub
+// is never worse than the default one.
+func extractSecuritySignal(content string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	const (
+		headBudget   = 240
+		maxLineBytes = 300
+		separator    = "\n— security-relevant lines —\n"
+	)
+	hb := headBudget
+	if hb > budget {
+		hb = budget
+	}
+	head := trimToValidUTF8(content, hb)
+
+	seen := make(map[string]bool)
+	signal := make([]string, 0, 16)
+	used := len(head) + len(separator)
+	for _, ln := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(ln)
+		if len(t) < 8 || !lineHasSecuritySignal(t) {
+			continue
+		}
+		t = trimToValidUTF8(t, maxLineBytes)
+		if seen[t] {
+			continue
+		}
+		if used+len(t)+1 > budget {
+			break
+		}
+		seen[t] = true
+		signal = append(signal, t)
+		used += len(t) + 1
+	}
+
+	if len(signal) == 0 {
+		return trimToValidUTF8(content, budget)
+	}
+	return trimToValidUTF8(head+separator+strings.Join(signal, "\n"), budget)
+}
 
 // boundedContextEnabled reports whether information-complete bounded context
 // is active for this agent (flag on, scan archive wired).
@@ -651,11 +748,19 @@ func (a *Agent) ageOutToolOutputs() {
 		if i := strings.IndexByte(content, '\n'); i >= 0 {
 			firstLine = content[:i]
 		}
-		head := trimToValidUTF8(content, archiveHeadBytes)
-		a.messages[idx].Content = fmt.Sprintf(
-			"%s %s%s — full original retrievable]\nHead: %s\n…[archived head only — use read_tool_output(id=\"%s\") to view the complete output]\n",
-			firstLine, archiveStubPrefix, id, head, id,
-		)
+		if a.cfg != nil && a.cfg.ToolArchiveSmartStub {
+			excerpt := extractSecuritySignal(content, archiveSmartStubBytes)
+			a.messages[idx].Content = fmt.Sprintf(
+				"%s %s%s — full original retrievable]\nSecurity-relevant excerpt (from the archived output):\n%s\n…[excerpt only — call read_tool_output(id=\"%s\") for the complete output]\n",
+				firstLine, archiveStubPrefix, id, excerpt, id,
+			)
+		} else {
+			head := trimToValidUTF8(content, archiveHeadBytes)
+			a.messages[idx].Content = fmt.Sprintf(
+				"%s %s%s — full original retrievable]\nHead: %s\n…[archived head only — use read_tool_output(id=\"%s\") to view the complete output]\n",
+				firstLine, archiveStubPrefix, id, head, id,
+			)
+		}
 		stubbed++
 	}
 	if stubbed > 0 {

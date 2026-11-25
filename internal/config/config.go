@@ -182,6 +182,16 @@ type Config struct {
 	// XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW, default 8.
 	ToolArchiveActiveWindow int
 
+	// ToolArchiveSmartStub replaces the plain head snippet of an aged-out
+	// tool-result stub with a security-relevant excerpt (reflected payloads,
+	// error strings, secrets/tokens, status and notable headers, endpoints)
+	// extracted from the output, so the signal the model acts on stays in
+	// context without a read_tool_output round-trip. Keeps the bounded-context
+	// token saving while addressing the coverage loss from head-only stubs.
+	// XALGORIX_TOOL_ARCHIVE_SMART_STUB, default false (A/B on vulnerability
+	// count before enabling).
+	ToolArchiveSmartStub bool
+
 	// ContextCompactTokens is an OPTIONAL absolute override for the compaction
 	// trigger. When > 0, the agent auto-compacts older turns into a structured
 	// digest (+ saved notes) once the running message history is estimated to
@@ -555,6 +565,7 @@ func load() *Config {
 		ConvergeFinishLeadWindow: envOrInt("XALGORIX_CONVERGE_FINISH_LEAD_WINDOW", 100),
 		ToolArchiveMinBytes:      envOrInt("XALGORIX_TOOL_ARCHIVE_MIN_BYTES", 1500),
 		ToolArchiveActiveWindow:  envOrInt("XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", 8),
+		ToolArchiveSmartStub:     envOrBool("XALGORIX_TOOL_ARCHIVE_SMART_STUB", false),
 		LLMContextWindow:         envOrInt("XALGORIX_LLM_CONTEXT_WINDOW", 128000),
 		ContextCompactRatio:      envOrFloat("XALGORIX_CONTEXT_COMPACT_RATIO", 0.75),
 		LLMTimeoutSeconds:        envOrInt("XALGORIX_LLM_TIMEOUT_SECONDS", 600),

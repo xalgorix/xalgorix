@@ -148,6 +148,7 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_EPOCH_COVERAGE", Label: "Epoch-based coverage convergence", Category: "Runtime", Description: "Measure per-endpoint coverage completion against a frozen surface snapshot that advances in bounded epochs, instead of the live-growing discovered set. On large or still-growing attack surfaces this lets coverage tasks actually close so the scan reaches a clean terminal state instead of chasing a receding bar until a watchdog. No coverage is dropped: every discovered endpoint is folded into a later epoch and tested before finish. Applies to NEW scans.", DefaultValue: "true", InputType: "boolean"},
 		{Key: "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW", Label: "Bounded context: active window", Category: "LLM", Description: "How many recent tool-result messages stay verbatim in the conversation before older ones become retrieval stubs (used by bounded working context above).", DefaultValue: "8", InputType: "number"},
 		{Key: "XALGORIX_TOOL_ARCHIVE_MIN_BYTES", Label: "Bounded context: archive threshold (bytes)", Category: "LLM", Description: "Minimum raw-output size before a tool result is archived/stubbed. Smaller results stay in-context verbatim.", DefaultValue: "1500", InputType: "number"},
+		{Key: "XALGORIX_TOOL_ARCHIVE_SMART_STUB", Label: "Bounded context: smart stub (keep security signal)", Category: "LLM", Description: "When a tool result ages out of the active window, keep a security-relevant excerpt (reflected payloads, error strings, secrets, status and notable headers, endpoints) instead of only the first bytes, so the signal stays in context without a read_tool_output fetch. Preserves the token saving while reducing missed findings. Off by default; compare vulnerability count before enabling. Applies to NEW scans.", DefaultValue: "false", InputType: "boolean"},
 		{Key: "XALGORIX_ROLE_SCOPED_TOOLS", Label: "Role-scoped specialist tools (token saver)", Category: "LLM", Description: "Withhold documentation of role-foreign tools (e.g. browser tools from the authz specialist) from delegated specialists' prompts. Hidden tools remain callable and are listed in a compact index, so the reachable tool set is unchanged. Applies to NEW scans.", DefaultValue: "false", InputType: "boolean"},
 		{Key: "XALGORIX_LLM_MAX_INFLIGHT", Label: "LLM max in-flight concurrency", Category: "LLM", Description: "Maximum concurrent requests sent to the LLM provider across all scans and subagents. Clamps token velocity to prevent exhausting provider rolling-window rate limits or quotas. Default is 4 × MaxInstances. Takes effect after restart.", Placeholder: "4", InputType: "number", RequiresRestart: true},
 		{Key: "XALGORIX_MAX_ITERATIONS", Label: "Max iterations", Category: "Runtime", Description: "Maximum agent iterations per scan. 0 means unlimited.", DefaultValue: "0", InputType: "number"},
@@ -820,6 +821,8 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.ToolArchiveMinBytes = parseIntSetting(value, 1500)
 		case "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW":
 			s.cfg.ToolArchiveActiveWindow = parseIntSetting(value, 8)
+		case "XALGORIX_TOOL_ARCHIVE_SMART_STUB":
+			s.cfg.ToolArchiveSmartStub = parseBoolSetting(value, false)
 		case "XALGORIX_ROLE_SCOPED_TOOLS":
 			s.cfg.RoleScopedTools = parseBoolSetting(value, false)
 		case "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT":
@@ -988,6 +991,8 @@ func (s *Server) envSettingValue(key string) string {
 		return strconv.Itoa(s.cfg.ToolArchiveMinBytes)
 	case "XALGORIX_TOOL_ARCHIVE_ACTIVE_WINDOW":
 		return strconv.Itoa(s.cfg.ToolArchiveActiveWindow)
+	case "XALGORIX_TOOL_ARCHIVE_SMART_STUB":
+		return strconv.FormatBool(s.cfg.ToolArchiveSmartStub)
 	case "XALGORIX_ROLE_SCOPED_TOOLS":
 		return strconv.FormatBool(s.cfg.RoleScopedTools)
 	case "XALGORIX_MEMORY_COMPRESSOR_TIMEOUT":
