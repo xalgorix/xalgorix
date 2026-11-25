@@ -1440,7 +1440,7 @@ func (a *Agent) sinceActivity() time.Duration {
 const watchdogProcessMaxDuration = 30 * time.Minute
 
 // startWatchdog starts a background monitor that enforces:
-// 1. Per-process timeout: kills individual commands running > watchdogProcessMaxDuration
+// 1. Per-process timeout: kills the scan's tracked processes once the most recently started command has run > watchdogProcessMaxDuration
 // 2. Scan-level timeout: force-stops entire scan after scanMaxDuration (0 = infinite)
 // 3. Idle detection: kills agent stuck with no processes and no LLM response (0 = disabled)
 func (a *Agent) startWatchdog() func() {
@@ -1500,7 +1500,7 @@ func (a *Agent) startWatchdog() func() {
 				activeCmd, cmdDuration := a.scanCtx.Terminal.GetActiveCommand()
 
 				// ── Check 2: Per-process timeout ──
-				// If a single process has been running too long, kill it
+				// If the most recently started command has run too long, kill the scan's tracked processes
 				if activeProcs > 0 && cmdDuration > watchdogProcessMaxDuration {
 					a.emit(Event{Type: "error", Content: fmt.Sprintf("⚠️ Watchdog: Process running for %s (limit: %s), killing it: %s", cmdDuration.Round(time.Minute), watchdogProcessMaxDuration, activeCmd)})
 					safe.IncWatchdogKill()

@@ -1171,7 +1171,7 @@ func decodeHex(s string) ([]byte, error) {
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
 		Name:        "terminal_execute",
-		Description: "Execute a shell command in the terminal. Returns stdout, stderr, and exit code. Automatically installs missing tools. Commands have a 10-minute timeout by default and up to 30 minutes for heavy tools like nmap/nuclei/sqlmap. A command that runs content discovery (ffuf, gobuster, feroxbuster, dirsearch, dirb) gets about 3 minutes per discovery run in it, for the whole command, so run heavy scans in a separate command. A loop, xargs or parallel over discovery runs shares the heavy-tool limit. Use targeted scans to stay within limits.",
+		Description: "Execute a shell command in the terminal. Returns stdout, stderr, and exit code. Automatically installs missing tools. Commands have a 10-minute timeout by default and up to 30 minutes for heavy tools like nmap/nuclei/sqlmap. A command that runs content discovery (ffuf, gobuster, feroxbuster, dirsearch, dirb) gets at most about 3 minutes per discovery run in it (less with a smaller ffuf -maxtime), for the whole command, so run heavy scans in a separate command. A loop, xargs or parallel over discovery runs shares the heavy-tool limit. Use targeted scans to stay within limits.",
 		Parameters: []tools.Parameter{
 			{Name: "command", Description: "The shell command to execute", Required: true},
 		},

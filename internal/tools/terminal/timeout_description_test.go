@@ -57,7 +57,7 @@ func TestTerminalExecuteDescriptionMatchesTimeouts(t *testing.T) {
 		}
 	}
 
-	discovery := regexp.MustCompile(`A command that runs content discovery \(([^)]*)\) gets about (\d+) minutes per discovery run in it, for the whole command`).FindStringSubmatch(desc)
+	discovery := regexp.MustCompile(`A command that runs content discovery \(([^)]*)\) gets at most about (\d+) minutes per discovery run in it \(less with a smaller ffuf -maxtime\), for the whole command`).FindStringSubmatch(desc)
 	if discovery == nil {
 		t.Fatalf("description does not state the content-discovery cap:\n%s", desc)
 	}
@@ -86,6 +86,10 @@ func TestTerminalExecuteDescriptionMatchesTimeouts(t *testing.T) {
 	chained := "nmap -p- target.test | tee ports.txt; ffuf -u http://target.test/FUZZ -w words.txt"
 	if got := computeTimeout(chained); got != perRun {
 		t.Errorf("%q gets %s, want the one-run discovery deadline %s the description warns about", chained, got, perRun)
+	}
+	smaller := "nmap -p- target.test; ffuf -u http://target.test/FUZZ -w words.txt -maxtime 60"
+	if got, want := computeTimeout(smaller), 60*time.Second+dirbusterGrace; got != want {
+		t.Errorf("%q gets %s, want %s: a smaller ffuf -maxtime shortens the whole command, as the description says", smaller, got, want)
 	}
 	twoRuns := "ffuf -u http://target.test/FUZZ -w words.txt; gobuster dir -u http://target.test/ -w words.txt"
 	if got := computeTimeout(twoRuns); got != 2*perRun {

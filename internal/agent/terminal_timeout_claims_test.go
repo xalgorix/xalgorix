@@ -30,7 +30,7 @@ func TestTerminalExecuteDescriptionStatesWatchdogLimit(t *testing.T) {
 		t.Fatalf("heavy-tool limit %q: %v", match[1], err)
 	}
 	if stated := time.Duration(minutes) * time.Minute; stated != watchdogProcessMaxDuration {
-		t.Errorf("description gives heavy tools %s, but the watchdog stops a single command after %s",
+		t.Errorf("description gives heavy tools %s, but the watchdog kills commands after %s",
 			stated, watchdogProcessMaxDuration)
 	}
 }
