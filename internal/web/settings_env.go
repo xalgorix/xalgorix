@@ -155,6 +155,7 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		{Key: "XALGORIX_MIN_ITERATIONS", Label: "Min iterations (testing floor)", Category: "Runtime", Description: "Minimum testing floor in iterations before the gatekeeper permits finish. Ensures deep probing (OAST, ReDoS, fuzzing) before concluding.", DefaultValue: "50", InputType: "number"},
 		{Key: "XALGORIX_NO_TOOL_ABORT_AT", Label: "No-tool loop limit", Category: "Runtime", Description: "Consecutive assistant responses without a parsed tool call before cleanly stopping. Default 30; 0 disables this safety limit.", DefaultValue: "30", InputType: "number"},
 		{Key: "XALGORIX_MAX_WILDCARD_SUBDOMAINS", Label: "Wildcard subdomain cap", Category: "Runtime", Description: "Optional maximum full LLM sessions expanded from one wildcard target. Default -1 means unlimited; set a positive value only for an explicit emergency resource cap.", DefaultValue: "-1", InputType: "number"},
+		{Key: "XALGORIX_WILDCARD_EXCLUDE", Label: "Wildcard subdomain exclusions", Category: "Runtime", Description: "Comma-separated patterns for subdomains to skip on wildcard scans, to save credits and time on large engagements. A plain word matches a whole DNS label (staging matches staging.example.com and api.staging.example.com, but not staginghost.example.com); a pattern containing * or ? is a glob matched against the full host and each label (dev-*, *-qa, *.internal.example.com). The supplied target and its root domain are always scanned. Applies to new scans.", Placeholder: "staging,dev-*,*-qa,*.internal.example.com", InputType: "text"},
 		{Key: "XALGORIX_MAX_FINISH_REJECTIONS", Label: "Max finish rejections", Category: "Runtime", Description: "Number of times the agent's finish call will be rejected by the gatekeeper before allowing a deadlock bypass, enforcing deeper testing coverage.", DefaultValue: "15", InputType: "number"},
 		{Key: "XALGORIX_CONVERGE_FINISH_IDLE", Label: "Principled finish: no-finding tail (iterations)", Category: "Runtime", Description: "When the principled finish (XALGORIX_CONVERGE_FINISH) is on, a saturated scan finalizes after this many consecutive iterations without a new validated finding. Each new finding, and each new hypothesis the agent records (up to 5 times per scan), restarts the count. Higher values test longer before closing. Applies to new scans.", DefaultValue: "500", InputType: "number"},
 		{Key: "XALGORIX_CONVERGE_FINISH_LEAD_WINDOW", Label: "Principled finish: lead verification window (iterations)", Category: "Runtime", Description: "When the no-finding tail elapses while the agent still holds recent high-confidence unverified leads, it gets one final window of this many iterations to verify or reject them before the scan finalizes. -1 disables the window. Applies to new scans.", DefaultValue: "100", InputType: "number"},
@@ -789,6 +790,8 @@ func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
 			s.cfg.APIKey = value
 		case "XALGORIX_API_KEYS":
 			s.cfg.APIKeys = config.ParseAPIKeyList(value)
+		case "XALGORIX_WILDCARD_EXCLUDE":
+			s.cfg.WildcardExclude = config.ParseCommaList(value)
 		case "XALGORIX_LLM_PROFILE":
 			s.cfg.LLMProfile = value
 		case "XALGORIX_REASONING_EFFORT":
@@ -961,6 +964,8 @@ func (s *Server) envSettingValue(key string) string {
 		return s.cfg.APIKey
 	case "XALGORIX_API_KEYS":
 		return strings.Join(s.cfg.APIKeys, ", ")
+	case "XALGORIX_WILDCARD_EXCLUDE":
+		return strings.Join(s.cfg.WildcardExclude, ", ")
 	case "XALGORIX_LLM_PROFILE":
 		return s.cfg.LLMProfile
 	case "XALGORIX_REASONING_EFFORT":
