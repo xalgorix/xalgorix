@@ -1430,17 +1430,25 @@ func (a *Agent) sinceActivity() time.Duration {
 	return time.Since(a.lastActivity)
 }
 
+// watchdogProcessMaxDuration is how long the watchdog waits after the most
+// recently started terminal command before it kills every tracked process of
+// the scan. It is shorter than the terminal tool's own heavy-tool deadline, so
+// with a single agent lane it is the heavy-tool limit a command gets (parallel
+// lanes that keep starting commands can let one run longer). The
+// terminal_execute description states it; terminal_timeout_claims_test.go
+// keeps the two in step.
+const watchdogProcessMaxDuration = 30 * time.Minute
+
 // startWatchdog starts a background monitor that enforces:
-// 1. Per-process timeout: kills individual commands running > 30 minutes
+// 1. Per-process timeout: kills individual commands running > watchdogProcessMaxDuration
 // 2. Scan-level timeout: force-stops entire scan after scanMaxDuration (0 = infinite)
 // 3. Idle detection: kills agent stuck with no processes and no LLM response (0 = disabled)
 func (a *Agent) startWatchdog() func() {
 	stopChan := make(chan struct{})
 
 	const (
-		processMaxDuration = 30 * time.Minute // kill single process after this
-		scanMaxDuration    = 0                // 0 = infinite (no scan-level timeout — needed for 300+ domain scans)
-		idleKillThreshold  = 0 * time.Minute  // 0 = disabled (stuck-loop detection handles per-target stalls)
+		scanMaxDuration   = 0               // 0 = infinite (no scan-level timeout — needed for 300+ domain scans)
+		idleKillThreshold = 0 * time.Minute // 0 = disabled (stuck-loop detection handles per-target stalls)
 	)
 
 	// Watchdog is a long-running background monitor; wrap with safe.Go
@@ -1493,8 +1501,8 @@ func (a *Agent) startWatchdog() func() {
 
 				// ── Check 2: Per-process timeout ──
 				// If a single process has been running too long, kill it
-				if activeProcs > 0 && cmdDuration > processMaxDuration {
-					a.emit(Event{Type: "error", Content: fmt.Sprintf("⚠️ Watchdog: Process running for %s (limit: %s), killing it: %s", cmdDuration.Round(time.Minute), processMaxDuration, activeCmd)})
+				if activeProcs > 0 && cmdDuration > watchdogProcessMaxDuration {
+					a.emit(Event{Type: "error", Content: fmt.Sprintf("⚠️ Watchdog: Process running for %s (limit: %s), killing it: %s", cmdDuration.Round(time.Minute), watchdogProcessMaxDuration, activeCmd)})
 					safe.IncWatchdogKill()
 					log.Printf("[watchdog] WARN kill command=%q duration=%s scan=%s reason=process_max_duration",
 						activeCmd, cmdDuration.Round(time.Second), a.scanCtx.ID)
