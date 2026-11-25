@@ -28,10 +28,18 @@ import (
 
 const maxOutputLen = 20000
 
-// Per-command timeout tiers
+// Per-command timeout tiers. During a scan the agent watchdog
+// (watchdogProcessMaxDuration in internal/agent) also kills the scan's tracked
+// processes once the most recently started command has run that long. It is
+// shorter than heavyCmdTimeout, so with a single agent lane it is the
+// heavy-tool limit a command gets; parallel lanes that keep starting commands
+// can let one run up to heavyCmdTimeout. Content discovery is capped
+// separately; see contentDiscoveryCommandTimeout. The terminal_execute
+// description states the limits a scan sees, and tests in this package and in
+// internal/agent pin it to these values.
 const (
 	defaultCmdTimeout = 10 * time.Minute // most commands
-	heavyCmdTimeout   = 60 * time.Minute // nmap, nuclei, ffuf, gobuster, sqlmap, masscan
+	heavyCmdTimeout   = 60 * time.Minute // nmap, nuclei, sqlmap, masscan, …, and loops of discovery runs
 	hardMaxTimeout    = 2 * time.Hour    // absolute ceiling — nothing runs longer
 	dirbusterGrace    = 15 * time.Second // allow scanners to flush results after their own deadline
 )
@@ -1163,7 +1171,7 @@ func decodeHex(s string) ([]byte, error) {
 func Register(r *tools.Registry) {
 	r.Register(&tools.Tool{
 		Name:        "terminal_execute",
-		Description: "Execute a shell command in the terminal. Returns stdout, stderr, and exit code. Automatically installs missing tools. Commands have a 10-minute timeout by default (30 minutes for heavy tools like nmap/nuclei). Use targeted scans to stay within limits.",
+		Description: "Execute a shell command in the terminal. Returns stdout, stderr, and exit code. Automatically installs missing tools. Commands have a 10-minute timeout by default and up to 30 minutes for heavy tools like nmap/nuclei/sqlmap. A command that runs content discovery (ffuf, gobuster, feroxbuster, dirsearch, dirb) gets at most about 3 minutes per discovery run in it (less with a smaller ffuf -maxtime), for the whole command, so run heavy scans in a separate command. A loop, xargs or parallel over discovery runs shares the heavy-tool limit. Use targeted scans to stay within limits.",
 		Parameters: []tools.Parameter{
 			{Name: "command", Description: "The shell command to execute", Required: true},
 		},
