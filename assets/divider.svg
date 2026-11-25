@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 48" width="1200" height="48" fill="none" role="img" aria-label="Xalgorix section divider: a scan beam sweeps across the line while the center emblem pings like radar">
+  <defs>
+    <linearGradient id="xdiv-line" gradientUnits="userSpaceOnUse" x1="90" y1="24" x2="1110" y2="24">
+      <stop offset="0" stop-color="#ff2a2f" stop-opacity="0"/>
+      <stop offset=".05" stop-color="#ff2a2f" stop-opacity=".7"/>
+      <stop offset=".5" stop-color="#ff4a3f" stop-opacity="1"/>
+      <stop offset=".95" stop-color="#ff2a2f" stop-opacity=".7"/>
+      <stop offset="1" stop-color="#ff2a2f" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="xdiv-beam" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff5a2f" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#ff6a3a" stop-opacity="1"/>
+      <stop offset="1" stop-color="#ff5a2f" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="xdiv-glow" x="-60%" y="-300%" width="220%" height="700%">
+      <feGaussianBlur stdDeviation="2.4"/>
+    </filter>
+    <filter id="xdiv-soft" x="-80%" y="-400%" width="260%" height="900%">
+      <feGaussianBlur stdDeviation="3.2"/>
+    </filter>
+  </defs>
+
+  <!-- horizon line -->
+  <line x1="90" y1="24" x2="1110" y2="24" stroke="url(#xdiv-line)" stroke-width="2.8"/>
+
+  <!-- measure ticks along the rule -->
+  <g stroke="#ff3a3f" stroke-width="1.6" stroke-linecap="round" opacity=".4">
+    <line x1="250" y1="19" x2="250" y2="29"/>
+    <line x1="400" y1="20.5" x2="400" y2="27.5"/>
+    <line x1="800" y1="20.5" x2="800" y2="27.5"/>
+    <line x1="950" y1="19" x2="950" y2="29"/>
+  </g>
+
+  <!-- radar pings from the center emblem -->
+  <circle cx="600" cy="24" r="4" fill="none" stroke="#ff3a3f" stroke-width="1.4">
+    <animate attributeName="r" values="4;22" keyTimes="0;1" dur="3s" repeatCount="indefinite" calcMode="spline" keySplines="0.2 0.6 0.3 1"/>
+    <animate attributeName="opacity" values="0.75;0" keyTimes="0;1" dur="3s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="600" cy="24" r="4" fill="none" stroke="#ff3a3f" stroke-width="1.4">
+    <animate attributeName="r" values="4;22" keyTimes="0;1" dur="3s" begin="1.5s" repeatCount="indefinite" calcMode="spline" keySplines="0.2 0.6 0.3 1"/>
+    <animate attributeName="opacity" values="0.75;0" keyTimes="0;1" dur="3s" begin="1.5s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- hexagon-style brackets flanking the emblem -->
+  <g fill="none" stroke="#ff3a3f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+    <path d="M572 15 L560 24 L572 33"/>
+    <path d="M628 15 L640 24 L628 33"/>
+  </g>
+
+  <!-- center emblem: brand diamond -->
+  <g filter="url(#xdiv-glow)">
+    <path d="M600 13 L615 24 L600 35 L585 24 Z" fill="none" stroke="#ff3a3f" stroke-width="1.6">
+      <animate attributeName="opacity" values="0.85;1;0.85" keyTimes="0;0.5;1" dur="3s" repeatCount="indefinite"/>
+    </path>
+    <path d="M600 18 L608 24 L600 30 L592 24 Z" fill="#ff5a3c">
+      <animate attributeName="opacity" values="0.9;1;0.9" keyTimes="0;0.5;1" dur="3s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- scan beam sweeping across the line -->
+  <g>
+    <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.1;0.85;0.97;1" dur="5s" repeatCount="indefinite"/>
+    <animateTransform attributeName="transform" type="translate" values="-508 0;508 0" keyTimes="0;1" dur="5s" repeatCount="indefinite" calcMode="spline" keySplines="0.45 0 0.55 1"/>
+    <g filter="url(#xdiv-soft)">
+      <rect x="598" y="7" width="4" height="34" rx="2" fill="url(#xdiv-beam)"/>
+    </g>
+    <circle cx="600" cy="24" r="2.4" fill="#ff8a5c" filter="url(#xdiv-glow)"/>
+  </g>
+</svg>

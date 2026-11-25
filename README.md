@@ -38,7 +38,7 @@
 
 <p align="center">🤖 Only need PR reviews? The <a href="https://github.com/apps/xalgorix">free Xalgorix GitHub App</a> comments a security review on every pull request — no account, no API key.</p>
 
----
+<div align="center"><img src="assets/divider.svg?v=1" alt="" width="720" /></div>
 
 ## 📸 Screenshots
 
@@ -52,7 +52,7 @@
 
 <a href="https://www.xalgorix.com/?utm_source=github&utm_medium=readme&utm_campaign=oss_to_cloud&utm_content=screenshot"><img src="assets/SaaS-dashboard.png?v=4.5.154" alt="Xalgorix Cloud dashboard showing security score, vulnerability trends, remediation metrics, and open issues by category" width="860" /></a>
 
----
+<div align="center"><img src="assets/divider.svg?v=1" alt="" width="720" /></div>
 
 ## 🤝 Sponsors
 
@@ -72,7 +72,7 @@ Xalgorix is supported by proxy-infrastructure partners — handy for checking ho
   </tr>
 </table>
 
----
+<div align="center"><img src="assets/divider.svg?v=1" alt="" width="720" /></div>
 
 ## 🚀 Quick Start
 
