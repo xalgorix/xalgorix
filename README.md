@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.png?v=4.6.133" alt="Xalgorix — open-source autonomous AI penetration testing agent with exploit-verified findings" width="860" />
+<img src="assets/hero.svg?v=1" alt="Xalgorix — open-source autonomous AI penetration testing agent: an animated live scan runs the 22-phase methodology, then an independent verifier re-exploits every finding (exploit-verified)" width="860" />
 
 <br />
 
