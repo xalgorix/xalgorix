@@ -140,18 +140,18 @@
   <circle cx="686" cy="97" r="5.5" fill="#28c840"/>
   <text x="712" y="102" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13.5" fill="#6b727d">xalgorix · live scan</text>
   <g>
-    <circle cx="1096" cy="97" r="4" fill="#17c964">
+    <circle cx="1073" cy="97" r="4" fill="#17c964">
       <animate attributeName="opacity" dur="1.4s" repeatCount="indefinite" values="0.3;1;0.3"/>
     </circle>
   </g>
-  <text x="1124" y="101" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" fill="#5f9f7e" text-anchor="end">LIVE</text>
+  <text x="1115" y="101" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" fill="#5f9f7e" text-anchor="end">LIVE</text>
 
   <!-- command line -->
   <text x="645" y="156" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="15" fill="#ff3a3f">$</text>
   <g clip-path="url(#type)">
     <text x="662" y="156" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="15" fill="#e9ecf2">xalgorix --target https://app.example.com</text>
   </g>
-  <rect x="1072" y="142" width="8" height="17" fill="#ff3a3f">
+  <rect x="1035" y="142" width="8" height="17" fill="#ff3a3f">
     <animate attributeName="opacity" dur="1s" repeatCount="indefinite" values="0;0;1;1" keyTimes="0;0.12;0.13;1"/>
     <animate attributeName="opacity" dur="12s" repeatCount="indefinite" values="0;0;1;1;0" keyTimes="0;0.11;0.13;0.95;1"/>
   </rect>
