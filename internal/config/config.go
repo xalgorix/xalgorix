@@ -257,6 +257,15 @@ type Config struct {
 	// emergency resource cap; coverage is the default priority.
 	MaxWildcardSubdomains int
 
+	// WildcardExclude lists subdomain patterns to skip when expanding a
+	// wildcard target into per-subdomain sub-scans, so an operator can drop
+	// dev/staging/etc. hosts to save credits and time. Comma-separated via
+	// XALGORIX_WILDCARD_EXCLUDE; empty = scan every discovered host. Matching
+	// is defined in internal/web (subdomainMatchesExclusion): a plain word
+	// matches a whole DNS label, a pattern with * or ? is a glob. The supplied
+	// target and authorized root are always scanned.
+	WildcardExclude []string
+
 	// NoToolAbortAt is how many CONSECUTIVE no-tool-call responses force-stop a
 	// scan (the "reasoning loop" abort). XALGORIX_NO_TOOL_ABORT_AT, default 30.
 	// Set to 0 only when an operator explicitly wants unbounded recovery.
@@ -588,6 +597,7 @@ func load() *Config {
 		MinIterations:           envOrInt("XALGORIX_MIN_ITERATIONS", 50),
 		IterationDelaySec:       envOrFloat("XALGORIX_ITERATION_DELAY", 0),
 		MaxWildcardSubdomains:   envOrInt("XALGORIX_MAX_WILDCARD_SUBDOMAINS", -1),
+		WildcardExclude:         envOrStringSlice("XALGORIX_WILDCARD_EXCLUDE"),
 		NoToolAbortAt:           envOrInt("XALGORIX_NO_TOOL_ABORT_AT", 30),
 		MaxFinishRejections:     envOrInt("XALGORIX_MAX_FINISH_REJECTIONS", 15),
 		TargetAuth:              envOr("XALGORIX_TARGET_AUTH", ""),
@@ -923,7 +933,14 @@ func envOrFloatPtr(key string, fallback float64) *float64 {
 // envOrStringSlice reads a comma-separated env var into a trimmed, non-empty
 // string slice. Empty/unset returns nil.
 func envOrStringSlice(key string) []string {
-	raw := strings.TrimSpace(os.Getenv(key))
+	return ParseCommaList(os.Getenv(key))
+}
+
+// ParseCommaList splits a comma-separated string into a trimmed, lowercased,
+// non-empty slice (nil when the input is empty). Shared by environment parsing
+// and the settings runtime-apply path so both produce identical lists.
+func ParseCommaList(raw string) []string {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}

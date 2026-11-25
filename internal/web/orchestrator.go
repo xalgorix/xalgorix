@@ -1296,6 +1296,29 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 		TotalTargets: total,
 	})
 
+	// Drop discovered subdomains the operator never wants scanned (dev/staging/
+	// internal/etc.) BEFORE the resource cap, so exclusions free up budget the
+	// cap would otherwise spend on unwanted hosts. The supplied target and the
+	// authorized root are mandatory and always survive. Mirrors the cap below:
+	// reduce `subdomains`, log, and surface a message to the operator.
+	if excludePatterns := effectiveWildcardExcludes(scanCfg, req); len(excludePatterns) > 0 {
+		kept, excluded := filterExcludedSubdomains(subdomains, excludePatterns, wt.Assessment, wt.Root)
+		if excluded > 0 {
+			if parentRecord != nil {
+				parentRecord.SubScanSkipped += excluded
+			}
+			subdomains = kept
+			log.Printf("[wildcard] Subdomain exclusions removed %d discovered host(s); %d remain (patterns=%v, XALGORIX_WILDCARD_EXCLUDE / exclude_subdomains); supplied target and root retained", excluded, len(kept), excludePatterns)
+			s.broadcastToInstance(req.InstanceID, WSEvent{
+				Type:         "message",
+				Target:       target,
+				Content:      fmt.Sprintf("🔽 Subdomain exclusion: skipped %d discovered host(s) matching operator patterns; %d host(s) will be scanned (supplied target and authorized root always included).", excluded, len(kept)),
+				TargetIndex:  idx + 1,
+				TotalTargets: total,
+			})
+		}
+	}
+
 	// A wildcard target is one user-visible scan, but every discovered live
 	// subdomain is intentionally expanded into a full agent session: coverage
 	// takes priority over an arbitrary fan-out limit. A positive limit remains

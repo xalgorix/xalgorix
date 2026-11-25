@@ -383,10 +383,16 @@ type ScanRequest struct {
 	Name           string   `json:"name"`            // user-defined scan name
 	SaveOnly       bool     `json:"save_only"`       // if true, save scan config without starting
 	Phases         []int    `json:"phases"`          // selected methodology phases (empty = all)
-	ReconMode      string   `json:"recon_mode"`      // active or passive reconnaissance
-	ScanIntensity  string   `json:"scan_intensity"`  // active or passive testing/scanning
-	CompanyName    string   `json:"company_name"`    // report branding: company name
-	LogoPath       string   `json:"logo_path"`       // report branding: logo file path
+	// ExcludeSubdomains are operator patterns for subdomains to skip in a
+	// wildcard scan (same syntax as XALGORIX_WILDCARD_EXCLUDE), e.g.
+	// ["staging","dev-*","*.internal.example.com"]. Discovered hosts matching
+	// any pattern are not expanded into sub-scans; the supplied target and its
+	// authorized root are always scanned. Merged with the server default.
+	ExcludeSubdomains []string `json:"exclude_subdomains"`
+	ReconMode         string   `json:"recon_mode"`     // active or passive reconnaissance
+	ScanIntensity     string   `json:"scan_intensity"` // active or passive testing/scanning
+	CompanyName       string   `json:"company_name"`   // report branding: company name
+	LogoPath          string   `json:"logo_path"`      // report branding: logo file path
 	// TargetAuth carries per-scan authenticated-scanning material so the
 	// agent can exercise post-login attack surface. Format mirrors
 	// XALGORIX_TARGET_AUTH (see httpclient/sessionauth.go): a header/cookie
