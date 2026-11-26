@@ -54,7 +54,7 @@ func TestFilterExcludedSubdomains(t *testing.T) {
 	}
 	patterns := []string{"dev", "staging", "*-qa", "*.internal.example.com"}
 	// dev.example.com matches "dev" but is mandatory, so it must survive.
-	kept, skipped := filterExcludedSubdomains(subs, patterns, "dev.example.com")
+	kept, skipped := filterExcludedSubdomains(subs, patterns, 0, nil, "dev.example.com")
 	wantKept := []string{"www.example.com", "dev.example.com", "api.example.com"}
 	if !reflect.DeepEqual(kept, wantKept) {
 		t.Fatalf("kept=%v want %v", kept, wantKept)
@@ -64,9 +64,38 @@ func TestFilterExcludedSubdomains(t *testing.T) {
 	}
 }
 
+// On a resumed inventory the consumed prefix and started hosts are never
+// filtered, so the resume index still points at the same host; only unstarted
+// hosts past it follow the patterns.
+func TestFilterExcludedSubdomains_KeepsConsumedPrefixAndStartedHosts(t *testing.T) {
+	subs := []string{
+		"www.example.com",
+		"dev.example.com",     // consumed; legacy child entry with no id or start time
+		"api.example.com",     // consumed
+		"staging.example.com", // past the index, child with an id
+		"dev-api.example.com", // past the index, child with a start time only
+		"dev-web.example.com", // past the index, never started
+		"shop.example.com",
+	}
+	existing := []SubScanSummary{
+		{Target: "dev.example.com", Status: "finished"},
+		{ID: "child-staging", Target: "staging.example.com", Status: "running"},
+		{Target: "dev-api.example.com", Status: "stopped", StartedAt: "2026-01-01T00:00:00Z"},
+		{Target: "dev-web.example.com", Status: "pending"},
+	}
+	kept, skipped := filterExcludedSubdomains(subs, []string{"dev", "staging", "dev-*"}, 3, existing)
+	want := []string{"www.example.com", "dev.example.com", "api.example.com", "staging.example.com", "dev-api.example.com", "shop.example.com"}
+	if !reflect.DeepEqual(kept, want) || skipped != 1 {
+		t.Fatalf("kept=%v skipped=%d, want %v skipped=1", kept, skipped, want)
+	}
+	if !reflect.DeepEqual(kept[:3], subs[:3]) {
+		t.Fatalf("consumed prefix changed: %v", kept[:3])
+	}
+}
+
 func TestFilterExcludedSubdomains_NoPatternsIsPassthrough(t *testing.T) {
 	subs := []string{"a.example.com", "b.example.com"}
-	kept, skipped := filterExcludedSubdomains(subs, nil)
+	kept, skipped := filterExcludedSubdomains(subs, nil, 0, nil)
 	if skipped != 0 || !reflect.DeepEqual(kept, subs) {
 		t.Fatalf("passthrough failed: kept=%v skipped=%d", kept, skipped)
 	}

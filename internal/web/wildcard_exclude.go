@@ -85,7 +85,15 @@ func subdomainMatchesExclusion(host, pattern string) bool {
 // operator-supplied target and the authorized root) are always retained even if
 // a pattern would match them — an explicit scope decision must never drop the
 // host the operator actually asked for.
-func filterExcludedSubdomains(subdomains, patterns []string, mandatory ...string) (kept []string, skipped int) {
+//
+// Like capWildcardInventory, the filter is safe to re-run on a resumed
+// inventory, where the patterns come from the live config and may have changed
+// since the scan started. The first `consumed` entries (positions the scan has
+// already moved past) and any host with a started child in `existing` are
+// always kept: the resume index points into this list, so dropping an entry
+// before it would move the index past a host that was never scanned, and a
+// started host's child record and findings must stay attached to the parent.
+func filterExcludedSubdomains(subdomains, patterns []string, consumed int, existing []SubScanSummary, mandatory ...string) (kept []string, skipped int) {
 	if len(patterns) == 0 || len(subdomains) == 0 {
 		return subdomains, 0
 	}
@@ -95,9 +103,15 @@ func filterExcludedSubdomains(subdomains, patterns []string, mandatory ...string
 			mand[h] = true
 		}
 	}
+	started := make(map[string]bool, len(existing))
+	for _, child := range existing {
+		if child.ID != "" || child.StartedAt != "" {
+			started[strings.TrimSpace(child.Target)] = true
+		}
+	}
 	kept = make([]string, 0, len(subdomains))
-	for _, sub := range subdomains {
-		if mand[hostForExclusionMatch(sub)] {
+	for i, sub := range subdomains {
+		if i < consumed || started[strings.TrimSpace(sub)] || mand[hostForExclusionMatch(sub)] {
 			kept = append(kept, sub)
 			continue
 		}

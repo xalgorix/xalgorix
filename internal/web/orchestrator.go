@@ -1300,9 +1300,16 @@ func (s *Server) runWildcardTarget(ctx context.Context, scanCfg *config.Config, 
 	// internal/etc.) BEFORE the resource cap, so exclusions free up budget the
 	// cap would otherwise spend on unwanted hosts. The supplied target and the
 	// authorized root are mandatory and always survive. Mirrors the cap below:
-	// reduce `subdomains`, log, and surface a message to the operator.
+	// reduce `subdomains`, log, and surface a message to the operator. On a
+	// resume the patterns come from the live config, so positions the scan has
+	// already moved past and hosts with a started child are kept: the resume
+	// index must keep pointing at the same host.
 	if excludePatterns := effectiveWildcardExcludes(scanCfg, req); len(excludePatterns) > 0 {
-		kept, excluded := filterExcludedSubdomains(subdomains, excludePatterns, wt.Assessment, wt.Root)
+		var existing []SubScanSummary
+		if parentRecord != nil {
+			existing = parentRecord.SubScans
+		}
+		kept, excluded := filterExcludedSubdomains(subdomains, excludePatterns, resumeFromSubIndex, existing, wt.Assessment, wt.Root)
 		if excluded > 0 {
 			if parentRecord != nil {
 				parentRecord.SubScanSkipped += excluded
