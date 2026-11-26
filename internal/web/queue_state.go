@@ -47,6 +47,7 @@ func (s *Server) saveQueueStateDurable(idx int, req ScanRequest, progress ...que
 		LogoPath:       req.LogoPath,
 		DiscordWebhook: req.DiscordWebhook,
 	}
+	state.ExcludeSubdomains = append([]string(nil), req.ExcludeSubdomains...)
 	if len(progress) > 0 {
 		p := progress[0]
 		state.ActiveTarget = p.ActiveTarget
@@ -344,6 +345,7 @@ func scanRequestFromQueueState(state *QueueState, sourcePath string) ScanRequest
 		CompanyName:          state.CompanyName,
 		LogoPath:             state.LogoPath,
 		DiscordWebhook:       state.DiscordWebhook,
+		ExcludeSubdomains:    append([]string(nil), state.ExcludeSubdomains...),
 		ResumeActiveTarget:   state.ActiveTarget,
 		ResumeScanDir:        state.ActiveScanDir,
 		ResumeScanID:         state.ActiveScanID,

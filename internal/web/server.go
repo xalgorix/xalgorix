@@ -647,6 +647,7 @@ type QueueState struct {
 	CompanyName           string   `json:"company_name,omitempty"`
 	LogoPath              string   `json:"logo_path,omitempty"`
 	DiscordWebhook        string   `json:"discord_webhook,omitempty"`
+	ExcludeSubdomains     []string `json:"exclude_subdomains,omitempty"` // per-scan wildcard exclusions, restored on resume
 	Paused                bool     `json:"paused,omitempty"`
 	ActiveTarget          string   `json:"active_target,omitempty"`
 	ActiveScanDir         string   `json:"active_scan_dir,omitempty"`
