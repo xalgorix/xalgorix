@@ -54,26 +54,6 @@
 
 <div align="center"><img src="assets/divider.svg?v=1" alt="" width="720" /></div>
 
-## 🤝 Sponsors
-
-Xalgorix is supported by proxy-infrastructure partners — handy for checking how your own apps behave across regions. Proxy-Seller speaks **HTTP(S) and SOCKS5**, the protocols Xalgorix uses.
-
-<table>
-  <tr>
-    <td align="center" valign="middle">
-      <a href="https://proxy-seller.com/?partner=11571212D46044C9"><img src="assets/proxyseller_xalgorix.jpg" alt="Proxy-Seller" height="132" /></a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="top">
-      <b><a href="https://proxy-seller.com/?partner=11571212D46044C9">Proxy-Seller</a></b><br/>
-      <sub>47M+ residential IPs · 220+ locations · residential, mobile, ISP &amp; datacenter<br/>Xalgorix users get <b>15% off</b> with <code>XALGORIX</code></sub>
-    </td>
-  </tr>
-</table>
-
-<div align="center"><img src="assets/divider.svg?v=1" alt="" width="720" /></div>
-
 ## 🚀 Quick Start
 
 **Install (one line):**
@@ -166,8 +146,7 @@ Need merge gating or a full exploit-verified pentest of the running app? Start a
 | ✨ [Features](#-features) | 🔀 [Scan Modes](#-scan-modes) | 🧪 [Development](#-development) |
 | 📥 [Installation](#-installation) | 📂 [Scan Your Code](#-scan-your-code-no-target-needed) | 🚨 [Safety Notes](#-safety-notes) |
 | 🧭 [Methodology](#-methodology) | 📄 [Reports](#-reports) | 📜 [License](#-license) |
-| 🔧 [Settings](#-settings) | 🔗 [Links](#-links) | 🤝 [Sponsors](#-sponsors) |
-| ❓ [FAQ](#-faq) | | |
+| 🔧 [Settings](#-settings) | 🔗 [Links](#-links) | ❓ [FAQ](#-faq) |
 
 ## 🔎 Overview
 
