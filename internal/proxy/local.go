@@ -97,6 +97,9 @@ type localHandler struct {
 	// tunnels, when non-nil, tracks open CONNECT tunnels so Close can end
 	// them.
 	tunnels *tunnelSet
+	// pinPlainHTTP sends plain-HTTP requests to an HTTP upstream with the
+	// checked address in the request line (see GuardedOptions).
+	pinPlainHTTP bool
 }
 
 func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -115,30 +118,39 @@ func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.guard != nil {
 		target := requestHostPort(r.URL)
 		if err := h.guard(target); err != nil {
-			refuseDestination(w)
+			refuseDestination(w, target, err)
 			return
 		}
 		if h.upstream != nil {
 			// Check every address the name resolves to (a name that does
-			// not resolve is refused), and connect to the checked address
-			// where the route allows it: through a SOCKS5 upstream the
+			// not resolve is refused) and send the checked address where
+			// the route allows it. Through a SOCKS5 upstream the
 			// connection goes to out.URL.Host while the Host header keeps
 			// the name. An HTTP upstream is sent the name in the request
-			// line (net/http writes out.Host there), so for plain HTTP
-			// through an HTTP proxy that proxy resolves the name again.
+			// line (net/http writes out.Host there) unless pinPlainHTTP
+			// puts the checked address there instead.
 			pinned, err := h.resolveChecked(r.Context(), target)
 			if err != nil {
-				refuseDestination(w)
+				refuseDestination(w, target, err)
 				return
 			}
 			out.URL.Host = pinned
+			if h.pinPlainHTTP && h.upstream.Type != ProxyTypeSOCKS5 {
+				path := r.URL.EscapedPath()
+				if path == "" {
+					path = "/"
+				}
+				// RequestURI() turns "//host/path" into scheme://host/path,
+				// and net/http then writes it to the request line as is.
+				out.URL.Opaque = "//" + pinned + path
+			}
 		}
 	}
 	resp, err := h.transport.RoundTrip(out)
 	if err != nil {
 		var refused *refusedDestinationError
 		if errors.As(err, &refused) {
-			refuseDestination(w)
+			refuseDestination(w, refused.address, refused.err)
 			return
 		}
 		http.Error(w, "upstream proxy request failed", http.StatusBadGateway)
@@ -184,7 +196,7 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var refused *refusedDestinationError
 		if errors.As(err, &refused) {
-			refuseDestination(w)
+			refuseDestination(w, refused.address, refused.err)
 			return
 		}
 		http.Error(w, "upstream proxy CONNECT failed", http.StatusBadGateway)
@@ -208,8 +220,21 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
 	}
-	// When either side finishes, close both (the deferred Closes), so a
-	// peer that never closes its end cannot hold the tunnel open.
+	if h.tunnels == nil {
+		// The required-proxy bridge serves CLI tools, some of which
+		// half-close after sending and then read the reply.
+		go func() {
+			_, _ = io.Copy(upstreamConn, clientBuffer)
+			if tcp, ok := upstreamConn.(*net.TCPConn); ok {
+				_ = tcp.CloseWrite()
+			}
+		}()
+		_, _ = io.Copy(clientConn, upstreamReader)
+		return
+	}
+	// Guarded tunnels carry a browser's traffic to untrusted peers: when
+	// either side finishes, close both (the deferred Closes), so a peer
+	// that never closes its end cannot hold the tunnel open.
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upstreamConn, clientBuffer)

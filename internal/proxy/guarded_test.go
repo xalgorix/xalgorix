@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -121,7 +122,7 @@ func TestGuardedLocalRefusesGuardedDestinations(t *testing.T) {
 	allowedTLS, allowedTLSHits := countingServer(t, true, "public-tls")
 
 	var asked atomic.Int32
-	g, err := StartGuardedLocal(nil, refuseAddresses(&asked, serverHostPort(secret), serverHostPort(secretTLS)))
+	g, err := StartGuardedLocal(nil, refuseAddresses(&asked, serverHostPort(secret), serverHostPort(secretTLS)), GuardedOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestGuardedLocalChecksTheDialedAddress(t *testing.T) {
 	// destination check and must be caught when it is dialed.
 	g, err := StartGuardedLocal(nil, refuseAddresses(&asked,
 		serverHostPort(secret), "[::1]:"+serverPort(t, secret),
-		serverHostPort(secretTLS), "[::1]:"+serverPort(t, secretTLS)))
+		serverHostPort(secretTLS), "[::1]:"+serverPort(t, secretTLS)), GuardedOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +185,7 @@ func TestGuardedLocalChecksTheDialedAddress(t *testing.T) {
 func TestGuardedLocalExemptConnectOnly(t *testing.T) {
 	bridge, bridgeHits := countingServer(t, true, "bridge")
 	refuseAll := func(string) error { return errors.New("refused") }
-	g, err := StartGuardedLocal(nil, refuseAll, serverHostPort(bridge))
+	g, err := StartGuardedLocal(nil, refuseAll, GuardedOptions{Exempt: []string{serverHostPort(bridge)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +290,7 @@ func TestGuardedLocalUpstreamChecksResolvedAddressesAndPins(t *testing.T) {
 		}
 		return nil
 	}
-	g, err := StartGuardedLocal(up, guard)
+	g, err := StartGuardedLocal(up, guard, GuardedOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,6 +346,95 @@ func TestGuardedLocalUpstreamChecksResolvedAddressesAndPins(t *testing.T) {
 	}
 }
 
+// rawUpstream is an HTTP proxy that records each raw request line and Host
+// header (net/http's server would replace the Host header with the
+// request-line host) and answers "via-upstream".
+func rawUpstream(t *testing.T) (addr string, lines, hosts func() []string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var gotLines, gotHosts []string
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				line, _ := br.ReadString('\n')
+				host := ""
+				for {
+					h, err := br.ReadString('\n')
+					if err != nil || strings.TrimSpace(h) == "" {
+						break
+					}
+					if k, v, ok := strings.Cut(h, ":"); ok && strings.EqualFold(k, "Host") {
+						host = strings.TrimSpace(v)
+					}
+				}
+				mu.Lock()
+				gotLines = append(gotLines, strings.TrimSpace(line))
+				gotHosts = append(gotHosts, host)
+				mu.Unlock()
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nvia-upstream")
+			}(c)
+		}
+	}()
+	snapshot := func(s *[]string) func() []string {
+		return func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), (*s)...) }
+	}
+	return ln.Addr().String(), snapshot(&gotLines), snapshot(&gotHosts)
+}
+
+// For an intercepting proxy on this machine, plain HTTP is sent with the
+// checked address in the request line and the name kept in the Host header,
+// so the upstream has no name to resolve to this machine.
+func TestGuardedLocalPinsPlainHTTPForLocalUpstream(t *testing.T) {
+	addr, lines, hosts := rawUpstream(t)
+	up, err := Parse("http://" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := StartGuardedLocal(up, func(string) error { return nil }, GuardedOptions{PinPlainHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	resp, err := guardedClient(t, g).Get("http://localhost:8080/api/x?q=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "via-upstream" {
+		t.Fatalf("body=%q", body)
+	}
+	gotLines, gotHosts := lines(), hosts()
+	if len(gotLines) != 1 {
+		t.Fatalf("upstream saw %v", gotLines)
+	}
+	want := []string{"GET http://127.0.0.1:8080/api/x?q=1 HTTP/1.1", "GET http://[::1]:8080/api/x?q=1 HTTP/1.1"}
+	if gotLines[0] != want[0] && gotLines[0] != want[1] {
+		t.Fatalf("request line = %q, want the checked address with path and query", gotLines[0])
+	}
+	if gotHosts[0] != "localhost:8080" {
+		t.Fatalf("Host header = %q, want the original name", gotHosts[0])
+	}
+}
+
+// count reports how many connections open tunnels hold.
+func (t *tunnelSet) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.conns)
+}
+
 // When one side of a tunnel ends, the proxy closes the other, so a peer that
 // ignores the close cannot hold the tunnel (and its connections) open; Close
 // ends tunnels that are still open.
@@ -354,6 +444,8 @@ func TestGuardedLocalTunnelTeardown(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	serverSawEOF := make(chan struct{}, 4)
 	go func() {
 		for {
@@ -362,20 +454,32 @@ func TestGuardedLocalTunnelTeardown(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				// Never write, never close: just wait for the proxy to hang up.
+				// A hostile peer: read until the proxy stops sending, then
+				// keep the connection open and silent.
 				_, _ = io.Copy(io.Discard, c)
 				serverSawEOF <- struct{}{}
+				<-release
 				_ = c.Close()
 			}(c)
 		}
 	}()
 
-	g, err := StartGuardedLocal(nil, func(string) error { return nil })
+	g, err := StartGuardedLocal(nil, func(string) error { return nil }, GuardedOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = g.Close() })
 	proxyAddr := strings.TrimPrefix(g.URL(), "http://")
+	waitTunnels := func(want int, why string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for g.tunnels.count() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %d tunnel connections open, want %d", why, g.tunnels.count(), want)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 
 	openTunnel := func() net.Conn {
 		t.Helper()
@@ -391,29 +495,32 @@ func TestGuardedLocalTunnelTeardown(t *testing.T) {
 		return c
 	}
 
-	// The client hangs up: the proxy must close its side to the server.
+	// The client hangs up while the server stays silent and open: the
+	// proxy must still tear the whole tunnel down.
 	c := openTunnel()
+	waitTunnels(2, "tunnel open")
 	_ = c.Close()
 	select {
 	case <-serverSawEOF:
 	case <-time.After(3 * time.Second):
-		t.Fatal("tunnel to the server stayed open after the client closed")
+		t.Fatal("the server was never told the client left")
 	}
+	waitTunnels(0, "after the client closed, with a silent server")
 
 	// Close ends a tunnel that is still open on both sides.
 	c = openTunnel()
 	defer c.Close()
-	time.Sleep(100 * time.Millisecond)
+	waitTunnels(2, "second tunnel open")
 	_ = g.Close()
-	select {
-	case <-serverSawEOF:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Close left an open tunnel running")
+	waitTunnels(0, "after Close")
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("client side of the tunnel still open after Close: %v", err)
 	}
 }
 
 func TestStartGuardedLocalRequiresGuard(t *testing.T) {
-	if _, err := StartGuardedLocal(nil, nil); err == nil {
+	if _, err := StartGuardedLocal(nil, nil, GuardedOptions{}); err == nil {
 		t.Fatal("expected an error without a guard")
 	}
 }

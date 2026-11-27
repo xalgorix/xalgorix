@@ -524,7 +524,11 @@ func ensureBrowser(ctxID, proxy string) error {
 		// WebSockets without asking us, so checking the URL it is told to
 		// open is not enough: send every connection through a loopback proxy
 		// that applies the scan's local-network guard to each one.
-		egress, err = startEgressGuard(upstream, s.dialGuard, bridgeAddr)
+		up, pinPlainHTTP, err := egressUpstream(proxy, requiredProxy)
+		if err != nil {
+			return fmt.Errorf("browser egress guard: %w", err)
+		}
+		egress, err = startEgressGuard(up, pinPlainHTTP, s.dialGuard, bridgeAddr)
 		if err != nil {
 			return fmt.Errorf("browser egress guard: %w", err)
 		}

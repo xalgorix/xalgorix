@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -68,15 +69,10 @@ type GuardedLocal struct {
 // tunnels (HTTPS, WebSocket) are then requested from the upstream for the
 // checked address rather than the name, so the upstream cannot resolve the
 // name to something else; TLS SNI and the Host header still carry the name.
-// Plain-HTTP requests are pinned the same way through a SOCKS5 upstream, but
-// an HTTP upstream receives the name in the request line and resolves it
-// again.
-//
-// exempt lists host:port CONNECT destinations that are dialed directly
-// without the guard or the upstream, for a loopback service the client must
-// reach (a browser extension's channel back to this process). Plain-HTTP
-// requests to them are still guarded.
-func StartGuardedLocal(upstream *Proxy, guard GuardFunc, exempt ...string) (*GuardedLocal, error) {
+// Plain-HTTP requests are pinned the same way through a SOCKS5 upstream; an
+// HTTP upstream receives the name in the request line and resolves it again
+// unless opts.PinPlainHTTP is set.
+func StartGuardedLocal(upstream *Proxy, guard GuardFunc, opts GuardedOptions) (*GuardedLocal, error) {
 	if guard == nil {
 		return nil, errors.New("guarded local proxy needs a guard")
 	}
@@ -92,13 +88,14 @@ func StartGuardedLocal(upstream *Proxy, guard GuardFunc, exempt ...string) (*Gua
 		tr.DialContext = guardedDialer(guard).DialContext
 	}
 	h := &localHandler{
-		upstream:  upstream,
-		transport: tr,
-		guard:     guard,
-		exempt:    map[string]bool{},
-		tunnels:   &tunnelSet{conns: map[net.Conn]struct{}{}},
+		upstream:     upstream,
+		transport:    tr,
+		guard:        guard,
+		exempt:       map[string]bool{},
+		tunnels:      &tunnelSet{conns: map[net.Conn]struct{}{}},
+		pinPlainHTTP: opts.PinPlainHTTP && upstream != nil,
 	}
-	for _, address := range exempt {
+	for _, address := range opts.Exempt {
 		if address = strings.TrimSpace(address); address != "" {
 			h.exempt[address] = true
 		}
@@ -110,6 +107,23 @@ func StartGuardedLocal(upstream *Proxy, guard GuardFunc, exempt ...string) (*Gua
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	return &GuardedLocal{url: "http://" + ln.Addr().String(), server: srv, transport: tr, tunnels: h.tunnels}, nil
+}
+
+// GuardedOptions adjusts a GuardedLocal.
+type GuardedOptions struct {
+	// Exempt lists host:port CONNECT destinations that are dialed directly
+	// without the guard or the upstream, for a loopback service the client
+	// must reach (a browser extension's channel back to this process).
+	// Plain-HTTP requests to them are still guarded.
+	Exempt []string
+	// PinPlainHTTP sends plain-HTTP requests to an HTTP upstream with the
+	// checked address in the request line, keeping the name in the Host
+	// header, so the upstream cannot resolve the name to a different
+	// address. Set it for an intercepting proxy on this machine (Caido,
+	// Burp), whose own name lookups could otherwise be steered to this
+	// machine. Leave it off for a proxy that follows RFC 7230 strictly: it
+	// replaces the Host header with the request-line host.
+	PinPlainHTTP bool
 }
 
 // URL is the proxy's address, for example http://127.0.0.1:41234.
@@ -226,10 +240,12 @@ func requestHostPort(u *url.URL) string {
 	return net.JoinHostPort(u.Hostname(), port)
 }
 
-// refuseDestination answers a request the guard refused. Nothing was sent to
-// the destination. The body is deliberately generic: the page that made the
-// request can read it, and should learn nothing about this machine from it.
-func refuseDestination(w http.ResponseWriter) {
+// refuseDestination answers a request the guard refused and logs why for the
+// operator. Nothing was sent to the destination. The body is deliberately
+// generic: the page that made the request can read it, and should learn
+// nothing about this machine from it.
+func refuseDestination(w http.ResponseWriter, address string, err error) {
+	log.Printf("[proxy] refused a guarded connection to %q: %v", address, err)
 	http.Error(w, "Forbidden: destination blocked by network policy", http.StatusForbidden)
 }
 

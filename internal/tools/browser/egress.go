@@ -2,6 +2,8 @@ package browser
 
 import (
 	"fmt"
+	"net"
+	"strings"
 
 	egressproxy "github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
@@ -39,25 +41,52 @@ func browserUpstreamProxy(proxy string) string {
 	}
 }
 
+// egressUpstream returns the proxy a guarded browser's traffic is forwarded
+// through after the guard's checks, or nil for direct connections. In
+// proxy-required mode that is the operator's required upstream itself (the
+// guard proxy speaks to it directly, so its credentials never reach
+// Chromium's arguments). pinPlainHTTP reports whether the upstream is an
+// intercepting proxy on this machine (Caido, Burp), which must be handed the
+// checked address rather than a name it would resolve itself.
+func egressUpstream(proxy string, required bool) (up *egressproxy.Proxy, pinPlainHTTP bool, err error) {
+	if required {
+		p := egressproxy.GetProxy()
+		if p == nil {
+			return nil, false, fmt.Errorf("required browser proxy unavailable")
+		}
+		return p, false, nil
+	}
+	raw := browserUpstreamProxy(proxy)
+	if raw == "" {
+		return nil, false, nil
+	}
+	p, err := egressproxy.Parse(raw)
+	if err != nil {
+		// Do not echo the value: a proxy URL may carry credentials.
+		return nil, false, fmt.Errorf("invalid browser proxy setting")
+	}
+	return p, isLoopbackHost(p.Host), nil
+}
+
+// isLoopbackHost reports whether host names this machine's loopback.
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return host == "localhost" || strings.HasSuffix(host, ".localhost")
+}
+
 // startEgressGuard starts the loopback proxy a guarded browser sends all of
 // its traffic through. Each destination is checked with guard before any
 // connection is made; with no upstream the proxy also checks the address each
 // connection dials after DNS resolution. bridgeAddr, when set, is the
 // extension bridge's loopback address, which the embedded extension must
 // still reach; the bridge itself admits only the extension (checkBridgeOrigin).
-func startEgressGuard(upstream string, guard tools.DialGuard, bridgeAddr string) (*egressproxy.GuardedLocal, error) {
-	var up *egressproxy.Proxy
-	if upstream != "" {
-		p, err := egressproxy.Parse(upstream)
-		if err != nil {
-			// Do not echo the value: a proxy URL may carry credentials.
-			return nil, fmt.Errorf("invalid browser proxy setting")
-		}
-		up = p
-	}
-	var exempt []string
+func startEgressGuard(up *egressproxy.Proxy, pinPlainHTTP bool, guard tools.DialGuard, bridgeAddr string) (*egressproxy.GuardedLocal, error) {
+	opts := egressproxy.GuardedOptions{PinPlainHTTP: pinPlainHTTP}
 	if bridgeAddr != "" {
-		exempt = append(exempt, bridgeAddr)
+		opts.Exempt = append(opts.Exempt, bridgeAddr)
 	}
-	return egressproxy.StartGuardedLocal(up, egressproxy.GuardFunc(guard), exempt...)
+	return egressproxy.StartGuardedLocal(up, egressproxy.GuardFunc(guard), opts)
 }
