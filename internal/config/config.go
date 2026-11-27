@@ -92,6 +92,17 @@ type Config struct {
 	// XALGORIX_PHASE_PLAYBOOKS, default false.
 	PhasePlaybooks bool
 
+	// SystemPromptCoreOnly keeps a compact always-on core of the system prompt
+	// (persona, authorization, target scope, read-only safety, proof standards,
+	// the tool/workspace contract, the live rate policy, the tool schema and the
+	// targets) on every request after a short establishment window, instead of
+	// re-sending the full ~30K-token methodology body each turn. The full prompt
+	// is sent during establishment and re-injected for one turn after any
+	// no-tool/malformed/refusal response. Roughly halves the per-call prompt;
+	// A/B-test findings before relying on it.
+	// XALGORIX_SYSTEM_PROMPT_CORE_ONLY, default false.
+	SystemPromptCoreOnly bool
+
 	// AdvancePastStuckTasks changes the stall response: when a scan makes no new
 	// assessment evidence within the idle limit, instead of terminating the
 	// WHOLE scan, the engine marks the current stalled task blocked and steers
@@ -563,6 +574,7 @@ func load() *Config {
 		RoleScopedTools:          envOrBool("XALGORIX_ROLE_SCOPED_TOOLS", false),
 		LeanToolSchema:           envOrBool("XALGORIX_LEAN_TOOL_SCHEMA", false),
 		PhasePlaybooks:           envOrBool("XALGORIX_PHASE_PLAYBOOKS", false),
+		SystemPromptCoreOnly:     envOrBool("XALGORIX_SYSTEM_PROMPT_CORE_ONLY", false),
 		AdvancePastStuckTasks:    envOrBool("XALGORIX_ADVANCE_PAST_STUCK", false),
 		MaxStuckAdvances:         envOrInt("XALGORIX_MAX_STUCK_ADVANCES", 3),
 		BoundedContext:           envOrBool("XALGORIX_BOUNDED_CONTEXT", true),
