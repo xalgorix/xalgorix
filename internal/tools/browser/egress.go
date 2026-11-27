@@ -7,19 +7,20 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
 
-// bindDialGuard records the registry's dial guard (the scan's local-network
+// bindDialGuard records a registry's dial guard (the scan's local-network
 // guard, the one http_request and send_request apply to every connection) on
 // the scan's browser store, so the browser this scan launches routes every
 // connection through it. The agent's argument checks only see the URL a
 // browser_action call names; redirects, subresources, scripts and WebSockets
-// the page itself opens never pass through them. A registry without a guard
-// leaves the store unchanged.
-func bindDialGuard(r *tools.Registry) {
-	guard := r.DialGuard()
+// the page itself opens never pass through them. The caller holds the store's
+// action lock (withBrowserTransportRecovery), so CleanupContext cannot swap
+// the store between binding and launch. A nil guard leaves the store
+// unchanged.
+func bindDialGuard(ctxID string, guard tools.DialGuard) {
 	if guard == nil {
 		return
 	}
-	s := getBrowserStoreByID(r.GetScanContextID())
+	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	s.dialGuard = guard
 	s.mu.Unlock()

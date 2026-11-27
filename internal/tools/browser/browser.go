@@ -274,7 +274,6 @@ ACTIONS:
 			{Name: "session_name", Description: "Session name for save_session/load_session (default: 'default'). Use distinct names for multi-account IDOR testing, e.g. 'admin', 'user_a'.", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
-			bindDialGuard(r)
 			return browserActionForRegistry(r, args)
 		},
 	})
@@ -291,8 +290,11 @@ ACTIONS:
 			{Name: "proxy", Description: "Optional browser proxy: 'caido', 'none', or a proxy URL", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
-			bindDialGuard(r)
-			return discoverClientRoutesAtURL(r.GetScanContextID(), args["url"], args["proxy"])
+			ctxID, guard := r.GetScanContextID(), r.DialGuard()
+			return withBrowserTransportRecovery(ctxID, func() (tools.Result, error) {
+				bindDialGuard(ctxID, guard)
+				return discoverClientRoutesAtURLAction(ctxID, args["url"], args["proxy"])
+			})
 		},
 	})
 }
@@ -704,9 +706,14 @@ func setupConsoleHandler(ctxID string, p *rod.Page) {
 }
 
 // browserActionForRegistry resolves the correct browser store via the registry's ScanContextID.
+// The registry's dial guard is bound to the store while the action lock is
+// held, so the store it lands on is the one the action then uses.
 func browserActionForRegistry(reg *tools.Registry, args map[string]string) (tools.Result, error) {
-	ctxID := reg.GetScanContextID()
-	return browserActionWithContext(ctxID, args)
+	ctxID, guard := reg.GetScanContextID(), reg.DialGuard()
+	return withBrowserTransportRecovery(ctxID, func() (tools.Result, error) {
+		bindDialGuard(ctxID, guard)
+		return dispatchBrowserAction(ctxID, args)
+	})
 }
 
 func browserActionWithContext(ctxID string, args map[string]string) (tools.Result, error) {

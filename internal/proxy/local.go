@@ -94,6 +94,9 @@ type localHandler struct {
 	// exempt lists the host:port CONNECT destinations a guarded handler
 	// dials directly, without the guard or the upstream.
 	exempt map[string]bool
+	// tunnels, when non-nil, tracks open CONNECT tunnels so Close can end
+	// them.
+	tunnels *tunnelSet
 }
 
 func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -105,21 +108,37 @@ func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "absolute URL required", http.StatusBadRequest)
 		return
 	}
-	if h.guard != nil {
-		if err := h.guard(requestHostPort(r.URL)); err != nil {
-			refuseDestination(w, requestHostPort(r.URL), err)
-			return
-		}
-	}
 	out := r.Clone(r.Context())
 	out.RequestURI = ""
 	out.Header = r.Header.Clone()
 	removeHopByHopHeaders(out.Header)
+	if h.guard != nil {
+		target := requestHostPort(r.URL)
+		if err := h.guard(target); err != nil {
+			refuseDestination(w)
+			return
+		}
+		if h.upstream != nil {
+			// Check every address the name resolves to (a name that does
+			// not resolve is refused), and connect to the checked address
+			// where the route allows it: through a SOCKS5 upstream the
+			// connection goes to out.URL.Host while the Host header keeps
+			// the name. An HTTP upstream is sent the name in the request
+			// line (net/http writes out.Host there), so for plain HTTP
+			// through an HTTP proxy that proxy resolves the name again.
+			pinned, err := h.resolveChecked(r.Context(), target)
+			if err != nil {
+				refuseDestination(w)
+				return
+			}
+			out.URL.Host = pinned
+		}
+	}
 	resp, err := h.transport.RoundTrip(out)
 	if err != nil {
 		var refused *refusedDestinationError
 		if errors.As(err, &refused) {
-			refuseDestination(w, refused.address, refused.err)
+			refuseDestination(w)
 			return
 		}
 		http.Error(w, "upstream proxy request failed", http.StatusBadGateway)
@@ -133,7 +152,27 @@ func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	copyFlushing(w, resp.Body)
+}
+
+// copyFlushing copies a response body to w, flushing after every read so
+// streamed responses (server-sent events, long polls) reach the client as
+// they arrive.
+func copyFlushing(w http.ResponseWriter, body io.Reader) {
+	rc := http.NewResponseController(w)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			_ = rc.Flush()
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
@@ -141,11 +180,11 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CONNECT host:port required", http.StatusBadRequest)
 		return
 	}
-	upstreamConn, upstreamReader, err := h.dialConnect(r.Host)
+	upstreamConn, upstreamReader, err := h.dialConnect(r.Context(), r.Host)
 	if err != nil {
 		var refused *refusedDestinationError
 		if errors.As(err, &refused) {
-			refuseDestination(w, refused.address, refused.err)
+			refuseDestination(w)
 			return
 		}
 		http.Error(w, "upstream proxy CONNECT failed", http.StatusBadGateway)
@@ -162,16 +201,25 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = clientConn.Close() }()
+	if !h.tunnels.add(clientConn, upstreamConn) {
+		return
+	}
+	defer h.tunnels.remove(clientConn, upstreamConn)
 	if _, err := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
 	}
+	// When either side finishes, close both (the deferred Closes), so a
+	// peer that never closes its end cannot hold the tunnel open.
+	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upstreamConn, clientBuffer)
-		if tcp, ok := upstreamConn.(*net.TCPConn); ok {
-			_ = tcp.CloseWrite()
-		}
+		done <- struct{}{}
 	}()
-	_, _ = io.Copy(clientConn, upstreamReader)
+	go func() {
+		_, _ = io.Copy(clientConn, upstreamReader)
+		done <- struct{}{}
+	}()
+	<-done
 }
 
 func (h *localHandler) dialThroughUpstream(target string) (net.Conn, io.Reader, error) {
