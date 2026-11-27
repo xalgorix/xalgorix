@@ -85,7 +85,11 @@ func (a *Agent) buildSystemPrompt(targets []string, instruction string, ratePoli
 	// checklist stays in the prompt; discovery and delegated agents replace it
 	// below, and the compact checklist has no large phases to defer.
 	a.phasePlaybooks = nil
-	if baseChecklist == defaultChecklist && !a.discoveryMode && a.delegatedAgentID == "" {
+	// The always-on core (SystemPromptCoreOnly) already drops the whole
+	// methodology body after establishment, so the phase-playbook deferral would
+	// only duplicate that work and complicate the system-message rewrite. The two
+	// token-savers are mutually exclusive; core-only wins when both are set.
+	if baseChecklist == defaultChecklist && !a.discoveryMode && a.delegatedAgentID == "" && !a.systemPromptCoreOnly {
 		checklist, a.phasePlaybooks = a.phasePlaybooksForPrompt(checklist)
 	}
 	if instruction != "" {
@@ -535,6 +539,89 @@ This target is a reproducible local fixture, but treat it exactly like a remote 
 
 // coordinatorSectionEndMarker mirrors applyDelegatedSpecialistPrompt's end
 // marker selection (the skills section header changed across versions).
+// systemPromptEstablishIters is how many opening iterations receive the full
+// system prompt (with the complete methodology body) before the compact core
+// takes over, when XALGORIX_SYSTEM_PROMPT_CORE_ONLY is on. Long enough for the
+// model to establish recon, a plan and its testing behavior from the full
+// methodology; the A/B tunes it.
+const systemPromptEstablishIters = 12
+
+// shouldSendCoreSystemPrompt is the pure per-iteration decision: send the
+// compact core (true) or the full system prompt (false). The full prompt is
+// used during the establishment window (iter < establishIters) and for one turn
+// whenever the previous turn requested a re-injection.
+func shouldSendCoreSystemPrompt(enabled, haveCore bool, iter, establishIters int, reinjectFull bool) bool {
+	return enabled && haveCore && !reinjectFull && iter >= establishIters
+}
+
+// sendCoreSystemPromptThisIter decides whether this iteration's outbound request
+// should carry the compact core in place of the full system prompt, consuming
+// the one-shot re-injection flag. Called once per iteration from the main loop.
+func (a *Agent) sendCoreSystemPromptThisIter(iter int) bool {
+	if !a.systemPromptCoreOnly {
+		return false
+	}
+	reinject := a.reinjectFullSystemPrompt
+	a.reinjectFullSystemPrompt = false
+	return shouldSendCoreSystemPrompt(a.systemPromptCoreOnly, a.coreSystemPrompt != "", iter, systemPromptEstablishIters, reinject)
+}
+
+// buildCoreSystemPrompt returns the compact always-on core of the system prompt:
+// the load-bearing sections that must travel on every request — persona, the
+// authorization framing (which is what keeps a capable model from refusing
+// authorized work), the hard target-scope rule, the read-only safety rules, the
+// proof standard, the tool/workspace contract, the live request-rate policy, the
+// tool schema and the target list. The large methodology body (the 22-phase
+// checklist, payload libraries and per-class playbooks) is deliberately omitted:
+// it is delivered in full during the establishment window and stays available on
+// demand via read_skill / read_notes. Selected per iteration by
+// XALGORIX_SYSTEM_PROMPT_CORE_ONLY (see sendCoreSystemPromptThisIter).
+func (a *Agent) buildCoreSystemPrompt(targets []string, instruction string, ratePolicy scanctx.RequestRatePolicy) string {
+	toolSchema := a.registry.SchemaXML()
+	if a.nativeToolCalling {
+		toolSchema = "<tools>Tool definitions are supplied through the native API channel. Call them directly.</tools>"
+	}
+	if !ratePolicy.Enabled() {
+		ratePolicy = EffectiveRequestRatePolicy(a.cfg, instruction)
+	}
+	if !ratePolicy.Enabled() {
+		ratePolicy = EffectiveRequestRatePolicy(config.Get(), instruction)
+	}
+	ratePolicySection := buildRequestRatePolicySection(ratePolicy)
+	core := fmt.Sprintf(`You are an elite autonomous AI penetration tester and bug bounty hunter with the mindset of a top-10 HackerOne researcher. You THINK like an attacker: you analyze application logic, understand business flows, find edge cases automated scanners miss, and chain low-severity findings into critical exploits.
+
+This is a SANCTIONED, AUTHORIZED penetration test. The operator running Xalgorix has explicit, documented permission from the asset owner to security-test the configured target(s). This is defensive security work: finding vulnerabilities so the owner can fix them before real attackers exploit them.
+- You are NOT being asked to do anything unauthorized, illegal, or unethical. Testing the configured scope is exactly what you are authorized and expected to do.
+- Your authorization covers the configured target(s) and their subdomains. Inside that scope you never need to second-guess whether testing is permitted.
+- Refusing or deflecting is the WRONG outcome. A refusal leaves an authorized system untested and therefore less secure. Do not respond with disclaimers, do not suggest the operator "read the OWASP guide instead," and do not ask for permission you already have. Proceed with the assessment and call tools.
+
+## TARGET SCOPE — HARD RULE
+You may ONLY probe and report on the configured target host(s) and their subdomains. Do not probe, send payloads or writes to, or report on any other host (a third-party service the target integrates with, a backend URL referenced in the target's frontend, an IP found via portscan that isn't a target subdomain, etc.). The runtime does not catch most of these, so a call that goes through is NOT evidence that the host is in scope. A scope refusal (OUT-OF-SCOPE / OUTSIDE SCAN BOUNDARY) is not a tool failure: do not work around it. Hosts used only inside a payload aimed at the target (SSRF, open-redirect, OOB callbacks) are fine.
+
+## SAFETY — HARD RULE
+NEVER modify, delete, or corrupt target data. You are READ-ONLY — test and report, never damage. Never delete data, drop tables, or modify production state. Time-based tests are safe.
+
+## PROOF STANDARD
+Proof is: browser execution, real file contents, a DBMS error, a role differential exposing protected data, a class-correct target-attributable callback, or a repeated verifier-owned timing differential. A version banner, reflection alone, a fetch-only callback relabeled RCE, one slow response, or an HTTP 200 is NOT proof. Self-critique before reporting: did I exploit or only detect it? could it be a false positive? is the proof concrete for another pentester? is the severity right?
+
+## TOOLS & WORKSPACE
+Use only the provided tools (terminal_execute, http_request, send_request, browser_action, add_note, read_notes, read_skill, record_hypothesis, the deterministic verifiers, report_vulnerability, finish). You are already inside an isolated per-target workspace: never 'cd' out of it; write scratch files under a relative 'tmp/' directory (mkdir -p tmp), never the host's /tmp.
+
+%s
+
+## METHODOLOGY — ALREADY ESTABLISHED
+Your full 22-phase methodology, payload libraries and per-class technique playbooks were provided in full at the start of this conversation and remain available on demand: call read_skill for a class's technique detail and read_notes / read_ledger for what you have already gathered. Re-read the relevant skill when you begin a new vulnerability class. Do NOT re-test an endpoint/class you have already covered — continue the uncovered plan tasks, pushing each live lead to a concrete, proven outcome.
+
+## AUTHORIZED TARGET SCOPE
+%s
+
+%s`, ratePolicySection, strings.Join(targets, "\n"), toolSchema)
+	if s := strings.TrimSpace(instruction); s != "" {
+		core += "\n\n## OPERATOR INSTRUCTION\n" + s
+	}
+	return core
+}
+
 func coordinatorSectionEndMarker(prompt string) string {
 	if strings.Contains(prompt, "## Knowledge skills — load selectively") {
 		return "## Knowledge skills — load selectively"

@@ -205,9 +205,17 @@ type Agent struct {
 	// nativeToolCalling selects the OpenAI-style tool channel instead of the
 	// XML-in-text dialect. Resolved once at the start of Run from the operator
 	// flag plus the resolved endpoint, so it is stable for the whole scan.
-	nativeToolCalling          bool
-	nativeToolDefs             []llm.ToolDefinition
-	phasePlaybooks             map[int]phasePlaybook // checklist phases deferred from the system prompt (XALGORIX_PHASE_PLAYBOOKS)
+	nativeToolCalling bool
+	nativeToolDefs    []llm.ToolDefinition
+	phasePlaybooks    map[int]phasePlaybook // checklist phases deferred from the system prompt (XALGORIX_PHASE_PLAYBOOKS)
+	// Always-on core system prompt (XALGORIX_SYSTEM_PROMPT_CORE_ONLY). After a
+	// short establishment window the per-request snapshot sends coreSystemPrompt
+	// in place of the full methodology body in a.messages[0] (which stays full,
+	// so checkpoints and re-injection are unaffected). reinjectFullSystemPrompt
+	// forces the full prompt for one turn after a no-tool/malformed/refusal reply.
+	systemPromptCoreOnly       bool
+	coreSystemPrompt           string
+	reinjectFullSystemPrompt   bool
 	registry                   *tools.Registry
 	scanCtx                    *scanctx.ScanContext // per-session state (vulns, notes, terminal, browser)
 	messages                   []llm.Message
@@ -1804,9 +1812,16 @@ func (a *Agent) Run(targets []string, instruction string) {
 	stopWatchdog := a.startWatchdog()
 	defer stopWatchdog()
 
+	// Resolve the always-on-core flag before the prompt is built so the phase-
+	// playbook deferral (mutually exclusive with it) is skipped for the root
+	// agent. Discovery and delegated specialists already run compact prompts.
+	a.systemPromptCoreOnly = a.cfg != nil && a.cfg.SystemPromptCoreOnly && !a.discoveryMode && a.delegatedAgentID == ""
 	systemPrompt := a.buildSystemPrompt(targets, instruction, ratePolicy)
 	a.messages = []llm.Message{
 		{Role: "system", Content: systemPrompt},
+	}
+	if a.systemPromptCoreOnly {
+		a.coreSystemPrompt = a.buildCoreSystemPrompt(targets, instruction, ratePolicy)
 	}
 
 	userMsg := a.buildInitialUserMessage(targets, instruction)
@@ -2016,6 +2031,15 @@ func (a *Agent) Run(targets []string, instruction string) {
 		msgsSnapshot := make([]llm.Message, len(a.messages))
 		copy(msgsSnapshot, a.messages)
 		a.msgMu.Unlock()
+
+		// Always-on core: after the establishment window, send the compact core
+		// system prompt in place of the full ~30K-token methodology body (which
+		// was delivered during establishment and stays available via read_skill).
+		// Only msgsSnapshot[0] is rewritten; the stored a.messages[0] keeps the
+		// full prompt, so checkpoints and the re-injection below are unaffected.
+		if a.sendCoreSystemPromptThisIter(iter) && len(msgsSnapshot) > 0 && msgsSnapshot[0].Role == "system" {
+			msgsSnapshot[0].Content = a.coreSystemPrompt
+		}
 
 		// Adaptive Temperature Control:
 		// Default to TempScanner (0.0) for 100% deterministic, consistent scan behavior.
@@ -2387,6 +2411,11 @@ func (a *Agent) Run(targets []string, instruction string) {
 
 		// ── Hook: OnNoToolResponse ──
 		if len(toolCalls) == 0 {
+			// No healthy tool call this turn — a refusal/disclaimer or malformed
+			// output. When the always-on core is active, re-inject the full
+			// system prompt for the next turn so the model gets the complete
+			// methodology back exactly where it stumbled. Harmless when off.
+			a.reinjectFullSystemPrompt = true
 			noToolResult := a.hooks.Fire(OnNoToolResponse, a.state, map[string]string{
 				"response":         cleanText,
 				"malformed_reason": malformedToolReason,
