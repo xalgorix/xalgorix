@@ -79,6 +79,8 @@ type browserStore struct {
 	currentTab      string
 	savedSessions   map[string][]*proto.NetworkCookie // keyed by session name
 	sessionDir      string                            // base directory for session files
+	hijack          *rod.HijackRouter                 // request guard interception (see installRequestGuard)
+	reqGuard        requestGuardState
 }
 
 // getBrowserStoreByID returns the browser store for a specific context ID.
@@ -285,7 +287,10 @@ ACTIONS:
 			{Name: "proxy", Description: "Optional browser proxy: 'caido', 'none', or a proxy URL", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
-			return discoverClientRoutesAtURL(r.GetScanContextID(), args["url"], args["proxy"])
+			ctxID := r.GetScanContextID()
+			getBrowserStoreByID(ctxID).setRequestGuard(r.RequestGuard())
+			res, err := discoverClientRoutesAtURL(ctxID, args["url"], args["proxy"])
+			return withRefusalReport(ctxID, res), err
 		},
 	})
 }
@@ -581,6 +586,16 @@ func ensureBrowser(ctxID, proxy string) error {
 		ln.Kill()
 		return fmt.Errorf("connect browser: %w", err)
 	}
+	// Check every request against the registry's request guard before
+	// Chromium sends it, redirect hops included. A browser that cannot be
+	// guarded is not used.
+	router, err := installRequestGuard(br, s)
+	if err != nil {
+		_ = br.Close()
+		ln.Kill()
+		return fmt.Errorf("browser request guard: %w", err)
+	}
+	s.hijack = router
 
 	s.transport = transport
 	s.browser = br
@@ -667,15 +682,32 @@ func setupConsoleHandler(ctxID string, p *rod.Page) {
 }
 
 // browserActionForRegistry resolves the correct browser store via the registry's ScanContextID.
+// It also installs the registry's request guard on that store, so the
+// browser refuses the same destinations the HTTP tools refuse, on every
+// redirect hop and subresource (see installRequestGuard).
 func browserActionForRegistry(reg *tools.Registry, args map[string]string) (tools.Result, error) {
 	ctxID := reg.GetScanContextID()
+	getBrowserStoreByID(ctxID).setRequestGuard(reg.RequestGuard())
 	return browserActionWithContext(ctxID, args)
 }
 
 func browserActionWithContext(ctxID string, args map[string]string) (tools.Result, error) {
-	return withBrowserTransportRecovery(ctxID, func() (tools.Result, error) {
+	res, err := withBrowserTransportRecovery(ctxID, func() (tools.Result, error) {
 		return dispatchBrowserAction(ctxID, args)
 	})
+	return withRefusalReport(ctxID, res), err
+}
+
+// withRefusalReport appends the requests the request guard refused during
+// the action to its output, so the agent learns why a page did not load.
+func withRefusalReport(ctxID string, res tools.Result) tools.Result {
+	if note := getBrowserStoreByID(ctxID).takeRefusalReport(); note != "" {
+		if res.Output != "" && !strings.HasSuffix(res.Output, "\n") {
+			res.Output += "\n"
+		}
+		res.Output += note
+	}
+	return res
 }
 
 func dispatchBrowserAction(ctxID string, args map[string]string) (tools.Result, error) {
@@ -1760,6 +1792,10 @@ func resetBrowserConnectionLocked(ctxID string, s *browserStore) {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		closed = s.browser.Context(closeCtx).Close() == nil
+	}
+	if s.hijack != nil {
+		s.hijack.Stop() //nolint:errcheck // the browser is going away
+		s.hijack = nil
 	}
 	s.browser = nil
 	s.transport = nil

@@ -396,8 +396,11 @@ func (a *Agent) shouldBlockForActivityPolicy(toolName string, toolArgs map[strin
 //
 // Tools subject to this gate (Gated_Tools):
 //
-//   - terminal_execute, python_action, browser_action, page_agent,
-//     pageagent — anything that can hit a network target.
+//   - terminal_execute, python_action, browser_action,
+//     discover_client_routes, page_agent, pageagent — anything that can
+//     hit a network target. The browser tools also check every request
+//     the browser makes (redirect hops, scripts, frames) with
+//     checkHTTPHop, through the registry's request guard.
 //   - report_vulnerability — files findings; the explicit
 //     target/endpoint arguments are checked too.
 //   - http_request, send_request — only the request's destination (the
@@ -441,8 +444,8 @@ func (a *Agent) shouldBlockForOutOfScope(toolName string, toolArgs map[string]st
 			}
 		}
 		return false, ""
-	case "terminal_execute", "python_action", "browser_action", "page_agent", "pageagent",
-		"report_vulnerability", "authz_matrix", "probe_hypothesis":
+	case "terminal_execute", "python_action", "browser_action", "discover_client_routes",
+		"page_agent", "pageagent", "report_vulnerability", "authz_matrix", "probe_hypothesis":
 		// gated
 	default:
 		return false, ""
@@ -507,7 +510,8 @@ func httpToolDestinations(raw string) []string {
 
 // checkHTTPHop is the request guard the agent installs on its tool
 // registries (tools.Registry.SetRequestGuard). http_request and send_request
-// call it for every redirect hop before following it, so a redirect cannot
+// call it for every redirect hop before following it, and the browser tools
+// call it for every request Chromium makes, so a redirect cannot
 // reach what a direct request is refused: the operator's machine or listener
 // (shouldBlockForOutOfScope) or another port of a port-pinned target
 // (shouldBlockForTargetScope).

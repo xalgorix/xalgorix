@@ -187,3 +187,33 @@ func portOf(t *testing.T, raw string) int {
 	}
 	return n
 }
+
+// discover_client_routes drives the same browser as browser_action, so its
+// url argument is refused on the operator's machine and listener too.
+func TestShouldBlockForOutOfScope_DiscoverClientRoutes(t *testing.T) {
+	a := &Agent{localGuard: scopeguard.Config{BindAddr: "127.0.0.1", Port: 9137}}
+	for _, u := range []string{"http://127.0.0.1:9137/", "http://localhost:9137/api/settings/export", "http://[::1]:8080/"} {
+		if ok, _ := a.shouldBlockForOutOfScope("discover_client_routes", map[string]string{"url": u}); !ok {
+			t.Errorf("discover_client_routes %q: want blocked, got allowed", u)
+		}
+	}
+	if ok, reason := a.shouldBlockForOutOfScope("discover_client_routes", map[string]string{"url": "https://93.184.216.34/"}); ok {
+		t.Errorf("discover_client_routes on a public address: want allowed, got blocked (%s)", reason)
+	}
+}
+
+// checkHTTPHop, the request guard the browser now applies to every request,
+// refuses the dashboard's settings export by any loopback spelling.
+func TestCheckHTTPHop_RefusesSettingsExport(t *testing.T) {
+	a := &Agent{localGuard: scopeguard.Config{BindAddr: "127.0.0.1", Port: 9137}}
+	for _, u := range []string{
+		"http://127.0.0.1:9137/api/settings/export",
+		"http://localhost:9137/api/settings/export",
+		"http://2130706433:9137/api/settings/export",
+		"http://[::1]:9137/api/settings/export",
+	} {
+		if err := a.checkHTTPHop(u); err == nil {
+			t.Errorf("checkHTTPHop(%q): want refused, got allowed", u)
+		}
+	}
+}
