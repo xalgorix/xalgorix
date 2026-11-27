@@ -83,7 +83,8 @@ func serverPort(t *testing.T, srv *httptest.Server) string {
 }
 
 // wantForbidden asserts a plain-HTTP request was answered with the proxy's
-// generic 403, which says nothing about the destination.
+// 403, which says it is not the target's answer but nothing about the
+// destination.
 func wantForbidden(t *testing.T, client *http.Client, target string) {
 	t.Helper()
 	resp, err := client.Get(target)
@@ -95,8 +96,11 @@ func wantForbidden(t *testing.T, client *http.Client, target string) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("%s: status=%d body=%q, want 403", target, resp.StatusCode, body)
 	}
-	if strings.Contains(string(body), "127.0.0.1") || strings.Contains(string(body), "operator") {
+	if strings.Contains(string(body), "127.0.0.1") || strings.Contains(string(body), "::1") || strings.Contains(string(body), "operator") {
 		t.Fatalf("%s: refusal body leaks detail: %q", target, body)
+	}
+	if !strings.Contains(string(body), "not from the target") {
+		t.Fatalf("%s: refusal body does not say it is the proxy's answer: %q", target, body)
 	}
 }
 
@@ -257,11 +261,11 @@ func (u *recordingUpstream) seen() (connects, urls, hosts []string) {
 	return append([]string(nil), u.connects...), append([]string(nil), u.urls...), append([]string(nil), u.hosts...)
 }
 
-// With an upstream proxy (an operator's proxy, Caido), the proxy resolves the
-// destination itself and checks every address: a name resolving to a refused
-// address, or not resolving at all, never reaches the upstream, and an
-// allowed name is forwarded as the checked address so the upstream cannot
-// resolve it differently.
+// With an upstream proxy on this machine (Caido, Burp, a local proxy), the
+// proxy resolves the destination itself and checks every address: a name
+// resolving to a refused address, or not resolving at all, never reaches the
+// upstream, and an allowed name is forwarded as the checked address so the
+// upstream cannot resolve it differently.
 func TestGuardedLocalUpstreamChecksResolvedAddressesAndPins(t *testing.T) {
 	upstream := newRecordingUpstream(t)
 	up, err := Parse(upstream.URL)
@@ -339,10 +343,428 @@ func TestGuardedLocalUpstreamChecksResolvedAddressesAndPins(t *testing.T) {
 	if host, _, err := net.SplitHostPort(connects[0]); err != nil || net.ParseIP(host) == nil {
 		t.Fatalf("upstream CONNECT was for %q, want the checked IP address", connects[0])
 	}
-	// Plain HTTP through an HTTP upstream keeps the name in the request line
-	// and Host header (virtual hosting); only the resolution check applies.
-	if urls[0] != "localhost:8080" || hosts[0] != "localhost:8080" {
-		t.Fatalf("plain HTTP via HTTP upstream: url host=%q Host=%q", urls[0], hosts[0])
+	// Plain HTTP carries the checked address in the request line too (the
+	// Host header keeps the name: see TestGuardedLocalPinsPlainHTTPForLocalUpstream).
+	if host, _, err := net.SplitHostPort(urls[0]); err != nil || net.ParseIP(host) == nil {
+		t.Fatalf("plain HTTP via the local upstream was for %q, want the checked IP address", urls[0])
+	}
+}
+
+// treatUpstreamsAsRemote makes every upstream count as one on another
+// machine for the rest of the test, so a loopback test proxy can stand in
+// for a remote one.
+func treatUpstreamsAsRemote(t *testing.T) {
+	t.Helper()
+	prev := upstreamOnThisMachine
+	upstreamOnThisMachine = func(*Proxy) bool { return false }
+	t.Cleanup(func() { upstreamOnThisMachine = prev })
+}
+
+// An upstream on another machine is sent the name once the guard has
+// accepted it, so proxies that filter by domain and pivots into networks
+// this machine cannot resolve keep working. Destinations the guard refuses,
+// including names that resolve here to a refused address, still never reach
+// it.
+func TestGuardedLocalRemoteUpstreamIsSentNames(t *testing.T) {
+	treatUpstreamsAsRemote(t)
+	upstream := newRecordingUpstream(t)
+	up, err := Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, targetHits := countingServer(t, true, "target")
+	targetPort := serverPort(t, target)
+	refusedLocalPort := "9"
+	guard := func(address string) error {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
+		if port == "9137" {
+			return errOperatorMachine
+		}
+		// Like the real guard, resolve names and refuse any that lands on
+		// loopback at the refused port.
+		if port == refusedLocalPort {
+			addrs := []string{host}
+			if net.ParseIP(host) == nil {
+				addrs, _ = net.LookupHost(host)
+			}
+			for _, a := range addrs {
+				if ip := net.ParseIP(a); ip != nil && ip.IsLoopback() {
+					return errOperatorMachine
+				}
+			}
+		}
+		return nil
+	}
+	g, err := StartGuardedLocal(up, guard, GuardedOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	client := guardedClient(t, g)
+
+	wantForbidden(t, client, "http://127.0.0.1:9137/api/settings/export")
+	wantTunnelRefused(t, client, "https://127.0.0.1:9137/")
+	wantForbidden(t, client, "http://localhost:"+refusedLocalPort+"/")
+	wantTunnelRefused(t, client, "https://localhost:"+refusedLocalPort+"/")
+	if connects, urls, _ := upstream.seen(); len(connects) != 0 || len(urls) != 0 {
+		t.Fatalf("refused destinations reached the upstream: connects=%v urls=%v", connects, urls)
+	}
+
+	// Allowed names go to the upstream as names.
+	resp, err := client.Get("http://localhost:8080/page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "via-upstream" {
+		t.Fatalf("allowed HTTP request: body=%q", body)
+	}
+	resp, err = client.Get("https://localhost:" + targetPort + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "target" || targetHits.Load() != 1 {
+		t.Fatalf("allowed tunnel: body=%q hits=%d", body, targetHits.Load())
+	}
+	// A name this machine cannot resolve is the upstream's to resolve.
+	resp, err = client.Get("http://internal-only.invalid/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "via-upstream" {
+		t.Fatalf("unresolvable name via remote upstream: status=%d body=%q", resp.StatusCode, body)
+	}
+	if resp, err := client.Get("https://internal-only.invalid/"); err == nil {
+		resp.Body.Close()
+	}
+
+	connects, urls, _ := upstream.seen()
+	wantConnects := []string{"localhost:" + targetPort, "internal-only.invalid:443"}
+	if strings.Join(connects, ",") != strings.Join(wantConnects, ",") {
+		t.Fatalf("upstream CONNECTs = %v, want the names %v", connects, wantConnects)
+	}
+	wantURLs := []string{"localhost:8080", "internal-only.invalid"}
+	if strings.Join(urls, ",") != strings.Join(wantURLs, ",") {
+		t.Fatalf("upstream plain-HTTP hosts = %v, want the names %v", urls, wantURLs)
+	}
+}
+
+// Whether an upstream runs on this machine: loopback names and addresses
+// (IPv4-mapped too), the unspecified address, this machine's interface
+// addresses, and names that do not resolve here (the strict answer). The
+// guard plays no part, so a local-targets opt-in cannot make a local proxy
+// look remote.
+func TestUpstreamOnThisMachine(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"127.0.0.2", true},
+		{"::1", true},
+		{"[::1]", true},
+		{"::ffff:127.0.0.1", true},
+		{"localhost", true},
+		{"localhost.", true},
+		{"caido.localhost", true},
+		{"0.0.0.0", true},
+		{"::", true},
+		{"proxy.name.invalid", true}, // does not resolve here
+		{"198.51.100.7", false},      // another machine (TEST-NET-2)
+		{"2001:db8::7", false},       // another machine (documentation range)
+	}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.IP.To4() != nil {
+				cases = append(cases, struct {
+					host string
+					want bool
+				}{n.IP.String(), true}) // this machine's own interface
+				break
+			}
+		}
+	}
+	for _, c := range cases {
+		if got := upstreamOnThisMachine(&Proxy{Type: ProxyTypeHTTP, Host: c.host, Port: "8080"}); got != c.want {
+			t.Errorf("%s on this machine = %v, want %v", c.host, got, c.want)
+		}
+	}
+}
+
+// A proxy the browser reaches through an address of this machine's own
+// interface is treated as on this machine, and so is handed checked
+// addresses, even when the guard's policy would let that address through as
+// a scan target (the local-targets opt-in).
+func TestGuardedLocalInterfaceUpstreamIsPinnedDespiteGuardOptIn(t *testing.T) {
+	var ifaceIP net.IP
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.IP.To4() != nil {
+				ifaceIP = n.IP
+				break
+			}
+		}
+	}
+	if ifaceIP == nil {
+		t.Skip("no non-loopback IPv4 interface address")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(ifaceIP.String(), "0"))
+	if err != nil {
+		t.Skipf("cannot listen on %s: %v", ifaceIP, err)
+	}
+	upstream := &recordingUpstream{}
+	upstream.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream.mu.Lock()
+		upstream.urls = append(upstream.urls, r.URL.Host)
+		upstream.mu.Unlock()
+		_, _ = io.WriteString(w, "via-upstream")
+	}))
+	_ = upstream.Listener.Close()
+	upstream.Listener = ln
+	upstream.Start()
+	t.Cleanup(upstream.Close)
+	up, err := Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The guard allows everything, like a policy with the local-targets
+	// opt-in switched on.
+	g, err := StartGuardedLocal(up, func(string) error { return nil }, GuardedOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	resp, err := guardedClient(t, g).Get("http://localhost:8080/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	_, urls, _ := upstream.seen()
+	if len(urls) != 1 {
+		t.Fatalf("upstream saw %v", urls)
+	}
+	if host, _, err := net.SplitHostPort(urls[0]); err != nil || net.ParseIP(host) == nil {
+		t.Fatalf("proxy on this machine's interface was sent %q, want a checked IP address", urls[0])
+	}
+}
+
+// Without an upstream, opts.Proxy picks a proxy per destination, the way
+// HTTP_PROXY, HTTPS_PROXY and NO_PROXY work for http_request. Destinations
+// it sends to a proxy are checked like any other, and one it leaves out goes
+// direct.
+func TestGuardedLocalFollowsPerDestinationProxy(t *testing.T) {
+	upstream := newRecordingUpstream(t)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, directHits := countingServer(t, false, "direct")
+	target, targetHits := countingServer(t, true, "target")
+
+	var mu sync.Mutex
+	var asked []string
+	pick := func(req *http.Request) (*url.URL, error) {
+		mu.Lock()
+		asked = append(asked, req.URL.Scheme+"://"+req.URL.Host)
+		mu.Unlock()
+		if req.URL.Host == serverHostPort(direct) { // NO_PROXY
+			return nil, nil
+		}
+		if req.URL.Hostname() == "broken.test" {
+			return nil, errors.New("bad proxy setting")
+		}
+		return upstreamURL, nil
+	}
+	var guardAsked atomic.Int32
+	g, err := StartGuardedLocal(nil, refuseAddresses(&guardAsked, "127.0.0.1:9137"), GuardedOptions{Proxy: pick})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	client := guardedClient(t, g)
+
+	// Refused before a proxy is even chosen.
+	wantForbidden(t, client, "http://127.0.0.1:9137/")
+	// Left out of the proxy: direct.
+	resp, err := client.Get(direct.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "direct" || directHits.Load() != 1 {
+		t.Fatalf("direct request: body=%q hits=%d", body, directHits.Load())
+	}
+	// Through the proxy (a loopback one, so it is handed checked addresses).
+	resp, err = client.Get("http://localhost:8080/page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "via-upstream" {
+		t.Fatalf("proxied HTTP request: body=%q", body)
+	}
+	resp, err = client.Get("https://localhost:" + serverPort(t, target) + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "target" || targetHits.Load() != 1 {
+		t.Fatalf("proxied tunnel: body=%q hits=%d", body, targetHits.Load())
+	}
+	connects, urls, _ := upstream.seen()
+	if len(connects) != 1 || len(urls) != 1 {
+		t.Fatalf("upstream saw connects=%v urls=%v", connects, urls)
+	}
+	for _, hostPort := range []string{connects[0], urls[0]} {
+		if host, _, err := net.SplitHostPort(hostPort); err != nil || net.ParseIP(host) == nil {
+			t.Fatalf("local proxy was sent %q, want a checked IP address", hostPort)
+		}
+	}
+	// A proxy setting that cannot be used is a gateway error from the proxy.
+	resp, err = client.Get("http://broken.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "not from the target") {
+		t.Fatalf("unusable proxy: status=%d body=%q", resp.StatusCode, body)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	joined := strings.Join(asked, ",")
+	if !strings.Contains(joined, "http://localhost:8080") || !strings.Contains(joined, "https://localhost:"+serverPort(t, target)) {
+		t.Fatalf("proxy chooser was asked %v; want http for plain requests and https for tunnels", asked)
+	}
+	if strings.Contains(joined, "9137") {
+		t.Fatalf("proxy chooser was asked about a refused destination: %v", asked)
+	}
+}
+
+// A failed connection is answered with a 502 that names the kind of failure
+// and says it is the proxy's answer, without addresses.
+func TestGuardedLocalBadGatewayNamesTheCause(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ln.Addr().String()
+	_ = ln.Close()
+
+	g, err := StartGuardedLocal(nil, func(string) error { return nil }, GuardedOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	resp, err := guardedClient(t, g).Get("http://" + closed + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%q, want 502", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "connection refused") || !strings.Contains(string(body), "not from the target") {
+		t.Fatalf("502 body does not name the cause or the proxy: %q", body)
+	}
+	if strings.Contains(string(body), "127.0.0.1") {
+		t.Fatalf("502 body leaks the address: %q", body)
+	}
+}
+
+// A SOCKS5 upstream that accepts the connection and then says nothing cannot
+// hold a tunnel request open past the handshake deadline.
+func TestDialThroughUpstreamSOCKS5HandshakeDeadline(t *testing.T) {
+	prev := upstreamHandshakeTimeout
+	upstreamHandshakeTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { upstreamHandshakeTimeout = prev })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				<-release
+				_ = c.Close()
+			}(c)
+		}
+	}()
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	p := &Proxy{Type: ProxyTypeSOCKS5, Host: host, Port: port}
+
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		conn, _, err := dialThroughUpstream(t.Context(), p, "example.test:443")
+		if conn != nil {
+			_ = conn.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("handshake with a silent SOCKS5 upstream succeeded")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("SOCKS5 handshake still blocked after %v", time.Since(started))
+	}
+}
+
+// Proxy URLs from the environment get net/http's default ports.
+func TestProxyFromURL(t *testing.T) {
+	cases := []struct {
+		raw, wantType, wantPort string
+	}{
+		{"http://proxy.test", "http", "80"},
+		{"https://proxy.test", "https", "443"},
+		{"socks5://proxy.test", "socks5", "1080"},
+		{"socks5h://proxy.test:9050", "socks5", "9050"},
+		{"http://user:pw@proxy.test:3128", "http", "3128"},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := proxyFromURL(u)
+		if err != nil {
+			t.Fatalf("%s: %v", c.raw, err)
+		}
+		if string(p.Type) != c.wantType || p.Port != c.wantPort || p.Host != "proxy.test" {
+			t.Fatalf("%s: got %+v", c.raw, p)
+		}
+	}
+	if p, _ := proxyFromURL(&url.URL{Scheme: "http", Host: "proxy.test", User: url.UserPassword("user", "pw")}); p.Username != "user" || p.Password != "pw" {
+		t.Fatalf("credentials not carried over: %+v", p)
+	}
+	for _, raw := range []string{"ftp://proxy.test", "http://"} {
+		u, _ := url.Parse(raw)
+		if _, err := proxyFromURL(u); err == nil {
+			t.Fatalf("%s: want an error", raw)
+		}
 	}
 }
 
@@ -392,16 +814,17 @@ func rawUpstream(t *testing.T) (addr string, lines, hosts func() []string) {
 	return ln.Addr().String(), snapshot(&gotLines), snapshot(&gotHosts)
 }
 
-// For an intercepting proxy on this machine, plain HTTP is sent with the
-// checked address in the request line and the name kept in the Host header,
-// so the upstream has no name to resolve to this machine.
+// For a proxy on this machine (an intercepting proxy like Caido or Burp),
+// plain HTTP is sent with the checked address in the request line and the
+// name kept in the Host header, so the upstream has no name to resolve to
+// this machine.
 func TestGuardedLocalPinsPlainHTTPForLocalUpstream(t *testing.T) {
 	addr, lines, hosts := rawUpstream(t)
 	up, err := Parse("http://" + addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := StartGuardedLocal(up, func(string) error { return nil }, GuardedOptions{PinPlainHTTP: true})
+	g, err := StartGuardedLocal(up, func(string) error { return nil }, GuardedOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,9 +896,9 @@ func TestGuardedLocalTunnelTeardown(t *testing.T) {
 	waitTunnels := func(want int, why string) {
 		t.Helper()
 		deadline := time.Now().Add(3 * time.Second)
-		for g.tunnels.count() != want {
+		for g.handler.tunnels.count() != want {
 			if time.Now().After(deadline) {
-				t.Fatalf("%s: %d tunnel connections open, want %d", why, g.tunnels.count(), want)
+				t.Fatalf("%s: %d tunnel connections open, want %d", why, g.handler.tunnels.count(), want)
 			}
 			time.Sleep(20 * time.Millisecond)
 		}

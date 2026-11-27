@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -9,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
@@ -85,21 +88,31 @@ func removeHopByHopHeaders(h http.Header) {
 }
 
 type localHandler struct {
-	// upstream is the proxy every request is forwarded through. It is nil
-	// only for a guarded handler that connects to destinations itself.
-	upstream  *Proxy
+	// upstream is the proxy the unguarded required-proxy bridge (LocalURL)
+	// forwards every request through; a guarded handler uses fixed or
+	// routes instead.
+	upstream *Proxy
+	// transport sends plain-HTTP requests: through upstream for the bridge,
+	// directly (with the guard's dial-time check) for a guarded handler.
 	transport *http.Transport
 	// guard, when non-nil, refuses destinations (see StartGuardedLocal).
 	guard GuardFunc
+	// fixed is the upstream a guarded handler forwards everything through,
+	// or nil.
+	fixed *upstreamRoute
+	// proxyFor, for a guarded handler without fixed, picks a proxy per
+	// destination (GuardedOptions.Proxy); routes caches one route per proxy
+	// it picks.
+	proxyFor     func(*http.Request) (*url.URL, error)
+	routesMu     sync.Mutex
+	routes       map[string]*upstreamRoute
+	routesClosed bool
 	// exempt lists the host:port CONNECT destinations a guarded handler
-	// dials directly, without the guard or the upstream.
+	// dials directly, without the guard or an upstream.
 	exempt map[string]bool
 	// tunnels, when non-nil, tracks open CONNECT tunnels so Close can end
 	// them.
 	tunnels *tunnelSet
-	// pinPlainHTTP sends plain-HTTP requests to an HTTP upstream with the
-	// checked address in the request line (see GuardedOptions).
-	pinPlainHTTP bool
 }
 
 func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -115,27 +128,36 @@ func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out.RequestURI = ""
 	out.Header = r.Header.Clone()
 	removeHopByHopHeaders(out.Header)
+	transport := h.transport
+	target := requestHostPort(r.URL)
 	if h.guard != nil {
-		target := requestHostPort(r.URL)
 		if err := h.guard(target); err != nil {
 			refuseDestination(w, target, err)
 			return
 		}
-		if h.upstream != nil {
+		route, err := h.routeFor(strings.ToLower(r.URL.Scheme), target)
+		if err != nil {
+			guardedBadGateway(w, target, err)
+			return
+		}
+		if route != nil {
+			transport = route.transport
+		}
+		if route != nil && route.onThisMachine {
 			// Check every address the name resolves to (a name that does
-			// not resolve is refused) and send the checked address where
-			// the route allows it. Through a SOCKS5 upstream the
-			// connection goes to out.URL.Host while the Host header keeps
-			// the name. An HTTP upstream is sent the name in the request
-			// line (net/http writes out.Host there) unless pinPlainHTTP
-			// puts the checked address there instead.
+			// not resolve is refused) and send the checked address. Through
+			// a SOCKS5 upstream the connection goes to out.URL.Host while
+			// the Host header keeps the name. An HTTP upstream would be sent
+			// the name in the request line (net/http writes out.Host
+			// there), so the checked address is put there instead. Any
+			// other upstream is sent the request unchanged.
 			pinned, err := h.resolveChecked(r.Context(), target)
 			if err != nil {
 				refuseDestination(w, target, err)
 				return
 			}
 			out.URL.Host = pinned
-			if h.pinPlainHTTP && h.upstream.Type != ProxyTypeSOCKS5 {
+			if route.proxy.Type != ProxyTypeSOCKS5 {
 				path := r.URL.EscapedPath()
 				if path == "" {
 					path = "/"
@@ -146,11 +168,15 @@ func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	resp, err := h.transport.RoundTrip(out)
+	resp, err := transport.RoundTrip(out)
 	if err != nil {
 		var refused *refusedDestinationError
 		if errors.As(err, &refused) {
 			refuseDestination(w, refused.address, refused.err)
+			return
+		}
+		if h.guard != nil {
+			guardedBadGateway(w, target, err)
 			return
 		}
 		http.Error(w, "upstream proxy request failed", http.StatusBadGateway)
@@ -197,6 +223,10 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		var refused *refusedDestinationError
 		if errors.As(err, &refused) {
 			refuseDestination(w, refused.address, refused.err)
+			return
+		}
+		if h.guard != nil {
+			guardedBadGateway(w, r.Host, err)
 			return
 		}
 		http.Error(w, "upstream proxy CONNECT failed", http.StatusBadGateway)
@@ -247,8 +277,11 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
-func (h *localHandler) dialThroughUpstream(target string) (net.Conn, io.Reader, error) {
-	p := h.upstream
+// dialThroughUpstream opens a connection to target through proxy p. The TCP
+// connection to p gets 15 seconds and the exchange after it (the CONNECT
+// request and reply, or the SOCKS5 handshake) is bounded by
+// upstreamHandshakeTimeout, so a stalled upstream cannot hold the caller.
+func dialThroughUpstream(ctx context.Context, p *Proxy, target string) (net.Conn, io.Reader, error) {
 	proxyAddress := net.JoinHostPort(p.Host, p.Port)
 	if p.Type == ProxyTypeSOCKS5 {
 		var auth *xproxy.Auth
@@ -259,20 +292,33 @@ func (h *localHandler) dialThroughUpstream(target string) (net.Conn, io.Reader, 
 		if err != nil {
 			return nil, nil, err
 		}
-		conn, err := dialer.Dial("tcp", target)
-		return conn, conn, err
+		cd, ok := dialer.(xproxy.ContextDialer)
+		if !ok {
+			return nil, nil, errors.New("SOCKS5 dialer does not support deadlines")
+		}
+		// The SOCKS5 dialer applies the context's deadline to the
+		// handshake and clears it once the connection is established, so
+		// the TCP connect and the handshake together get
+		// upstreamHandshakeTimeout.
+		ctx, cancel := context.WithTimeout(ctx, upstreamHandshakeTimeout)
+		defer cancel()
+		conn, err := cd.DialContext(ctx, "tcp", target)
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, conn, nil
 	}
 	var conn net.Conn
 	var err error
 	if p.Type == ProxyTypeHTTPS {
 		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 15 * time.Second}, "tcp", proxyAddress, &tls.Config{ServerName: p.Host, MinVersion: tls.VersionTLS12})
 	} else {
-		conn, err = net.DialTimeout("tcp", proxyAddress, 15*time.Second)
+		conn, err = (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", proxyAddress)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(upstreamHandshakeTimeout))
 	var request strings.Builder
 	fmt.Fprintf(&request, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", target, target)
 	if p.Username != "" {
@@ -293,7 +339,7 @@ func (h *localHandler) dialThroughUpstream(target string) (net.Conn, io.Reader, 
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
-		return nil, nil, fmt.Errorf("upstream CONNECT returned HTTP %d", resp.StatusCode)
+		return nil, nil, &upstreamStatusError{code: resp.StatusCode}
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return conn, reader, nil
