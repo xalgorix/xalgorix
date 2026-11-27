@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -84,8 +85,15 @@ func removeHopByHopHeaders(h http.Header) {
 }
 
 type localHandler struct {
+	// upstream is the proxy every request is forwarded through. It is nil
+	// only for a guarded handler that connects to destinations itself.
 	upstream  *Proxy
 	transport *http.Transport
+	// guard, when non-nil, refuses destinations (see StartGuardedLocal).
+	guard GuardFunc
+	// exempt lists the host:port CONNECT destinations a guarded handler
+	// dials directly, without the guard or the upstream.
+	exempt map[string]bool
 }
 
 func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -97,12 +105,23 @@ func (h *localHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "absolute URL required", http.StatusBadRequest)
 		return
 	}
+	if h.guard != nil {
+		if err := h.guard(requestHostPort(r.URL)); err != nil {
+			refuseDestination(w, requestHostPort(r.URL), err)
+			return
+		}
+	}
 	out := r.Clone(r.Context())
 	out.RequestURI = ""
 	out.Header = r.Header.Clone()
 	removeHopByHopHeaders(out.Header)
 	resp, err := h.transport.RoundTrip(out)
 	if err != nil {
+		var refused *refusedDestinationError
+		if errors.As(err, &refused) {
+			refuseDestination(w, refused.address, refused.err)
+			return
+		}
 		http.Error(w, "upstream proxy request failed", http.StatusBadGateway)
 		return
 	}
@@ -122,8 +141,13 @@ func (h *localHandler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CONNECT host:port required", http.StatusBadRequest)
 		return
 	}
-	upstreamConn, upstreamReader, err := h.dialThroughUpstream(r.Host)
+	upstreamConn, upstreamReader, err := h.dialConnect(r.Host)
 	if err != nil {
+		var refused *refusedDestinationError
+		if errors.As(err, &refused) {
+			refuseDestination(w, refused.address, refused.err)
+			return
+		}
 		http.Error(w, "upstream proxy CONNECT failed", http.StatusBadGateway)
 		return
 	}

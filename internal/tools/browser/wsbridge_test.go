@@ -189,6 +189,40 @@ func TestBridge_SendCommand_Timeout(t *testing.T) {
 	}
 }
 
+// A web page cannot take over the extension channel: its WebSocket handshake
+// carries the page's own origin. The extension (chrome-extension://) and
+// non-browser clients (no Origin) are still admitted.
+func TestBridge_RejectsWebPageOrigins(t *testing.T) {
+	resetBridge()
+	b := GetBridge()
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { b.Stop(); resetBridge() }()
+	url := "ws://" + b.Addr() + "/ext"
+
+	for _, origin := range []string{"http://attacker.example", "https://target.example", "null", "file://"} {
+		conn, resp, err := websocket.DefaultDialer.Dial(url, http.Header{"Origin": {origin}})
+		if err == nil {
+			conn.Close()
+			t.Fatalf("origin %q was admitted to the extension bridge", origin)
+		}
+		if resp == nil || resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("origin %q: want 403, got resp=%v err=%v", origin, resp, err)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if b.IsConnected() {
+		t.Fatal("a refused handshake registered as the extension")
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(url, http.Header{"Origin": {"chrome-extension://abcdefghijklmnop"}})
+	if err != nil {
+		t.Fatalf("extension origin refused: %v", err)
+	}
+	conn.Close()
+}
+
 func TestBridge_ExtHello(t *testing.T) {
 	resetBridge()
 	b := GetBridge()

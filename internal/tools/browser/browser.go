@@ -72,13 +72,18 @@ type browserStore struct {
 	browser         *rod.Browser
 	browserLauncher *launcher.Launcher
 	requiredProxy   bool
-	lease           *resources.ToolLease
-	page            *rod.Page
-	pages           map[string]*rod.Page
-	nextTab         int
-	currentTab      string
-	savedSessions   map[string][]*proto.NetworkCookie // keyed by session name
-	sessionDir      string                            // base directory for session files
+	// dialGuard is the scan's local-network guard (see bindDialGuard). When
+	// set, the browser is launched behind egress, which applies it to every
+	// connection Chromium makes.
+	dialGuard     tools.DialGuard
+	egress        *egressproxy.GuardedLocal
+	lease         *resources.ToolLease
+	page          *rod.Page
+	pages         map[string]*rod.Page
+	nextTab       int
+	currentTab    string
+	savedSessions map[string][]*proto.NetworkCookie // keyed by session name
+	sessionDir    string                            // base directory for session files
 }
 
 // getBrowserStoreByID returns the browser store for a specific context ID.
@@ -269,6 +274,7 @@ ACTIONS:
 			{Name: "session_name", Description: "Session name for save_session/load_session (default: 'default'). Use distinct names for multi-account IDOR testing, e.g. 'admin', 'user_a'.", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
+			bindDialGuard(r)
 			return browserActionForRegistry(r, args)
 		},
 	})
@@ -285,6 +291,7 @@ ACTIONS:
 			{Name: "proxy", Description: "Optional browser proxy: 'caido', 'none', or a proxy URL", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
+			bindDialGuard(r)
 			return discoverClientRoutesAtURL(r.GetScanContextID(), args["url"], args["proxy"])
 		},
 	})
@@ -448,6 +455,9 @@ func ensureBrowser(ctxID, proxy string) error {
 		if requiredProxy && !s.requiredProxy {
 			return fmt.Errorf("existing browser was launched without required proxy; close and relaunch it")
 		}
+		if s.dialGuard != nil && s.egress == nil {
+			return fmt.Errorf("existing browser was launched without the local-network guard; close and relaunch it")
+		}
 		return nil
 	}
 	if requiredProxy {
@@ -477,8 +487,11 @@ func ensureBrowser(ctxID, proxy string) error {
 
 	// 3. Start WebSocket bridge for extension communication
 	bridge := GetBridge()
+	bridgeAddr := ""
 	if err := bridge.Start(); err != nil {
 		log.Printf("[browser] WARNING: WebSocket bridge start failed: %v", err)
+	} else if extDir != "" {
+		bridgeAddr = bridge.Addr()
 	}
 
 	// 4. Configure launcher
@@ -501,17 +514,39 @@ func ensureBrowser(ctxID, proxy string) error {
 			Set("disable-extensions-except", extDir)
 	}
 
-	if proxy == "caido" {
-		caidoPort := detectCaidoPort()
-		ln = ln.Set("proxy-server", fmt.Sprintf("http://127.0.0.1:%d", caidoPort)).
-			Set("ignore-certificate-errors", "true")
-	} else if proxy != "" && proxy != "none" {
-		ln = ln.Set("proxy-server", proxy).
-			Set("ignore-certificate-errors", "true")
-		if requiredProxy {
+	upstream := browserUpstreamProxy(proxy)
+	chromiumProxy := upstream
+	var egress *egressproxy.GuardedLocal
+	if s.dialGuard != nil {
+		// Chromium follows redirects, loads subresources and opens
+		// WebSockets without asking us, so checking the URL it is told to
+		// open is not enough: send every connection through a loopback proxy
+		// that applies the scan's local-network guard to each one.
+		egress, err = startEgressGuard(upstream, s.dialGuard, bridgeAddr)
+		if err != nil {
+			return fmt.Errorf("browser egress guard: %w", err)
+		}
+		chromiumProxy = egress.URL()
+	}
+	egressAttached := false
+	defer func() {
+		if egress != nil && !egressAttached {
+			_ = egress.Close()
+		}
+	}()
+	if chromiumProxy != "" {
+		ln = ln.Set("proxy-server", chromiumProxy)
+		if upstream != "" {
+			ln = ln.Set("ignore-certificate-errors", "true")
+		}
+		if requiredProxy || egress != nil {
 			// Chromium otherwise bypasses proxies for loopback destinations.
 			ln = ln.Set("proxy-bypass-list", "<-loopback>")
 		}
+	}
+	if egress != nil {
+		// WebRTC may otherwise send UDP to any address without the proxy.
+		ln = ln.Set("force-webrtc-ip-handling-policy", "disable_non_proxied_udp")
 	}
 
 	// Acquire a Tool_Lease before the first browser context for this scan.
@@ -586,6 +621,8 @@ func ensureBrowser(ctxID, proxy string) error {
 	s.browser = br
 	s.browserLauncher = ln
 	s.requiredProxy = requiredProxy
+	s.egress = egress
+	egressAttached = true
 	if leaseAcquired {
 		// Cache for cleanupBrowserLocked's per-store fallback release
 		// (covers CleanupContext and timeout paths that don't call
@@ -597,7 +634,7 @@ func ensureBrowser(ctxID, proxy string) error {
 		}
 		leaseAttached = true
 	}
-	log.Printf("[browser] Standalone browser launched (extension=%v, lease_acquired=%v)", extDir != "", leaseAcquired)
+	log.Printf("[browser] Standalone browser launched (extension=%v, lease_acquired=%v, egress_guard=%v)", extDir != "", leaseAcquired, egress != nil)
 	return nil
 }
 
@@ -1771,6 +1808,10 @@ func resetBrowserConnectionLocked(ctxID string, s *browserStore) {
 	}
 	s.browserLauncher = nil
 	s.requiredProxy = false
+	if s.egress != nil {
+		_ = s.egress.Close()
+		s.egress = nil
+	}
 	if s.lease != nil {
 		s.lease.Release()
 		s.lease = nil
