@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,7 +75,18 @@ func GetBridge() *WSBridge {
 // ── Server Lifecycle ──────────────────────────────────────────────────
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // Allow extension origin
+	CheckOrigin: checkBridgeOrigin,
+}
+
+// checkBridgeOrigin admits the embedded extension (a chrome-extension://
+// origin) and non-browser clients, which send no Origin. A web page always
+// sends its own origin on a WebSocket handshake and cannot change it, so a
+// page — one the scan's browser loaded from a target, or one open in any
+// other browser on this machine — cannot take over the extension channel and
+// receive the commands (including typed text) meant for the extension.
+func checkBridgeOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	return origin == "" || strings.HasPrefix(strings.ToLower(origin), "chrome-extension://")
 }
 
 // Start starts the WebSocket server if not already running.
