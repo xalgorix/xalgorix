@@ -273,6 +273,43 @@ func CapDirbusterRuntime(command string) string {
 	})
 }
 
+// httpRequestConnectTimeoutSeconds bounds only the connection phase (DNS + TCP
+// + TLS handshake) of an ad-hoc curl request. A dead, filtered, or unreachable
+// host otherwise hangs on connect for the OS default (often 1–2 minutes), and a
+// serial loop over many such hosts stalls a scan for hours. It does NOT bound
+// the response/transfer phase, so a slow-but-responding endpoint — including a
+// time-based injection payload that deliberately delays the response —
+// completes normally. Coverage is unchanged; only dead-host hangs are cut.
+const httpRequestConnectTimeoutSeconds = 10
+
+// httpRequestMaxTimeSeconds is a loose backstop against a host that accepts the
+// connection and then never responds (tarpit / slowloris). It sits far above
+// any realistic response time, long time-based injection payloads included, so
+// it never truncates a legitimate request.
+const httpRequestMaxTimeSeconds = 180
+
+// CapHTTPRequestTimeout injects a connection timeout (and a loose overall
+// backstop) into bare curl requests that set neither, so a single request to a
+// dead host fails fast instead of hanging the whole command. A timeout the
+// command already sets — long or short — is preserved untouched. Only curl is
+// rewritten; tool-specific request timeouts (ffuf -maxtime, nmap --host-timeout,
+// …) are handled by their own caps. computeTimeout still provides an
+// independent process-tree deadline for the command as a whole.
+func CapHTTPRequestTimeout(command string) string {
+	return rewriteShellSegments(command, func(segment string) string {
+		if !hasToolCommand(segment, "curl") {
+			return segment
+		}
+		if !hasCommandFlag(segment, "--connect-timeout") {
+			segment = appendCommandArg(segment, "--connect-timeout "+strconv.Itoa(httpRequestConnectTimeoutSeconds))
+		}
+		if !hasCommandFlag(segment, "--max-time") && !hasCommandFlag(segment, "-m") {
+			segment = appendCommandArg(segment, "--max-time "+strconv.Itoa(httpRequestMaxTimeSeconds))
+		}
+		return segment
+	})
+}
+
 // hasCommandFlag reports whether a flag (long or short) is already present in a
 // command segment, matched as a whole token so -maxtime does not match e.g.
 // -maxtime-job and --time-limit does not partial-match a longer flag.
@@ -1568,6 +1605,11 @@ func runShellInternal(contextID string, command string) (string, int) {
 		dirbusterNotice = fmt.Sprintf("[DISCOVERY GUARD] Bounded content discovery to %ds and disabled ffuf interactive mode.\n", dirbusterRuntimeCapSeconds)
 		cleanCmd = boundedCmd
 	}
+	// Bound the connection phase of bare curl requests so a dead/unreachable
+	// host fails fast instead of hanging the command (and any serial loop it is
+	// in). Coverage-neutral: the request itself is unchanged and slow-but-real
+	// responses are untouched. Applied silently — it is a transparent default.
+	cleanCmd = CapHTTPRequestTimeout(cleanCmd)
 	cleanCmd = InjectScanHeadersIntoCommand(cleanCmd)
 
 	cfg := config.Get()
