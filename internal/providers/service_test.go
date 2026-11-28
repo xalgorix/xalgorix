@@ -138,6 +138,22 @@ func TestBuiltin_RuncrateConfiguration(t *testing.T) {
 	}
 }
 
+func TestBuiltin_LLMTRConfiguration(t *testing.T) {
+	entry, ok := LookupBuiltin("llmtr")
+	if !ok {
+		t.Fatal("LLMTR provider is missing from the built-in catalog")
+	}
+	if entry.BaseURL != "https://llmtr.com/v1" {
+		t.Errorf("LLMTR BaseURL = %q, want https://llmtr.com/v1", entry.BaseURL)
+	}
+	if entry.HeaderStyle != "openai" {
+		t.Errorf("LLMTR HeaderStyle = %q, want openai", entry.HeaderStyle)
+	}
+	if len(entry.AuthMethods) != 1 || entry.AuthMethods[0] != "api_key" {
+		t.Errorf("LLMTR AuthMethods = %v, want [api_key]", entry.AuthMethods)
+	}
+}
+
 func TestBuiltin_ZAIConfigurations(t *testing.T) {
 	tests := []struct {
 		id      string
