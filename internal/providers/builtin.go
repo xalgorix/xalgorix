@@ -205,6 +205,14 @@ var builtinList = []Entry{
 		Notes:       "Default base URL points at the standard LiteLLM proxy (http://localhost:4000). Override via API Base if your proxy runs on a different host or port.",
 	},
 	{
+		ID:          "llmtr",
+		DisplayName: "LLMTR",
+		BaseURL:     "https://llmtr.com/v1",
+		HeaderStyle: "openai",
+		AuthMethods: []string{"api_key"},
+		Notes:       "Prepaid OpenAI-compatible gateway. Create a key at https://llmtr.com/dashboard/keys. Model IDs are vendor-prefixed (for example qwen/qwen3.8-flash); choose Custom model for any ID returned by GET /v1/models.",
+	},
+	{
 		ID:          "lmstudio",
 		DisplayName: "LM Studio",
 		BaseURL:     "http://localhost:1234/v1",
