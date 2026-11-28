@@ -212,6 +212,7 @@ func (a *Agent) RestoreExecutionCheckpoint() (bool, error) {
 	if saved.Terminal == nil {
 		state.CompletionStatus = ""
 		state.CompletionStopReason = ""
+		state.FinishGateStallReleased = false
 	}
 	state.TargetUnresponsiveSince = time.Time{}
 	state.ConsecutiveTargetErrors = 0

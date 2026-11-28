@@ -2714,7 +2714,7 @@ func (a *Agent) Run(targets []string, instruction string) {
 			if tc.Name == "finish" || (result.Metadata != nil && result.Metadata["finished"] == true) {
 				finishResult := a.hooks.Fire(OnFinishAttempt, a.state, nil)
 				if finishResult.Block {
-					a.state.FinishRecoveryPending = true
+					noteFinishRejected(a.state)
 					rejectMsg := fmt.Sprintf("⚠️ FINISH REJECTED — %s\n\nDO NOT call finish again until you have done more testing.\nContinue with the NEXT PHASE of testing NOW.", finishResult.BlockReason)
 					a.emit(Event{Type: "tool_result", ToolName: "finish", ToolResult: tools.Result{Output: rejectMsg}, TotalTokens: tokenCount()})
 					a.appendToolOutcome(tc, rejectMsg)

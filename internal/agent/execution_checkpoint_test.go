@@ -223,3 +223,24 @@ func TestResumeStartsWithAFreshProviderWaitBudget(t *testing.T) {
 			b.state.CumulativeRateLimitWait, b.state.ConsecutiveRateLimits)
 	}
 }
+
+// A non-terminal checkpoint is reassessed on resume: an earlier finish
+// attempt's stall release must not label the resumed run incomplete.
+func TestResumeClearsStallReleaseFromNonTerminalCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	sctx := scanctx.New("stall-release-resume", dir)
+	t.Cleanup(sctx.Close)
+	state := NewScanState()
+	state.FinishGateStallReleased = true
+	a := &Agent{scanCtx: sctx, state: state, scanBudget: newScanBudget()}
+	if err := a.saveExecutionCheckpoint(); err != nil {
+		t.Fatal(err)
+	}
+	b := &Agent{scanCtx: sctx, scanBudget: newScanBudget(), cfg: &config.Config{}}
+	if restored, err := b.RestoreExecutionCheckpoint(); err != nil || !restored {
+		t.Fatalf("restore: %t %v", restored, err)
+	}
+	if b.state.FinishGateStallReleased {
+		t.Fatal("resume inherited a stall release from a non-terminal checkpoint")
+	}
+}
