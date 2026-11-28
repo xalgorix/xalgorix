@@ -124,6 +124,10 @@ func scanCompletionAssessment(state *ScanState) (string, []string) {
 	}
 	if state.FinishAttempts > maxRej {
 		reasons = append(reasons, StopReasonFinishGateExhausted+": the scan reached its finish limit before every check was confirmed")
+	} else if state.FinishGateStallReleased {
+		// The early stall release is the same outcome reached sooner: the gate
+		// stopped waiting for checks it still wanted done.
+		reasons = append(reasons, StopReasonFinishGateExhausted+": the scan stopped making new progress before every check was confirmed")
 	}
 
 	// Principled finish that closed plan work WITHOUT executing it and has no

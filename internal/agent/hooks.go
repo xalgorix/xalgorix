@@ -132,14 +132,20 @@ type ScanState struct {
 	// rejected finish in token telemetry.
 	FinishRecoveryPending bool
 	MaxFinishRejections   int
-	// FinishStallStreak counts consecutive finish attempts that produced no new
-	// coverage (see coverageProgressSignature); LastFinishCoverageSig is the
-	// signature captured at the previous attempt. Together they let the gate
-	// release a genuinely unproductive re-loop early — the finish_gate_exhausted
-	// tail — without reducing coverage: any lap that advances coverage resets the
+	// FinishStallStreak counts consecutive finish attempts whose coverage
+	// signature did not change (see coverageProgressSignature);
+	// LastFinishCoverageSig is the signature captured at the previous attempt.
+	// Together they let the gate release a genuinely unproductive re-loop early
+	// — the finish_gate_exhausted tail: any lap that changes coverage resets the
 	// streak, so a scan still making progress is never cut short.
-	FinishStallStreak        int
-	LastFinishCoverageSig    int
+	FinishStallStreak     int
+	LastFinishCoverageSig int
+	// FinishGateStallReleased records that the most recent finish attempt went
+	// through only because of that stall release, while the gate still had
+	// checks it wanted done. Like the rejection ceiling, that is the gate giving
+	// up rather than the finish contract being met, so the completion assessment
+	// labels the scan incomplete (finish_gate_exhausted).
+	FinishGateStallReleased  bool
 	MinIterations            int
 	OASTProbesExecuted       int
 	PendingFailedReportCalls int
@@ -2753,12 +2759,13 @@ func hookOASTVerificationWorkflow(state *ScanState, args map[string]string) Hook
 // complete no new work, well before the MaxFinishRejections deadlock ceiling.
 const finishStallReleaseStreak = 3
 
-// coverageProgressSignature is a monotonic count of the scan's coverage: tested
+// coverageProgressSignature is a count of the scan's coverage: tested
 // endpoints, injection / access-control / dir-busting coverage, tested vuln
-// classes, reported findings, settled plan tasks, and settled ledger hypotheses
-// all raise it. Every component only ever increases within a scan, so a value
-// strictly larger than a previous finish attempt's means the agent covered
-// genuinely new ground since then.
+// classes, reported findings, settled plan tasks, and settled ledger
+// hypotheses. New work raises it, but it is not monotonic: a coverage epoch
+// reopens completed per-endpoint tasks, build_plan replaces the plan, and a
+// settled hypothesis can be claimed again. So progress is any change since the
+// previous finish attempt, not only a rise above an earlier high-water mark.
 func coverageProgressSignature(state *ScanState) int {
 	if state == nil {
 		return 0
@@ -2799,12 +2806,42 @@ func finishFloorsMet(state *ScanState) bool {
 	return state.ReconDone && state.Iteration >= 3 && state.TerminalCalls >= 5
 }
 
+// recordFinishCoverageProgress updates the stall streak for this finish
+// attempt and reports whether it has reached finishStallReleaseStreak. Any
+// change to the coverage signature resets the streak; only an unchanged
+// signature counts as a stalled lap.
+func recordFinishCoverageProgress(state *ScanState) bool {
+	if sig := coverageProgressSignature(state); sig != state.LastFinishCoverageSig {
+		state.LastFinishCoverageSig = sig
+		state.FinishStallStreak = 0
+		return false
+	}
+	state.FinishStallStreak++
+	return state.FinishStallStreak >= finishStallReleaseStreak
+}
+
+// noteFinishRejected records that the OnFinishAttempt hooks rejected a finish.
+// The next charged request is labeled finish recovery, and a stall release the
+// gatekeeper granted on this attempt no longer applies: another finish hook
+// blocked the finish, so a later end of the scan that runs no finish hook (the
+// liveness auto-finalize) must not read it.
+func noteFinishRejected(state *ScanState) {
+	if state == nil {
+		return
+	}
+	state.FinishRecoveryPending = true
+	state.FinishGateStallReleased = false
+}
+
 // ── hookFinishGatekeeper ─────────────────────────────────────────────────────
 // Decides if the agent has done enough work. Uses proportional coverage
 // tracking: the gate checks how many UNIQUE endpoints were tested per
 // vuln class, not just "did you run sqlmap once?".
 func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 	state.FinishAttempts++
+	// Each attempt decides afresh whether a stall release carried it: a release
+	// that a later finish hook blocked must not label a later, legitimate finish.
+	state.FinishGateStallReleased = false
 
 	// A malformed report must be recoverable, but it must not create a second
 	// infinite loop in which the model calls finish forever and waits for a
@@ -2838,30 +2875,38 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 		return HookResult{}
 	}
 
+	// A verifier may have completed the final endpoint/class pair in the same
+	// iteration as finish. Reconcile here as well as at iteration start so the
+	// gate (and the stall check below) evaluates current evidence rather than a
+	// one-turn-old plan snapshot.
+	reconcilePlan(state)
+
 	// Unproductive re-loop short-circuit. Once the basic floors are met, if
-	// several consecutive finish attempts have each produced no new coverage,
+	// several consecutive finish attempts have each left coverage unchanged,
 	// the agent is spinning: it keeps asking to finish and the gate keeps
 	// sending it back, but no new endpoint, class, plan task, finding, or
 	// settled hypothesis results. Those remaining laps are the
 	// finish_gate_exhausted tail — hours of work that complete nothing — so the
-	// finish is released here. A lap that advances coverage resets the streak
-	// (coverageProgressSignature only ever rises), so a scan still covering new
-	// ground is never cut short and full coverage is preserved.
-	if sig := coverageProgressSignature(state); sig > state.LastFinishCoverageSig {
-		state.LastFinishCoverageSig = sig
-		state.FinishStallStreak = 0
-	} else {
-		state.FinishStallStreak++
-		if state.FinishStallStreak >= finishStallReleaseStreak && finishFloorsMet(state) {
-			return HookResult{}
-		}
+	// finish is released here. A lap that changes coverage resets the streak, so
+	// a scan still covering new ground is never cut short.
+	//
+	// The release only matters when the gate would still block, and then it is
+	// the gate giving up, exactly like the rejection ceiling: it is recorded so
+	// the completion assessment labels the scan incomplete rather than letting
+	// the early release read as a satisfied finish contract.
+	stalled := recordFinishCoverageProgress(state)
+	result := finishGatekeeperChecks(state, maxRejections)
+	if result.Block && stalled && finishFloorsMet(state) {
+		state.FinishGateStallReleased = true
+		return HookResult{}
 	}
+	return result
+}
 
-	// A verifier may have completed the final endpoint/class pair in the same
-	// iteration as finish. Reconcile here as well as at iteration start so the
-	// gate evaluates current evidence rather than a one-turn-old plan snapshot.
-	reconcilePlan(state)
-
+// finishGatekeeperChecks is the finish contract hookFinishGatekeeper enforces
+// below the rejection ceiling: it returns a blocking result naming the work
+// still owed, or an empty result when the finish may go through.
+func finishGatekeeperChecks(state *ScanState, maxRejections int) HookResult {
 	// Discovery mode (Phase 1 enumeration): allow finish after minimum work
 	if state.DiscoveryMode {
 		if state.TerminalCalls < 3 {
