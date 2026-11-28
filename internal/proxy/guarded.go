@@ -462,7 +462,7 @@ const notFromTarget = " This response comes from the browser's local egress prox
 // rule matched or what a name resolved to.
 func refuseDestination(w http.ResponseWriter, address string, err error) {
 	log.Printf("[proxy] refused a guarded connection to %q: %v", address, err)
-	msg := "Forbidden: the local-network guard refused this destination because it is the machine running the scan or its dashboard. Nothing was sent to it."
+	msg := "Forbidden: the local-network guard refused this destination because it is the machine running the scan, its dashboard, or an address that reaches only that machine's own environment (such as its cloud metadata service). Nothing was sent to it."
 	if errors.Is(err, errUnresolved) {
 		msg = "Forbidden: the name does not resolve on the machine running the scan, so the local-network guard could not check it. Nothing was sent."
 	}

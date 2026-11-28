@@ -532,9 +532,59 @@ func (a *Agent) checkHTTPHop(rawURL string) error {
 // a loopback address second (DNS rebinding) passes them; this check sees the
 // address actually dialed and applies the same local-machine and listener
 // rule, including the provisioned-port and local-target opt-ins.
+//
+// It also refuses the addresses that only reach the scanning machine's own
+// environment: the cloud metadata service (scopeguard.IsInstanceService,
+// always) and other link-local addresses (scopeguard.IsLinkLocal, see
+// linkLocalTargetAllowed). The
+// scan browser routes every connection a page makes through this check, and
+// a scanned page's scripts choose their own destinations, so without it a
+// target could have the browser read the scanner's instance credentials.
+// SSRF payloads that name these addresses are unaffected: they are sent to
+// the target, not dialed.
 func (a *Agent) checkDialAddr(address string) error {
 	if scopeguard.IsLocalOrListener(a.localGuard, address) {
 		return fmt.Errorf("it is the operator's machine or the dashboard's listener")
+	}
+	if scopeguard.IsInstanceService(address) {
+		return fmt.Errorf("it is a cloud metadata address, which reaches only the scanning machine's own environment")
+	}
+	if scopeguard.IsLinkLocal(address) && !a.linkLocalTargetAllowed(address) {
+		return fmt.Errorf("it is a link-local address, which reaches only the scanning machine's own link; to test a device there, name its address as a scan target")
+	}
+	return nil
+}
+
+// linkLocalTargetAllowed reports whether the dial guard lets a connection to
+// the link-local address through. The self-hosted local-targets opt-in
+// (XALGORIX_ALLOW_LOCAL_TARGETS), which already lets a scan reach the
+// operator's own machine, allows them all. Otherwise only an address a scan
+// target names exactly is allowed, so a device on the operator's link can
+// still be scanned. A target name that resolves to one does not count, since
+// the target controls its DNS. Cloud metadata addresses are refused before
+// this is consulted, opt-in or not.
+func (a *Agent) linkLocalTargetAllowed(address string) bool {
+	if a.localGuard.AllowLocalTargets {
+		return true
+	}
+	for _, t := range a.operatorTargets() {
+		if host, _ := targetHostPort(t); host != "" && scopeguard.SameAddress(host, address) {
+			return true
+		}
+	}
+	return false
+}
+
+// operatorTargets returns the targets the operator gave the scan: those the
+// root agent recorded on the scan context, else the root agent's own. A
+// delegated agent's targets come from the model's spawn_agent call, so they
+// never widen what the dial guard allows.
+func (a *Agent) operatorTargets() []string {
+	if a.scanCtx != nil {
+		return a.scanCtx.Targets()
+	}
+	if a.delegatedAgentID == "" {
+		return a.targets
 	}
 	return nil
 }
